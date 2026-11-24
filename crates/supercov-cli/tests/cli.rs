@@ -1143,23 +1143,23 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "tests", "affected"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:695"), "{unlisted}");
     // So is a file's source asked of a store that cannot be listed.
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "source", "src/cart.js"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:695"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
             &["runs"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:695")],
         )
         .succeeds();
     assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
@@ -1385,7 +1385,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
     let second = project.measure(&["--test-name-pattern=shipping"]);
     for (fault, said) in [
         (
-            "fs.read_dir#run_store.rs:681",
+            "fs.read_dir#run_store.rs:695",
             "Cannot read local coverage runs",
         ),
         (
@@ -11581,11 +11581,11 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     // a store that cannot be listed cannot answer.
     let unlisted = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695@2")],
     );
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
-    assert!(fired_at(&said, "run_store.rs:681"), "{said}");
+    assert!(fired_at(&said, "run_store.rs:695"), "{said}");
     // A run it was merged from that is no longer stored cannot answer.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
     let gone = project
@@ -14070,7 +14070,7 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // change cannot be put on other runners: it reaches every test.
     for fault in [
         "fs.open#evidence_archive.rs:697=50",
-        "fs.open#source_manifest.rs:365@2",
+        "fs.open#source_manifest.rs:381@2",
     ] {
         let unjudged = project
             .supercov_with(
@@ -14740,7 +14740,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "files", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
         )
         .exits(2);
     assert!(
@@ -14873,7 +14873,7 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
     // Nor whose published run cannot be found again to read.
     for (fault, place) in [
         ("coverage-index@2", "coverage-index"),
-        ("fs.symlink_metadata#run_store.rs:627", "run_store.rs:627"),
+        ("fs.symlink_metadata#run_store.rs:641", "run_store.rs:641"),
     ] {
         let project = Project::cart("index-failed-run");
         project.edit("test/cart.test.js", "20);", "21);");
@@ -17176,7 +17176,7 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@3",
         "fs.rename@4",
         // The store of runs listed, and the lock released after importing.
-        "fs.read_dir#run_store.rs:681",
+        "fs.read_dir#run_store.rs:695",
         "copy-release",
     ] {
         let project = Project::cart("import-steps");
@@ -17673,7 +17673,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1369",
+        "fs.create_dir_all#lifecycle.rs:1434",
         "fs.create_dir_all#javascript_run.rs:764",
         "fs.write#javascript_run.rs:1116",
         "fs.canonicalize#process_supervision.rs:1889",
@@ -17681,11 +17681,11 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:1398",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1676",
-        "fs.create_dir_all#javascript_run.rs:1678",
-        "fs.create_dir_all#lifecycle.rs:1060",
-        "fs.create_dir_all#javascript_run.rs:1778",
+        "fs.create_dir_all#javascript_run.rs:1677",
+        "fs.create_dir_all#javascript_run.rs:1679",
+        "fs.create_dir_all#lifecycle.rs:1038",
         "fs.create_dir_all#javascript_run.rs:1780",
+        "fs.create_dir_all#javascript_run.rs:1782",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17930,7 +17930,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // that cannot be read.
         "fs.open#query_index.rs:354@2,fs.open#query_index.rs:354@3,fs.read_from#evidence_archive.rs:677",
         // The runs listed again for the details.
-        "fs.read_dir#run_store.rs:681@2",
+        "fs.read_dir#run_store.rs:695@2",
     ] {
         let refused = project
             .supercov_with(
@@ -17991,7 +17991,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1356,fs.read_from#evidence_archive.rs:677",
+            "fs.read#run_store.rs:1370,fs.read_from#evidence_archive.rs:677",
         )],
     );
     assert!(
@@ -18073,10 +18073,10 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:710", "python_run.rs:710"),
         ("fs.create_dir_all#python_run.rs:711", "python_run.rs:711"),
-        ("fs.create_dir_all#ruby_run.rs:514", "ruby_run.rs:514"),
+        ("fs.create_dir_all#python_run.rs:712", "python_run.rs:712"),
         ("fs.create_dir_all#ruby_run.rs:515", "ruby_run.rs:515"),
+        ("fs.create_dir_all#ruby_run.rs:516", "ruby_run.rs:516"),
         ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
         ("fs.create_dir_all#go_run.rs:374", "go_run.rs:374"),
         ("fs.create_dir_all#go_run.rs:413", "go_run.rs:413"),
@@ -18113,8 +18113,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1232", "go_run.rs:1232"),
-        ("fs.create_dir_all#go_run.rs:1242", "go_run.rs:1242"),
+        ("fs.write#go_run.rs:1233", "go_run.rs:1233"),
+        ("fs.create_dir_all#go_run.rs:1243", "go_run.rs:1243"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18148,11 +18148,11 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2489", "jvm_run.rs:2489"),
-        ("fs.create_dir_all#jvm_run.rs:2505", "jvm_run.rs:2505"),
-        ("fs.create_dir_all#jvm_run.rs:2515", "jvm_run.rs:2515"),
-        ("fs.write#jvm_run.rs:2489", "jvm_run.rs:2489"),
-        ("fs.write#jvm_run.rs:2505", "jvm_run.rs:2505"),
+        ("fs.create_dir_all#jvm_run.rs:2490", "jvm_run.rs:2490"),
+        ("fs.create_dir_all#jvm_run.rs:2506", "jvm_run.rs:2506"),
+        ("fs.create_dir_all#jvm_run.rs:2516", "jvm_run.rs:2516"),
+        ("fs.write#jvm_run.rs:2490", "jvm_run.rs:2490"),
+        ("fs.write#jvm_run.rs:2506", "jvm_run.rs:2506"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18263,8 +18263,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:717@1",
-            "python_run.rs:717",
+            "fs.write#python_run.rs:718@1",
+            "python_run.rs:718",
             "plan.json",
         ),
     ] {
@@ -18308,7 +18308,7 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
             "ruby_run.rs:93",
             "supercov_runtime.rb",
         ),
-        ("fs.write#ruby_run.rs:519@1", "ruby_run.rs:519", "plan.rb"),
+        ("fs.write#ruby_run.rs:520@1", "ruby_run.rs:520", "plan.rb"),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -20308,10 +20308,10 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     assert!(missing.contains("coverage run not found"), "{missing}");
     let unlisted = project.supercov_with(
         &report,
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
     );
     assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
-    assert!(fired_at(&unlisted.stderr(), "run_store.rs:681"));
+    assert!(fired_at(&unlisted.stderr(), "run_store.rs:695"));
     snapshot(&project, "q_0000000000000001", serde_json::json!([]));
     snapshot(
         &project,
@@ -20339,21 +20339,21 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#source_manifest.rs:786",
+            "fs.canonicalize#source_manifest.rs:816",
         )],
     );
     assert_ne!(unresolved.code(), 0, "{}", unresolved.stderr());
-    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:786"));
+    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:816"));
     let unread = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#source_manifest.rs:797",
+            "fs.read_to_string#source_manifest.rs:827",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert!(!said.contains("panicked"), "{said}");
-    assert!(fired_at(&said, "source_manifest.rs:797"), "{said}");
+    assert!(fired_at(&said, "source_manifest.rs:827"), "{said}");
 }
 
 /// A JavaScript run beside a wasm library prepares the library in the copy:
@@ -20419,7 +20419,7 @@ fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.create_dir_all#source_manifest.rs:449",
+            "fs.create_dir_all#source_manifest.rs:465",
         )],
     );
     assert_eq!(ran.code(), 1, "{}", ran.stderr());
@@ -20514,11 +20514,11 @@ fn a_stale_query_whose_record_cannot_be_read_still_answers() {
     project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
     let ran = project.supercov_with(
         &["runs", "latest", "files", "--json"],
-        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:365")],
+        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:381")],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (source_manifest.rs:365 open)"),
+            .contains("test fault at fs (source_manifest.rs:381 open)"),
         "{}",
         ran.stderr()
     );
@@ -20537,11 +20537,11 @@ fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
     project.supercov(&["merge", &first, &second]).succeeds();
     let ran = project.supercov_with(
         &["runs", "latest", "files"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695@2")],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (run_store.rs:681 read_dir)"),
+            .contains("test fault at fs (run_store.rs:695 read_dir)"),
         "{}",
         ran.stderr()
     );
@@ -20639,7 +20639,7 @@ fn a_line_read_from_the_working_tree_is_stale_only_by_the_runs_record() {
     };
     assert_eq!(origin(""), "working-tree-stale");
     assert_eq!(
-        origin("fs.open#source_manifest.rs:365=10"),
+        origin("fs.open#source_manifest.rs:381=10"),
         "working-tree-current"
     );
 }
@@ -21767,9 +21767,9 @@ fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
 #[test]
 fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
     for (fault, emptied) in [
-        ("fs.remove_file:2#lifecycle.rs:1696", true),
-        ("fs.read_dir:2#lifecycle.rs:1665", true),
-        ("fs.remove_file#lifecycle.rs:1696", false),
+        ("fs.remove_file:2#lifecycle.rs:1762", true),
+        ("fs.read_dir:2#lifecycle.rs:1731", true),
+        ("fs.remove_file#lifecycle.rs:1762", false),
     ] {
         let project = Project::cart("sweep");
         assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
@@ -22322,17 +22322,63 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         "{again}"
     );
     assert_eq!(again["summary"]["ran"], 0, "{again}");
+
+    // A shard of this checkout continues the newest run of it that passed
+    // with the command given: not a merge, not a run whose command failed,
+    // not one of another command, not one measured before the edit.
+    let latest_measured = again["run"].as_str().unwrap().to_owned();
+    let run_json = |run: &str| format!(".supercov/runs/{run}/run.json");
+    let mut failed =
+        serde_json::from_str::<serde_json::Value>(&project.read(&run_json(&first))).unwrap();
+    failed["testExitCode"] = serde_json::json!(1);
+    project.write(&run_json(&first), &failed.to_string());
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run", "--silent"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let shard = |command: &[&str]| {
+        let mut args = vec!["mutants", "--shard", "1/1", "--json", "--"];
+        args.extend(command);
+        let ran = project.supercov(&args);
+        (ran.json(), ran.stderr())
+    };
+    let (continued, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains(&format!(
+            "[supercov] not measuring: the checkout is unchanged since run {latest_measured}, so this shard saves its verdicts into run {}, made from it",
+            continued["run"].as_str().unwrap()
+        )),
+        "{said}"
+    );
+    // None of this command: measured.
+    let (_, said) = shard(&["npx", "vitest", "run", "--reporter=dot"]);
+    assert!(
+        said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values and whose command passed can be made into one): npx vitest run --reporter=dot"),
+        "{said}"
+    );
+    // After an edit: measured.
+    project.edit("src/tax.js", "sum / 5", "sum * 0.2");
+    let (_, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains("measuring first (the checkout changed since the latest run)"),
+        "{said}"
+    );
 }
 
-/// A split strong pass continued in a second round on the same commit: each
-/// job restores the first round's runs and runs `supercov mutants --shard
-/// k/n -- <command>`. Each job measures a run of its own, keeping the first
-/// round's verdicts, rather than saving into the latest restored run, a copy
-/// of which every job held: those copies shared one id and could not be
-/// merged. The last job's `supercov merge` takes the second round's runs,
+/// A split strong pass continued round after round on the same commit:
+/// each job restores the earlier round's runs and runs `supercov mutants
+/// --shard k/n -- <command>`. Each job saves into a run of its own, rather
+/// than into the latest restored run, a copy of which every job held: those
+/// copies shared one id and could not be merged. On the unchanged checkout
+/// that run is made from a restored one, with no measuring, and keeps every
+/// verdict the restored runs hold, though the first round's two
+/// measurements recorded different evidence (a test whose path depends on
+/// when it runs). The last job's `supercov merge` takes the round's runs,
 /// keeps the union of their verdicts, a kill over a survival where they
-/// differ, and says how many came from each. A run named twice is refused,
-/// saying why and what to do.
+/// differ, and says how many came from each, and a third round runs
+/// nothing. A run named twice is refused, saying why and what to do.
 #[cfg(unix)]
 #[test]
 fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
@@ -22345,28 +22391,58 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
         "test/tax.test.js",
         "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
     );
+    // A test whose path depends on when it runs: here, on a variable one
+    // job's machine sets.
+    project.write(
+        "test/refund.test.js",
+        "import { expect, it } from \"vitest\";\nimport { refund } from \"../src/cart.js\";\nit(\"refunds\", () => {\n  expect(refund(50)).toBe(50);\n  if (process.env.LATE) expect(refund(200)).toBe(180);\n});\n",
+    );
     project.commit("tax");
     let runs = project.root.join(".supercov/runs");
     let away = project.root.join(".supercov/elsewhere");
     // A job on a machine of its own: the store holds what it restored and
     // nothing another job of its round made.
-    let job = |shard: &str, more: &[&str], hidden: Option<&str>| {
-        if let Some(hidden) = hidden {
-            std::fs::rename(runs.join(hidden), &away).unwrap();
+    let job_at = |shard: &str, more: &[&str], hidden: &[&str], late: bool| {
+        for (n, hidden) in hidden.iter().enumerate() {
+            std::fs::create_dir_all(&away).unwrap();
+            std::fs::rename(runs.join(hidden), away.join(n.to_string())).unwrap();
         }
         let mut args = vec!["mutants", "--shard", shard, "--json"];
         args.extend(more);
         args.extend(["--", "npx", "vitest", "run"]);
-        let ran = project.supercov(&args);
-        if let Some(hidden) = hidden {
-            std::fs::rename(&away, runs.join(hidden)).unwrap();
+        let ran = project.supercov_with(&args, &[("LATE", if late { "1" } else { "" })]);
+        for (n, hidden) in hidden.iter().enumerate() {
+            std::fs::rename(away.join(n.to_string()), runs.join(hidden)).unwrap();
         }
         (ran.json(), ran.stderr())
     };
-    // The first round leaves tax.js's mutants for the next.
+    let job = |shard: &str, more: &[&str], hidden: Option<&str>| {
+        job_at(shard, more, hidden.as_slice(), false)
+    };
+    // The verdicts a pass reached that a run holds, by mutant id: not
+    // those the run's plan decides, with no test run.
+    let reached = |run: &str| {
+        let saved = serde_json::from_str::<serde_json::Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, verdict)| {
+                ["killed", "survived", "timeout"].contains(&verdict["status"].as_str().unwrap())
+                    && verdict["tests"] != 0
+            })
+            .map(|(id, verdict)| (id.clone(), verdict.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // The first round leaves tax.js's mutants for the next. Its jobs each
+    // measure, at different times: the second job's refund test takes the
+    // path the first's did not.
     let (first_a, _) = job("1/2", &["--file", "src/cart.js"], None);
     let a1 = first_a["run"].as_str().unwrap().to_owned();
-    let (first_b, _) = job("2/2", &["--file", "src/cart.js"], Some(a1.as_str()));
+    let (first_b, _) = job_at("2/2", &["--file", "src/cart.js"], &[a1.as_str()], true);
     let b1 = first_b["run"].as_str().unwrap().to_owned();
     assert_ne!(a1, b1);
     let decided = |reply: &serde_json::Value| reply["summary"]["ran"].as_u64().unwrap();
@@ -22374,6 +22450,26 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
         decided(&first_a) > 0 && decided(&first_b) > 0,
         "{first_a}\n{first_b}"
     );
+    let evidence = |run: &str| std::fs::read(runs.join(run).join("test-executions.json")).unwrap();
+    // The two measurements differ: refund's discount ran in the second
+    // alone.
+    let discount = "src/cart.js:13:22-13:31:ArithmeticOperator:/";
+    let reached_in = |run: &str| {
+        project
+            .supercov(&["runs", run, "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == discount)
+            .unwrap_or_else(|| panic!("no {discount} in {run}"))["weak"]["reach"]
+            .clone()
+    };
+    assert_ne!(reached_in(&a1), reached_in(&b1));
+    // Every verdict the first round reached, the newer run's where both
+    // have one.
+    let mut first = reached(&a1);
+    first.extend(reached(&b1));
 
     // A plan writes nothing, and reads the latest run as it is.
     let plan = project.supercov(&[
@@ -22388,14 +22484,25 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
     assert_eq!(project.latest(), b1);
 
     // The second round, on the unchanged checkout, with both runs restored:
-    // each job measures its own run and keeps both shards' verdicts.
+    // each job makes its own run from the newest, measuring nothing, and
+    // keeps every verdict both shards reached.
     let (second_a, said) = job("1/2", &[], None);
+    let a2 = second_a["run"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{second_a}\n{said}"))
+        .to_owned();
     assert!(
-        said.contains("measuring first (a shard saves its verdicts into a run of its own, which the last job merges with the other shards' runs): npx vitest run"),
+        said.contains(&format!("[supercov] not measuring: the checkout is unchanged since run {b1}, so this shard saves its verdicts into run {a2}, made from it")) && !said.contains("measuring first"),
         "{said}"
     );
-    let a2 = second_a["run"].as_str().unwrap().to_owned();
-    let (second_b, _) = job("2/2", &[], Some(a2.as_str()));
+    assert_eq!(
+        second_a["measurement"]["derivedFrom"],
+        b1.as_str(),
+        "{second_a}"
+    );
+    assert_eq!(evidence(&a2), evidence(&b1));
+    let (second_b, said) = job("2/2", &[], Some(a2.as_str()));
+    assert!(!said.contains("measuring first"), "{said}");
     let b2 = second_b["run"].as_str().unwrap().to_owned();
     let restored = [a1.as_str(), b1.as_str()];
     assert!(
@@ -22403,18 +22510,33 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
         "{a1} {b1} {a2} {b2}"
     );
     let carried = |reply: &serde_json::Value| reply["carried"]["mutants"].as_u64().unwrap();
-    for reply in [&second_a, &second_b] {
+    for (reply, run) in [(&second_a, &a2), (&second_b, &b2)] {
         assert_eq!(
             reply["carried"]["from"],
             serde_json::json!([b1, a1]),
             "{reply}"
         );
-        assert_eq!(
-            carried(reply),
-            decided(&first_a) + decided(&first_b),
+        assert_eq!(reply["carried"]["unchanged"], true, "{reply}");
+        assert_eq!(carried(reply), first.len() as u64, "{reply}");
+        // Kept as they were.
+        let now = reached(run);
+        assert!(
+            first
+                .iter()
+                .all(|(id, verdict)| now.get(id) == Some(verdict)),
             "{reply}"
         );
     }
+    // What no pass reached is not a verdict to keep: a mutant the first
+    // job's run had no test for, which the second job's tests reach.
+    assert!(
+        second_a["carried"]["notKept"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|reason| reason == "notRunThen"),
+        "{second_a}"
+    );
     assert!(
         decided(&second_a) > 0 && decided(&second_b) > 0,
         "{second_a}\n{second_b}"
@@ -22470,6 +22592,26 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
         .json();
     assert_eq!(left["summary"]["toRun"], 0, "{left}");
 
+    // A third round, from the second's runs alone: nothing to run, nothing
+    // measured, every verdict kept.
+    let second = reached(&a2)
+        .into_iter()
+        .chain(reached(&b2))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let (third, said) = job_at(
+        "1/2",
+        &[],
+        &[a1.as_str(), b1.as_str(), merged_id.as_str()],
+        false,
+    );
+    assert!(!said.contains("measuring first"), "{said}");
+    assert_eq!(third["summary"]["ran"], 0, "{third}");
+    assert_eq!(carried(&third), second.len() as u64, "{third}");
+    assert!(
+        third["carried"]["notKept"].as_object().unwrap().is_empty(),
+        "{third}"
+    );
+
     // Copies of one run cannot be merged: said, with what to do instead.
     let twice = project.supercov(&["merge", &b2, &b2]).exits(2);
     assert!(
@@ -22477,6 +22619,86 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
             "Each merged run must be unique: {b2} is named more than once. Copies of one run"
         )) && twice.contains("Run that round again and merge its jobs' runs"),
         "{twice}"
+    );
+}
+
+/// A shard's run made from a restored one, on an unchanged checkout, that
+/// could not be made -- the store unlisted, its staging not created, the
+/// restored run's files unread or not copied, its record, its rename into
+/// place or the store's sync failing -- stops the command before any pass,
+/// saying from which run and why, and leaves no run behind.
+#[cfg(unix)]
+#[test]
+fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
+    let project = vitest_mutants_project("strong-derive-faults");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    project.commit("tax");
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let restored = project.latest();
+    for fault in [
+        "run-store-unlisted",
+        "fs.create_dir_all#lifecycle.rs:1256",
+        "fs.read_dir#lifecycle.rs:1257",
+        "fs.symlink_metadata#lifecycle.rs:892",
+        "fs.create_dir_all#lifecycle.rs:1279",
+        "fs.rename#lifecycle.rs:1281",
+        "fs.open#lifecycle.rs:1282",
+    ] {
+        let ran = project.supercov_with(
+            &["mutants", "--shard", "1/2", "--", "npx", "vitest", "run"],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 2, "{fault}\n{said}");
+        assert!(
+            said.contains(&format!(
+                "[supercov] could not make this shard's run from {restored}: "
+            )) && !said.contains("strong pass"),
+            "{fault}\n{said}"
+        );
+        // Only the restored run and, past the rename, the one made.
+        let runs = std::fs::read_dir(project.root.join(".supercov/runs"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("run_"))
+            .count();
+        assert_eq!(
+            runs,
+            if fault.ends_with(":1282") { 2 } else { 1 },
+            "{fault}"
+        );
+        if runs == 2 {
+            let made = project.latest();
+            std::fs::remove_dir_all(project.root.join(".supercov/runs").join(made)).unwrap();
+        }
+    }
+    // A run made from it holds cart.js's verdicts; a shard of tax.js's
+    // mutants keeps none of them, and runs its own.
+    let job = |file: &str| {
+        project
+            .supercov(&[
+                "mutants", "--shard", "1/1", "--file", file, "--json", "--", "npx", "vitest", "run",
+            ])
+            .json()
+    };
+    let cart = job("src/cart.js");
+    assert!(cart["summary"]["ran"].as_u64() > Some(0), "{cart}");
+    let tax = job("src/tax.js");
+    assert!(
+        tax["carried"].is_null() && tax["summary"]["ran"].as_u64() > Some(0),
+        "{tax}"
     );
 }
 
@@ -24081,12 +24303,14 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .supercov_with(&["--", "node", "e2e.mjs"], &roots)
         .succeeds();
     let _ = std::fs::remove_file(&listed);
+    let planning = std::time::Instant::now();
     let plan = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan", "--json"],
             &roots,
         )
         .json();
+    let planning = planning.elapsed().as_secs();
     let planned = plan["mutants"]
         .as_array()
         .unwrap()
@@ -24098,10 +24322,12 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     // an invocation (about seven mutants), so that a minute sees several
     // even on a slow runner: with six hundred an ARM runner's first
     // invocation used the whole minute, and with a hundred and twenty a
-    // macOS runner's.
+    // macOS runner's. The budget counts planning too, which takes a slow
+    // runner most of a minute here: the pass gets its minute after it.
+    let budget = (60 + 2 * planning).to_string();
     let ran = project.supercov_with(
         &[
-            "runs", "latest", "mutants", "test", "--json", "--budget", "60",
+            "runs", "latest", "mutants", "test", "--json", "--budget", &budget,
         ],
         &[
             roots[0],
@@ -25421,10 +25647,10 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
         )
         .exits(1);
-    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:695"), "{unlisted}");
     // A run whose evidence is cut short after its header, its size as
     // recorded, has no plan. Where the cut lands (a section's header or its
     // compressed body) depends on the run's sizes, so the reason may be either.
@@ -25587,12 +25813,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1639",
+            "fs.write#mutants_test_command.rs:1789",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1639"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1789"),
         "{}",
         unwritten.stderr()
     );
@@ -25840,7 +26066,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:354")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:395")],
         )
         .exits(2);
     assert!(
@@ -27356,7 +27582,9 @@ fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
 /// `--budget <seconds>`: once it is spent the pass stops and ends as one
 /// that finished, the verdicts it reached saved, the mutants left without
 /// one for the next pass -- not errors, and not a pass that ran nothing.
-/// A pass that does not end once its budget is spent is ended in time.
+/// A pass that does not end once its budget is spent is ended in time. The
+/// budget is the whole command's: what `supercov mutants` spent measuring
+/// is not the pass's, and a budget measuring spent runs nothing.
 #[cfg(unix)]
 #[test]
 fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
@@ -27437,6 +27665,34 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
         said.contains(
             "did not end within 8 s of being told to stop (its budget spent), so it is ended"
         ),
+        "{said}"
+    );
+    // Measured first, as the latest run recorded no values for its
+    // mutants: measuring, which takes two seconds here, spends the budget,
+    // and the pass runs nothing.
+    let started = std::time::Instant::now();
+    let measured = project.supercov(&[
+        "mutants",
+        "--file",
+        "src/slow.js",
+        "--budget",
+        "1",
+        "--",
+        "sh",
+        "-c",
+        "sleep 2 && npx vitest run",
+    ]);
+    let (out, said) = (measured.stdout(), measured.stderr());
+    assert_eq!(measured.code(), 0, "{out}\n{said}");
+    assert!(said.contains("measuring first"), "{said}");
+    assert!(
+        out.contains("  budget of 1 s spent: 2 mutant(s) left without a verdict")
+            && out.contains(" s of the 1 s budget, which leaves the pass 0 s\n"),
+        "{out}"
+    );
+    // Ended once measuring did: no pass began.
+    assert!(
+        !said.contains("strong pass:") && started.elapsed() < std::time::Duration::from_secs(60),
         "{said}"
     );
 }

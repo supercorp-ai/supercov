@@ -1178,7 +1178,7 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
 const PUBLIC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
-fn public_run_identity() -> (String, String) {
+pub(crate) fn public_run_identity() -> (String, String) {
     // A fixed format of the current time: only a year past 9999 fails it.
     let started_at = OffsetDateTime::now_utc()
         .format(PUBLIC_TIMESTAMP_FORMAT)
@@ -3308,7 +3308,7 @@ fn execute_coverage_query(
         let changed = supercov_engine::strong_plan::list_run_mutants(
             &supercov_engine::coverage_report::ArchiveReportRequest {
                 archive_path: run.evidence_path.clone(),
-                run_id: run.id.clone(),
+                run_id: run.evidence_run_id().to_owned(),
                 generated_at: run.metadata.started_at.clone(),
                 integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
                 test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
@@ -4082,7 +4082,7 @@ fn analyze_stored_run_filtered(
 ) -> Result<supercov_engine::coverage_report::CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
+        run_id: run.evidence_run_id().to_owned(),
         generated_at: run.metadata.started_at.clone(),
         integrity: serde_json::to_value(&run.metadata.integrity).ok(),
         test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(

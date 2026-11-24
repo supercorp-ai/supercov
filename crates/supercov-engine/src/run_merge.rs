@@ -1133,6 +1133,7 @@ pub fn merge_runs(
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
             merged_across: grown
                 .as_ref()
                 .map(|grown| grown.across.clone())
@@ -2660,7 +2661,7 @@ mod tests {
         // The store cannot be listed again to find the merged run (the
         // second listing: the merge's own, then this one): the same.
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
-        let notes = crate::fault::during("fs.read_dir#run_store.rs:681@2", || {
+        let notes = crate::fault::during("fs.read_dir#run_store.rs:695@2", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");

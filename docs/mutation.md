@@ -104,10 +104,16 @@ summary gives the mutation score, every verdict counted, and ends with the
 mutants the tests let survive.
 
 - **Unchanged checkout.** The next `supercov mutants` reads the same run again
-  and runs nothing it already decided. With `--shard` it measures a run of its
-  own all the same, as after an edit, so that each job's share is saved into a
-  run no other job writes (see
-  [A pass split across jobs](#a-pass-split-across-jobs)).
+  and runs nothing it already decided. With `--shard` it saves into a run of
+  its own, so that each job's share is saved into a run no other job writes:
+  made from the newest run of the checkout whose command passed, without
+  measuring again (`not measuring: the checkout is unchanged since run r4, so
+  this shard saves its verdicts into run r9, made from it`), or measured where
+  there is none (see [A pass split across jobs](#a-pass-split-across-jobs)).
+  An earlier run measured on the same files, byte for byte, keeps every
+  verdict a pass reached, whatever the two measurements recorded: a test
+  whose path depends on the time, or that failed in one of them, moves no
+  verdict.
 - **After an edit.** It measures the checkout again and keeps an earlier
   verdict for each mutant whose file is as it was and whose candidate tests,
   and their test files, nothing changed could reach, as `runs latest tests
@@ -115,9 +121,13 @@ mutants the tests let survive.
   edit the tests that ran the changed code. Each mutant's verdict comes from
   the newest earlier run of the same command, dependencies and configuration
   that holds one it can keep, so a pass split across jobs, each holding part
-  of the verdicts in its own run, is kept whole. The rest run, and the summary
-  says how many verdicts were kept and from which runs (`193 verdict(s) kept
-  from runs r2, r1`).
+  of the verdicts in its own run, is kept whole. A test that failed in the
+  earlier run counts as reached only where the change reaches code that run
+  covered. The rest run, and the summary says how many verdicts were kept and
+  from which runs (`193 verdict(s) kept from runs r2, r1: nothing they depend
+  on changed`), and how many were not, by why (`6 earlier verdict(s) not kept,
+  so run again: 4 their file changed, 2 a test that could kill them could
+  reach a change`). An error is never kept: it runs again.
 - **Interrupted.** Each verdict is saved as it is made. A pass stopped by
   Ctrl-C, a killed job or a test worker that never ended keeps what it
   decided, and the next pass runs only the rest. Sent SIGINT or SIGTERM, the
@@ -125,10 +135,15 @@ mutants the tests let survive.
   not ended 8 s after the signal is ended, what it decided saved first.
 - **Order and budget.** The cheapest mutants run first, by the recorded times
   of the tests each runs against, so a pass cut short has decided as many as
-  it could. `--budget <seconds>` stops the pass once it is spent and ends it
-  as a finished one, its verdicts saved; the summary says how many mutants it
-  left for the next pass (`budget of 2400 s spent: 812 mutant(s) left without
-  a verdict, for the next pass`).
+  it could. `--budget <seconds>` is the whole command's, measuring and
+  planning included: once it is spent the pass stops and ends as a finished
+  one, its verdicts saved, so a job ends when its budget says. The summary
+  says how many mutants it left for the next pass (`budget of 2400 s spent:
+  812 mutant(s) left without a verdict, for the next pass`), and, where
+  measuring took half the budget or more, what it took (`measuring took 310 s
+  of the 450 s budget, which leaves the pass 140 s`). A measurement is never
+  cut short, since one stopped halfway records nothing: one that outlasts the
+  budget leaves the pass nothing, and the pass runs nothing.
 - **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
   finds a mutant; `2`, after the answer, when the measured command failed (a
   failing test kills nothing, so the verdicts cannot gate) or no mutant could
@@ -225,8 +240,8 @@ npx supercov runs latest mutants test --plan --json
 - `--shard k/n` runs one of n shares of the mutants, of about the same cost,
   for parallel jobs (see
   [A pass split across jobs](#a-pass-split-across-jobs)).
-- `--budget <seconds>` stops the pass once that time is spent, its verdicts
-  saved, and leaves the rest for the next pass.
+- `--budget <seconds>` stops the pass once that time is spent since the
+  command started, its verdicts saved, and leaves the rest for the next pass.
 - `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) sets a
   Playwright test's time limit when it runs with a mutant: x times its
   baseline, + 5 s (default 1.5, StrykerJS's `timeoutFactor`). See
@@ -285,7 +300,8 @@ the latest one saved for its commit, or else the latest one saved.
 
 `supercov mutants --shard k/n -- <command>` is `supercov -- <command>` with
 the mutants' probes on, then `runs latest mutants test --shard k/n`, keeping
-earlier verdicts as after an edit. Name the command after `--`: without it,
+earlier verdicts as after an edit. On a checkout unchanged since a run it
+restored, it measures nothing, as below. Name the command after `--`: without it,
 `supercov mutants` takes the latest run's, which after a merge is the merge.
 Every job must measure the same commit with the same dependencies, as for any
 merge ([CLI reference](cli.md#combine-shards)).
@@ -295,9 +311,10 @@ merge ([CLI reference](cli.md#combine-shards)).
   every share gets its part of the costly ones. A mutant's cost there is what
   the plan lists of it, the copies of test files it starts and the tests they
   run, not the tests' times, which differ between jobs.
-- **The budget.** `--budget <seconds>` ends a job's pass in time without a
-  `timeout` around it: past the budget the pass stops, saves what it
-  decided, and exits as a finished pass. Within a pass the cheapest mutants
+- **The budget.** `--budget <seconds>` ends a job in time without a
+  `timeout` around it: it counts from the command's start, measuring
+  included, and past it the pass stops, saves what it decided, and exits as
+  a finished pass. Within a pass the cheapest mutants
   run first, so a job cut short has decided as many as it could, and the
   mutants it left run in the next commit's pass, where the restored runs lend
   the rest of their verdicts.
@@ -310,11 +327,16 @@ merge ([CLI reference](cli.md#combine-shards)).
   that run has no verdict for it, as a unit run merged with an end-to-end run
   can, the mutant is left undecided, and a pass over the merged run runs it.
   Verdicts of another mutant set are not kept, and the merge says whose.
-- **Another round.** On the commit the restored runs measured, each job still
-  measures a run of its own: `supercov mutants --shard` never saves into a run
-  it restored, of which every job of the round holds a copy. It keeps every
-  verdict the restored runs hold (`429 verdict(s) kept from runs r4, r3, r2,
-  r1`), and the shares are of what is left. Each job's run replaces the
+- **Another round.** On the commit the restored runs measured, each job saves
+  into a run of its own: `supercov mutants --shard` never saves into a run it
+  restored, of which every job of the round holds a copy. It makes that run
+  from the newest restored run whose command passed and that recorded its
+  mutants' values, without measuring again: the run holds that run's evidence
+  under an id of its own. It keeps every verdict a pass reached that the
+  restored runs hold (`1317 verdict(s) kept from runs r8, r7, r6, r5: the
+  checkout is unchanged since them`), and the shares are of what is left.
+  Mutants the plan decides without running, such as a survivor no test
+  infected, are decided again, not kept. Each job's run replaces the
   restored ones of its command, so the last job's `supercov merge` takes this
   round's runs, whose verdicts hold the earlier rounds'. It says how many
   verdicts came from each run (`1265 strong verdict(s) kept from runs r8, r7,
@@ -331,7 +353,9 @@ merge ([CLI reference](cli.md#combine-shards)).
   so every job of a second round wrote its share into a copy of one run. The
   copies share an id, one directory of `.supercov/runs` holds one of them, and
   `supercov merge` refuses a run named more than once, saying so. Run that
-  round again: each job now measures a run of its own.
+  round again: each job now saves into a run of its own. In 4.29.6 that run
+  was measured again, which cost each job the suite's time and could drop a
+  verdict where a test failed in one of the measurements.
 
 ### Runners without a driver
 

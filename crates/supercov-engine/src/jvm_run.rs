@@ -2368,6 +2368,7 @@ pub fn run_direct_jvm(
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;

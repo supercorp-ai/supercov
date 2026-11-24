@@ -608,16 +608,38 @@ A shard never saves into a run another job may also save into. A run's
 verdicts are one file in its directory, keyed by the run's id, so copies of one
 run that several jobs wrote land on one path when their stores are put
 together, and all but one are lost; the merge refuses a run named twice
-rather than guess. `supercov mutants --shard` therefore measures a run of its
-own even where the checkout is unchanged since the latest run (a run restored
-from an earlier round, which every job of the round holds). The new run
-supersedes the restored runs of its command, keeps their verdicts as after an
-edit, and the round's runs merge as shards of one suite. The cost is one
-measured run of the suite per job and round, which a round without restored
-runs pays already. The alternative, merging copies of one run by unioning
-their verdicts, would need every job's copy downloaded apart and named by path,
-and a check that their evidence is the same; the documented flow, which
-downloads every job's store into one, would still lose all but one copy.
+rather than guess. `supercov mutants --shard` therefore saves into a run of
+its own even where the checkout is unchanged since the latest run (a run
+restored from an earlier round, which every job of the round holds).
+
+On an unchanged checkout that run is made, not measured
+(`lifecycle::derive_run`): the newest run with the latest run's fingerprint,
+not a merge, whose command passed and that recorded its mutants' values, is
+copied under a new id and start, without its verdicts and its query index.
+Its evidence and every record published from it stand for the new run,
+which differs only in its id. The evidence still names the run it was
+recorded under as its scope, which the new run's `measuredAs` gives, and
+every analysis of it reads that id; it supersedes the runs of its command a run
+measured now would, keeps every verdict the restored runs hold (they were
+measured on the same files), and the round's runs merge as shards of one
+suite. Where no such run is restored (the latest run's command failed, or
+none recorded the values) the shard measures, as after an edit.
+
+4.29.6 measured a run of its own in every job of every round. On a large
+application's e2e suite that was about 100 s of each 10-minute job, and the
+measurements differed: one job's had four tests fail at random, and the next
+round dropped what that run alone had decided for every mutant whose
+candidates shared a test file with them. Copying a run costs a reflink or a
+copy of its files (about 25 MB there) and records exactly what the restored
+run records. Merging copies of one run by unioning their verdicts was the
+other way out, and was rejected in 4.29.6: it needs every job's copy
+downloaded apart and named by path, which the documented flow does not do.
+
+`--budget` is the command's: it counts from its start, so measuring and
+planning spend it too, and the pass gets what is left. A measurement is never
+cut short (a measurement stopped halfway records nothing), so one that
+outlasts the budget leaves the pass none; the summary says what measuring
+took where it took half the budget or more.
 `--plan` writes nothing, and reads the latest run as it is.
 
 ## What stays out

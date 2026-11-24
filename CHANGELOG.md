@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.29.7
+
+**Changed**
+
+- A shard of a continuation round on an unchanged checkout no longer measures the suite again. `supercov mutants --shard k/n` makes the job's run from the newest restored run whose command passed, under an id of its own, and says so (`not measuring: the checkout is unchanged since run r4, so this shard saves its verdicts into run r9, made from it`). On a large application's e2e suite this was about 100 s of each 10-minute job.
+- `--budget <seconds>` is the whole command's: measuring and planning spend it too, so a job ends when its budget says. Where measuring took half the budget or more, the summary says so (`measuring took 310 s of the 450 s budget, which leaves the pass 140 s`).
+- The summary says how many earlier verdicts were not kept, and why (`6 earlier verdict(s) not kept, so run again: 4 their file changed, 2 a test that could kill them could reach a change`), and whether the runs they were kept from were measured on the checkout as it is (`1317 verdict(s) kept from runs r8, r7: the checkout is unchanged since them`). The JSON answer has them as `carried.notKept` and `carried.unchanged`, and `measurement` says whether the run was measured (`seconds`) or made from another (`derivedFrom`).
+
+**Fixed**
+
+- An earlier run measured on the same files, byte for byte, keeps every verdict a pass reached, whatever the two measurements recorded. On 4.29.6 a test that failed in one job's measurement at random dropped that run's verdicts for every mutant whose candidates shared a test file with it, and the next round ran them again.
+- After an edit, a test that failed in the earlier run counts as reached only where the change reaches code that run covered, instead of always.
+- `tests affected --json` says what the change reached of code the run covered (`beyondTheRun`).
+
 ## 4.29.6
 
 **Changed**
