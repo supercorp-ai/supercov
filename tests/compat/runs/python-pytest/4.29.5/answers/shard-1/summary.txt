@@ -1,0 +1,34 @@
+run run_6c53c82560fceca9
+command: python3 -m pytest -q tests/test_price.py
+
+Coverage
+  Lines      64.29% (9/14)
+  Branches   50.00% (6/12)
+  MC/DC      40.00% (2/5)
+Assertions   not assessed — npx supercov runs run_6c53c82560fceca9 assertions assess
+
+By test kind
+  unit            2 test(s)  lines  50.00%  branches  50.00%  MC/DC  40.00%
+  no test                    lines  14.29%  branches   0.00%  MC/DC   0.00%
+  "no test" is code that ran only while no test was running: start-up and setup, module loading, work between tests. It counts in the run's total and in no test's.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 2 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+
+Tests
+  Total       2
+  Passed      2
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Commands
+  npx supercov runs 'run_6c53c82560fceca9' files
+  npx supercov runs 'run_6c53c82560fceca9' gaps
+  npx supercov runs 'run_6c53c82560fceca9' kinds
+  npx supercov runs 'run_6c53c82560fceca9' runners
+  npx supercov runs 'run_6c53c82560fceca9' scope
+  npx supercov runs run_6c53c82560fceca9 --help
