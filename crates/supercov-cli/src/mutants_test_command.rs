@@ -34,6 +34,11 @@ Options:
                     shard 1)
   --budget <s>      stop after s seconds, the verdicts reached saved; the
                     next pass runs the rest (the cheapest mutants run first)
+  --timeout-factor <x>
+                    a Playwright test run with a mutant is stopped, and the
+                    mutant is a timeout, past x times the test's baseline
+                    + 5 s (default 1.5, as StrykerJS's timeoutFactor;
+                    SUPERCOV_STRONG_TIMEOUT_FACTOR)
   --fail-on <s,...> exit 1 when an asked mutant ends survived, timeout,
                     no-coverage or error (accepted mutants excepted)
   --critical <glob> source files where every mutant must be killed or
@@ -72,10 +77,43 @@ struct Options {
     shard: Option<(usize, usize)>,
     /// `--budget <seconds>`: how long the pass may run.
     budget: Option<std::time::Duration>,
+    /// `--timeout-factor <x>`: a Playwright attempt's time limit, as a
+    /// multiple of its test's baseline (`TIMEOUT_FACTOR_VARIABLE` where
+    /// not given).
+    timeout_factor: Option<f64>,
     command: Option<Vec<String>>,
 }
 
 const UNDETECTED: &[&str] = &["survived", "timeout", "no-coverage", "error"];
+
+/// What sets a Playwright attempt's time limit where `--timeout-factor` is
+/// not given.
+const TIMEOUT_FACTOR_VARIABLE: &str = "SUPERCOV_STRONG_TIMEOUT_FACTOR";
+/// A Playwright attempt's time limit: its test's baseline × this + 5 s
+/// (StrykerJS's `timeoutFactor` and `timeoutMS`).
+const DEFAULT_TIMEOUT_FACTOR: f64 = 1.5;
+/// How a verdict that ran past its time limit begins
+/// (`playwrightStrong.mjs`).
+const TIME_LIMIT_REASON: &str = "ran past its time limit";
+
+/// A time limit's factor as given (`from` names where): a number above 0.
+fn timeout_factor(value: &str, from: &str) -> Result<f64, String> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|factor| factor.is_finite() && *factor > 0.0)
+        .ok_or_else(|| format!("{from} takes a number above 0, not {value}"))
+}
+
+/// The factor of the pass: `--timeout-factor`, else the variable, else the
+/// default.
+fn resolved_timeout_factor(given: Option<f64>, variable: Option<&str>) -> Result<f64, String> {
+    match (given, variable.filter(|value| !value.is_empty())) {
+        (Some(factor), _) => Ok(factor),
+        (None, Some(value)) => timeout_factor(value, TIMEOUT_FACTOR_VARIABLE),
+        (None, None) => Ok(DEFAULT_TIMEOUT_FACTOR),
+    }
+}
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut options = Options::default();
@@ -154,6 +192,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         format!("--budget takes a whole number of seconds, not {value}")
                     })?;
                 options.budget = Some(std::time::Duration::from_secs(seconds));
+            }
+            "--timeout-factor" => {
+                index += 1;
+                let value = args.get(index).ok_or("--timeout-factor needs a number")?;
+                options.timeout_factor = Some(timeout_factor(value, "--timeout-factor")?);
             }
             "--critical" => {
                 index += 1;
@@ -403,6 +446,10 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     let root = std::env::current_dir().map_err(|e| e.to_string())?;
     let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
     let run = select_run(&inventory, Some(selector)).map_err(|e| e.to_string())?;
+    let factor = resolved_timeout_factor(
+        options.timeout_factor,
+        std::env::var(TIMEOUT_FACTOR_VARIABLE).ok().as_deref(),
+    )?;
     let mut plan = run_plan(&root, run)?;
     // A run with no test has nothing to run a mutant against: said, not
     // reported as a score of nothing killed.
@@ -454,7 +501,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .collect::<Vec<_>>();
     let to_run = running.len();
     let started = std::time::Instant::now();
-    let executed = execute(&root, run, plan.clone(), &mut saved, options)?;
+    let executed = execute(&root, run, plan.clone(), &mut saved, options, factor)?;
     let verdicts = read_saved(run);
     let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
     data["summary"]["durationMs"] = json!(started.elapsed().as_millis() as u64);
@@ -466,6 +513,20 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     });
     if let (Some(left), Some(budget)) = (executed.budget_left, options.budget) {
         data["budget"] = json!({"seconds": budget.as_secs(), "left": left});
+    }
+    let limited = asked
+        .iter()
+        .filter_map(|(id, _)| verdicts.get(id))
+        .filter(|verdict| verdict.status == "timeout")
+        .filter(|verdict| {
+            verdict
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with(TIME_LIMIT_REASON))
+        })
+        .count();
+    if limited > 0 {
+        data["timeLimit"] = json!({"factor": factor, "constantMs": 5000, "timedOut": limited});
     }
     if !carried.is_empty() {
         data["carried"] = json!({
@@ -755,6 +816,13 @@ fn plan_text(data: &Value) -> String {
             extra.push_str(&format!(
                 "  budget of {} s spent: {left} mutant(s) left without a verdict, for the next pass\n",
                 data["budget"]["seconds"]
+            ));
+        }
+        if let Some(limited) = data["timeLimit"]["timedOut"].as_u64() {
+            extra.push_str(&format!(
+                "  {limited} timeout(s) ran past their time limit: {}x the test's baseline + {} s\n",
+                data["timeLimit"]["factor"],
+                data["timeLimit"]["constantMs"].as_u64().unwrap_or(0) / 1000
             ));
         }
         if let Some(carried) = data["carried"]["mutants"].as_u64().filter(|n| *n > 0) {
@@ -1365,6 +1433,7 @@ fn execute(
     plan: StrongPlan,
     saved: &mut std::collections::BTreeMap<String, Verdict>,
     options: &Options,
+    factor: f64,
 ) -> Result<Executed, Stop> {
     // Decided without running.
     for mutant in &plan.mutants {
@@ -1462,6 +1531,7 @@ fn execute(
                     let results = work.join("results.jsonl");
                     let ran = run_language(
                         root, run, &plan, &remaining, &language, &command, &work, saved, budget_at,
+                        factor,
                     );
                     let (verdicts, passes) = read_results(&results);
                     for sentence in supercov_engine::strong_driver::out_of_memory(&work) {
@@ -1529,6 +1599,7 @@ fn run_language(
     work: &Path,
     saved: &std::collections::BTreeMap<String, Verdict>,
     budget_at: Option<std::time::Instant>,
+    factor: f64,
 ) -> Result<i32, String> {
     let plan_path = work.join("plan.json");
     let results = work.join("results.jsonl");
@@ -1542,9 +1613,12 @@ fn run_language(
         tests: plan.tests.clone(),
         mutants,
     };
+    // The driver's time limit for an attempt goes with the plan it runs.
+    let mut written = serde_json::to_value(&pass_plan).expect("plain data serializes");
+    written["timeoutFactor"] = json!(factor);
     supercov_engine::fault_fs::write(
         &plan_path,
-        serde_json::to_vec(&pass_plan).expect("plain data serializes"),
+        serde_json::to_vec(&written).expect("plain data serializes"),
     )
     .map_err(|e| format!("{}: {e}", plan_path.display()))?;
     let nonce = work
@@ -2033,6 +2107,14 @@ mod tests {
             ),
             "{spent}"
         );
+        let limited = plan_text(&json!({"run": "r1", "summary": summary,
+            "timeLimit": {"factor": 1.5, "constantMs": 5000, "timedOut": 7}}));
+        assert!(
+            limited.contains(
+                "  7 timeout(s) ran past their time limit: 1.5x the test's baseline + 5 s\n"
+            ),
+            "{limited}"
+        );
         let whole = plan_text(&json!({"run": "r1", "summary": summary, "carried": {"mutants": 0}}));
         assert!(whole.starts_with("Strong mutation for r1: "), "{whole}");
         assert!(!whole.contains("kept from"), "{whole}");
@@ -2218,6 +2300,20 @@ mod tests {
             parsed(&["--budget", "450"]).unwrap().budget,
             Some(std::time::Duration::from_secs(450))
         );
+        assert_eq!(
+            parsed(&["--timeout-factor", "2.5"]).unwrap().timeout_factor,
+            Some(2.5)
+        );
+        // The option, else the variable (where it says something), else
+        // StrykerJS's 1.5.
+        assert_eq!(resolved_timeout_factor(Some(3.0), Some("2")), Ok(3.0));
+        assert_eq!(resolved_timeout_factor(None, Some("2")), Ok(2.0));
+        assert_eq!(resolved_timeout_factor(None, Some("")), Ok(1.5));
+        assert_eq!(resolved_timeout_factor(None, None), Ok(1.5));
+        assert_eq!(
+            resolved_timeout_factor(None, Some("0")),
+            Err("SUPERCOV_STRONG_TIMEOUT_FACTOR takes a number above 0, not 0".into())
+        );
         let markdown =
             parsed(&["--format", "markdown", "--output", "m.md", "--file", "a"]).unwrap();
         assert!(markdown.markdown && markdown.output == Some(PathBuf::from("m.md")));
@@ -2234,6 +2330,14 @@ mod tests {
                 "--budget takes a whole number of seconds, not 0",
             ),
             (&["--budget", "1.5"], "not 1.5"),
+            (&["--timeout-factor"], "--timeout-factor needs a number"),
+            (
+                &["--timeout-factor", "fast"],
+                "--timeout-factor takes a number above 0, not fast",
+            ),
+            (&["--timeout-factor", "inf"], "not inf"),
+            (&["--timeout-factor", "NaN"], "not NaN"),
+            (&["--timeout-factor", "-1"], "not -1"),
             (
                 &["--output", "m.md"],
                 "--output writes the --format markdown table",

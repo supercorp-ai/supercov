@@ -22,10 +22,17 @@
 // no request named, or is a server module's top level, or ran for a request
 // that named no test) is run alone afterwards, in an invocation of its own
 // with SUPERCOV_ACTIVE_MUTANT set, which the engine starts for each `restart`
-// record the judge writes (javascript_run.rs). So do a test that only ran
-// out of time (again, with twice the time), a kill that ran beside another
-// mutant's attempt or whose control failed (one test at a time), and the
-// mutants one invocation had no room for.
+// record the judge writes (javascript_run.rs). So do a kill (or a timeout)
+// that ran beside another mutant's attempt or whose control failed (one test
+// at a time), and the mutants one invocation had no room for.
+//
+// An attempt with a mutant has a time limit: its test's baseline (the
+// longest of its measured run and every control of this pass that passed) ×
+// the pass's timeout factor (1.5, `--timeout-factor`) + 5 s, StrykerJS's
+// limit, or the test's own timeout where that is shorter. Playwright's test
+// timeout is set to it, so an action or an `expect` that waits for what the
+// mutant broke ends there; an attempt that ran out of it is a `timeout`,
+// confirmed as a kill is.
 //
 // This module holds what the config, the fixture (playwright.mjs) and the
 // reporter (playwrightStrongReporter.mjs) share.
@@ -135,9 +142,30 @@ export function mark(path) {
     }
 }
 
-function budgetOf(durations, factor = 1) {
-    const longest = Math.max(DEFAULT_DURATION_MS, ...durations.map((ms) => ms ?? DEFAULT_DURATION_MS));
-    return Math.ceil((longest * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * factor);
+/**
+ * How long a test takes without a mutant: the longest of its measured run
+ * and every control of it that passed in this pass, in any worker or round
+ * (a test whose time varies is given its slowest), and a second at least.
+ */
+function baselineMsOf(pass, original, test) {
+    let longest = Math.max(DEFAULT_DURATION_MS, test.durationMs ?? 0);
+    for (const name of entries(`${pass.shared}/durations/${key(original)}`))
+        longest = Math.max(longest, Number(name.split("-")[1]) || 0);
+    return longest;
+}
+
+/** A mutant attempt's time limit from its test's baseline: StrykerJS's `timeoutMS`. */
+function limitOf(baselineMs, factor) {
+    return Math.ceil(baselineMs * factor + TIMEOUT_CONSTANT_MS);
+}
+
+/** What a verdict says of an attempt that ran out of its time limit. */
+function limitReason(attempt) {
+    const seconds = (ms) => `${(ms / 1000).toFixed(1)} s`;
+    const why = attempt.limitMs < limitOf(attempt.baselineMs, attempt.timeoutFactor)
+        ? "the test's own timeout"
+        : `${attempt.timeoutFactor} × its ${seconds(attempt.baselineMs)} baseline + ${TIMEOUT_CONSTANT_MS / 1000} s`;
+    return `ran past its time limit of ${seconds(attempt.limitMs)} (${why})`;
 }
 
 /**
@@ -249,7 +277,7 @@ function buildPass(pass, root, config) {
     if (job && job.kind !== "main") {
         for (const entry of job.mutants) {
             const all = [...entry.tests, ...(entry.rest ?? [])].filter((id) => tests[id]);
-            mutants.push({ id: entry.id, mutant: entry.mutant, tests: [...new Set(all)], reason: entry.reason, budgetFactor: entry.budgetFactor ?? 1 });
+            mutants.push({ id: entry.id, mutant: entry.mutant, tests: [...new Set(all)], reason: entry.reason });
         }
         // A serial round runs one test at a time: what it kills, nothing
         // beside it did.
@@ -306,10 +334,10 @@ function buildPass(pass, root, config) {
             const ordered = [...new Set([...own.filter((test) => test.infected), ...own.filter((test) => !test.infected)].map((test) => test.id))];
             const switched = `${mutant.file}#${found.index}`;
             if (mutant.serverWide) {
-                restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: mutant.serverWide, budgetFactor: 1 });
+                restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: mutant.serverWide });
                 continue;
             }
-            mutants.push({ id: mutant.id, mutant: switched, tests: ordered, budgetFactor: 1 });
+            mutants.push({ id: mutant.id, mutant: switched, tests: ordered });
         }
     }
     // Each test's queue, and the copies the round's mutants need, as many as
@@ -354,6 +382,8 @@ function buildPass(pass, root, config) {
         batch: kind === "alone" && Boolean(job?.batch),
         // A main round's first control of a test is its baseline.
         baselines: kind === "main",
+        // A mutant attempt's time limit: its test's baseline × this + 5 s.
+        timeoutFactor: Number(plan.timeoutFactor) > 0 ? Number(plan.timeoutFactor) : TIMEOUT_FACTOR,
         tests,
         declared,
         entries,
@@ -394,6 +424,7 @@ function writeRoundFiles(pass, work) {
         everywhere: work.everywhere,
         batch: work.batch,
         baselines: work.baselines,
+        timeoutFactor: work.timeoutFactor,
         tests,
         declared: work.declared,
         setupProjects: work.setupProjects,
@@ -669,7 +700,7 @@ const passedHere = new Set();
 /** Whether a mutant needs no more attempts: a verdict given, killed, or held for a later round. */
 function settled(pass, id) {
     const at = key(id);
-    return existsSync(`${pass.shared}/verdicts/${at}`) || existsSync(`${pass.round}/killed/${at}`) || existsSync(`${pass.round}/held/${at}`);
+    return existsSync(`${pass.shared}/verdicts/${at}`) || existsSync(`${pass.round}/killed/${at}`);
 }
 
 /**
@@ -699,7 +730,7 @@ function inFlightSince(pass, id) {
  * and not yet tried against it, one no other attempt runs first. Taken by
  * making its mark, which only one copy can.
  */
-function takeJob(pass, test, only, budgetMs) {
+function takeJob(pass, test, only, limitMs) {
     const queue = queueOf(pass, test);
     const busy = [];
     for (let at = queue.done; at < queue.ids.length; at++) {
@@ -715,9 +746,9 @@ function takeJob(pass, test, only, budgetMs) {
         }
         const since = inFlightSince(pass, id);
         if (since !== undefined) {
-            // One that has run longer than this test would take may hang:
+            // One that has run longer than this test's limit may hang:
             // a second attempt would only wait as long.
-            if (Date.now() - since < budgetMs)
+            if (Date.now() - since < limitMs)
                 busy.push(id);
             continue;
         }
@@ -770,9 +801,32 @@ function startRunning(pass, testId, mutant) {
 }
 
 /**
+ * Holds a mutant attempt to its time limit (`timeout`, from the test's
+ * start): the test's own `test.setTimeout()` and `test.slow()` may shorten
+ * it, never lengthen it. Its baseline ran with them, so its time already
+ * says how long they let it take.
+ */
+function holdTimeout(testInfo, timeout) {
+    const setTimeout = testInfo.setTimeout.bind(testInfo);
+    setTimeout(timeout);
+    testInfo.setTimeout = (asked) => setTimeout(asked > 0 ? Math.min(asked, timeout) : timeout);
+    // `test.slow()` in a test's body (Playwright's own modifier): it
+    // triples the time, which is held to the limit again.
+    const modifier = testInfo._modifier;
+    if (typeof modifier !== "function")
+        return;
+    testInfo._modifier = function (type, ...rest) {
+        const result = modifier.call(this, type, ...rest);
+        if (type === "slow")
+            setTimeout(Math.min(this.timeout, timeout));
+        return result;
+    };
+}
+
+/**
  * What this copy of a test does: `undefined` outside strong mode, `null` to
  * skip, else its attempt: a control (no mutant, `-`) or the mutant it took
- * (`file#index`), and its time budget. A file whose tests the measured run
+ * (`file#index`), and its time limit. A file whose tests the measured run
  * never ran side by side runs one at a time here too.
  */
 export async function strongClaim(testInfo) {
@@ -808,31 +862,26 @@ export async function strongClaim(testInfo) {
         // A later round's test that failed without any mutant in the main one.
         if (baselineOf(pass, original) === "failed")
             return null;
-        const id = takeJob(pass, original, shape.batch ? invocationMutant(pass) ?? null : undefined, budgetOf([test.durationMs]));
+        const baselineMs = baselineMsOf(pass, original, test);
+        const derived = limitOf(baselineMs, shape.timeoutFactor);
+        // The test's own timeout, where shorter, ends it first anyway.
+        const limitMs = configured > 0 ? Math.min(derived, configured) : derived;
+        const id = takeJob(pass, original, shape.batch ? invocationMutant(pass) ?? null : undefined, limitMs);
         if (!id)
             return null;
         const entry = mutantOf(pass, id);
-        attempt = { kind: "mutant", id, mutant: entry.mutant, budgetMs: budgetOf([test.durationMs], entry.budgetFactor ?? 1) };
+        attempt = { kind: "mutant", id, mutant: entry.mutant, baselineMs, limitMs, timeoutFactor: shape.timeoutFactor };
         mark(`${pass.round}/inflight/${key(id)}`);
         writeFileSync(`${pass.round}/inflight/${key(id)}/${process.pid}-${key(testInfo.testId)}`, String(Date.now()));
     }
     const lock = shape.concurrency.workers !== 1 && shape.concurrency.serialFiles.includes(test.file)
         ? await lockFile(pass, test.file)
         : undefined;
-    // The test's time from here: a mutant's from the test's measured
-    // duration and the time Playwright gives an assertion and an action to
-    // fail in (a failing `expect` waits for its own timeout), a control's as
-    // configured.
-    if (attempt.kind === "mutant") {
-        const expectTimeout = testInfo.project?.expect?.timeout ?? 5_000;
-        const actionTimeout = testInfo.project?.use?.actionTimeout ?? 0;
-        // Playwright itself ends the test at its configured timeout (the
-        // project's, or its own `test.slow()` / `describe.configure`), and an
-        // assertion may wait up to there with a timeout of its own: that is
-        // the floor.
-        const budget = Math.max(attempt.budgetMs + expectTimeout + actionTimeout, configured > 0 ? configured : 0);
-        testInfo.setTimeout(Date.now() - started + budget);
-    }
+    // The test's time from here: a mutant's its limit, which ends whatever
+    // the test waits on there (an action, an `expect` with a timeout of its
+    // own); a control's, the baseline's above all, as configured.
+    if (attempt.kind === "mutant")
+        holdTimeout(testInfo, Date.now() - started + attempt.limitMs);
     else if (configured > 0)
         testInfo.setTimeout(Date.now() - started + configured);
     const { running, beside } = startRunning(pass, testInfo.testId, attempt.mutant);
@@ -845,6 +894,7 @@ export async function strongClaim(testInfo) {
         kind: attempt.kind,
         id: attempt.id,
         mutant: attempt.mutant,
+        ...(attempt.kind === "mutant" ? { baselineMs: attempt.baselineMs, limitMs: attempt.limitMs, timeoutFactor: attempt.timeoutFactor } : {}),
         startedAt: Date.now(),
         lock,
         running,
@@ -868,18 +918,20 @@ export function firstWords(message) {
 
 /**
  * How an attempt ended, from its errors: `passed`, `failed` (an assertion or
- * an action failed, or the test threw), `timed-out` (only its time ran out),
- * or `skipped`; and why it failed.
+ * an action failed, or the test threw), `timed-out` (its time ran out first:
+ * Playwright's timeout, or an `expect` it cut short, which says so, came
+ * before any other error; what failed after it failed for it), or
+ * `skipped`; and why it failed.
  */
 export function outcomeOf(status, errors) {
-    const timeoutOnly = errors.length > 0 && errors.every((error) => TEST_TIMEOUT.test(stripAnsi(error?.message ?? "")));
-    const reported = errors.find((error) => !TEST_TIMEOUT.test(stripAnsi(error?.message ?? ""))) ?? errors[0];
+    const timeout = (error) => TEST_TIMEOUT.test(stripAnsi(error?.message ?? ""));
+    const reported = errors.find((error) => !timeout(error)) ?? errors[0];
     const message = reported ? firstWords(reported.message ?? reported.value) : undefined;
     if (status === "passed")
         return { outcome: "passed" };
     if (status === "skipped")
         return { outcome: "skipped" };
-    if (status === "timedOut" && timeoutOnly)
+    if (errors.length > 0 && timeout(errors[0]))
         return { outcome: "timed-out", message };
     return { outcome: "failed", message };
 }
@@ -918,7 +970,6 @@ export const WHY = {
     "background": "its code ran in server work no request named",
     "module-level": "it is a server module's top-level code",
     "by-time": "its code ran for a request that named no test",
-    "timeout-retry": "a test ran out of time with it switched on, and ran again alone with twice the time",
     "unfinished": "not every candidate test ran in the shared pass",
     "confirm": "a test killed it beside other mutants' attempts",
     "doubt": "the test that killed it failed without it too, on the same server",
@@ -985,28 +1036,29 @@ export function settleAttempt(pass, attempt) {
             surviveIfDone(pass, attempt.id);
         return ended;
     }
-    if (ended.outcome === "timed-out") {
-        // Only its time ran out: run again, alone, with twice the time.
-        if (shared(shape.kind))
-            mark(`${pass.round}/held/${key(attempt.id)}`);
-        else if (giveVerdict(pass, verdict("timeout", "ran out of time")))
-            mark(`${pass.round}/killed/${key(attempt.id)}`);
+    if (ended.outcome !== "failed" && ended.outcome !== "timed-out")
         return ended;
-    }
-    if (ended.outcome !== "failed")
-        return ended;
-    // A kill: no other copy takes the mutant now.
+    // A kill, or a timeout (it ran out of its limit): no other copy takes
+    // the mutant now, and either is confirmed alike.
+    const { status, reason } = verdictOf(ended);
     passedHere.delete(test);
     mark(`${pass.round}/killed/${key(attempt.id)}`);
     if (beside)
         mark(`${pass.round}/confirm/${key(attempt.id)}`);
     else if (shape.everywhere)
-        giveVerdict(pass, verdict("killed", ended.message ?? "the test failed"));
+        giveVerdict(pass, verdict(status, reason));
     else {
         // Confirmed by the test's next control on this server.
-        writeJson(`${pass.round}/pending/${attempt.invocation}/${key(test)}/${key(attempt.id)}`, { id: attempt.id, test, message: ended.message, endedAt: ended.endedAt, durationMs: ended.endedAt - ended.startedAt });
+        writeJson(`${pass.round}/pending/${attempt.invocation}/${key(test)}/${key(attempt.id)}`, { id: attempt.id, test, status, message: reason, endedAt: ended.endedAt, durationMs: ended.endedAt - ended.startedAt });
     }
     return ended;
+}
+
+/** A mutant attempt that failed or ran out of its limit: its verdict's status and reason. */
+export function verdictOf(attempt) {
+    if (attempt.outcome === "timed-out")
+        return { status: "timeout", reason: limitReason(attempt) };
+    return { status: "killed", reason: attempt.message ?? "the test failed" };
 }
 
 function suffix(shape, entry) {
@@ -1041,13 +1093,16 @@ function settleControl(pass, ended, shape) {
         rmSync(`${pending}/${name}`, { force: true });
         if (passed && !ended.beside) {
             const entry = mutantOf(pass, kill.id);
-            giveVerdict(pass, { id: kill.id, status: "killed", killedBy: kill.test, reason: `${kill.message ?? "the test failed"}${suffix(shape, entry)}`, tests: 1, durationMs: kill.durationMs });
+            giveVerdict(pass, { id: kill.id, status: kill.status, killedBy: kill.test, reason: `${kill.message}${suffix(shape, entry)}`, tests: 1, durationMs: kill.durationMs });
         }
         else
             mark(`${pass.round}/doubt/${key(kill.id)}`);
     }
     if (passed) {
         passedHere.add(test);
+        // Its time, for its mutants' limits.
+        mark(`${pass.shared}/durations/${key(test)}`);
+        writeFileSync(`${pass.shared}/durations/${key(test)}/${ended.worker}-${ended.endedAt - ended.startedAt}`, "");
         return;
     }
     if (ended.outcome === "skipped")
@@ -1055,11 +1110,6 @@ function settleControl(pass, ended, shape) {
     passedHere.delete(test);
     mark(`${pass.round}/unreliable/${ended.invocation}/${key(test)}`);
     writeFileSync(`${pass.round}/unreliable/${ended.invocation}/${key(test)}/${ended.worker}-${Date.now()}`, "");
-}
-
-/** Whether a round runs mutants side by side on a shared server: the main round, and the rest of what it left. */
-export function shared(kind) {
-    return kind === "main" || kind === "rest";
 }
 
 /**

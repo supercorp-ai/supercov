@@ -487,7 +487,8 @@ StrykerJS, which also runs only a mutant's covering tests, counts that kill
 
 ## Timeouts and runaway loops
 
-A mutant's test gets twice StrykerJS's limit (`factor × its measured duration
+In Vitest's pass (Playwright's limit is under "Time." below), a mutant's
+test gets twice StrykerJS's limit (`factor × its measured duration
 + constant`, 1.5× and 5 s): its slowest test's duration (as measured or as its
 baseline ran it, whichever is longer; for a copy that runs its file whole, the
 file's slowest test) × 3 and 10 s. Each copy sets its own limit (`vi.setConfig`
@@ -860,17 +861,53 @@ error (its first line, ANSI stripped) is the verdict's reason.
 another project depends on (`dependencies`, `teardown`: a login that stores
 the session the others start from) run in every invocation with no mutant.
 
-**Time.** A mutant's test gets `1.5 × its measured duration + 5 s` (the
-duration from the attempt's span), plus the project's `expect` timeout
-(default 5 s) and `actionTimeout`, and never less than the test's own
-timeout (the project's, default 30 s, with `test.slow()` and
-`describe.configure`): an assertion that fails waits out its own timeout
-first (a spec's `{ timeout: 15_000 }`), Playwright ends the test at its own
-timeout anyway, and the budget must not cut either short. A mutant that
-makes a test hang costs up to the test's timeout. A test that fails
-on an assertion or an action, even as its time runs out, is a kill; one
-that only ran out of time is run again in a serial round with twice the
-budget before it counts as `timeout`.
+**Time.** A test run with a mutant gets StrykerJS's limit,
+`timeoutFactor × baseline + 5 s` (`timeoutFactor` 1.5 by default;
+`--timeout-factor` or `SUPERCOV_STRONG_TIMEOUT_FACTOR` sets it), or the test's
+own timeout where that is shorter (the project's, `test.slow()`,
+`describe.configure`: Playwright would end it there anyway). The baseline is
+the longest of the test's measured duration and every run of it without a
+mutant that passed in this pass, in any worker, invocation or round (each
+control records its time), with a second at least: a test whose time varies
+is judged by its slowest run under the pass's own load, the cold first run of
+each worker among them. A baseline and a control run with the test's own
+timeout, never this limit.
+
+The limit is Playwright's test timeout for the attempt, from the moment its
+copy takes the mutant, so it interrupts whatever the test waits on: an action
+with no timeout (Playwright's default) is cut by the test's timeout, and an
+`expect` with a timeout of its own ends 250 ms before the test's deadline,
+saying `Test timeout of N ms exceeded`. Neither Playwright's action and
+navigation timeouts nor the expect timeout need changing. A
+`test.setTimeout()` or `test.slow()` in the test's body or hooks may shorten
+the limit, never lengthen it: the baseline ran with them, so its time already
+says how long they let the test take. An attempt whose first error is the
+test's timeout (any error after it failed because of it: a page closed under
+a waiting click) ran out of its limit; one that failed first is a kill, as
+before, even where it then ran out of time.
+
+An attempt that ran out of its limit makes its mutant a `timeout`, detected,
+as in StrykerJS. It is confirmed as a kill is: by the test's next control on
+the same server, and one that ran beside another mutant's attempt, or whose
+control failed, runs again in a serial round. A mutant whose evaluations pass
+the hit limit is a `timeout` at once. The verdict says the limit: `ran past
+its time limit of 9.5 s (1.5 × its 3.0 s baseline + 5 s)`; the summary counts
+such timeouts and states the factor, and the progress lines show each running
+attempt's limit and when it is near it.
+
+This replaces a limit that was never shorter than the test's own timeout,
+plus the expect and action timeouts, with a second attempt, one test at a
+time and twice the time, for a test that only ran out of it. A mutant that
+broke the page then cost the test's whole timeout: on a large application's
+e2e suite (billing area, 742 kills in 8 jobs × 6 slots) the median kill took
+6.2 s but the 90th percentile 60.7 s, 7.4 hours of slot time in all, nearly
+all of it clicks and `expect`s with timeouts of 30 and 60 s waiting for an
+element that never came. One attempt at the limit, final, is what Vitest's
+pass does too (a stage's straggler rule aside), and StrykerJS's factor keeps
+its convention; a Vitest copy gets twice it because its limit covers a whole
+test file. The two-step retry is gone: under the old floor it decided nearly
+nothing (1 timeout in that area), and at the new limit a real hang would cost
+three times the limit, one test at a time.
 
 **Run alone, the server started with the mutant.** That per-request
 switching is exact only where nothing one request does reaches another, and
@@ -903,8 +940,9 @@ Validated on playwright-test-coverage (`910da570`, a Vite app served by
 Supercov's own config from `.supercov/` used to find "No tests"): its 9
 mutants run are 7 `timeout` and 2 `survived`, and each applied by hand to
 the source with `npx playwright test` as written agrees: the 7 fail (their
-tests wait out Playwright's 30 s), the 2 pass. The pass takes 400 s, nearly
-all of it those tests' own waits and their retry with twice the budget.
+tests wait out Playwright's 30 s), the 2 pass. The pass took 400 s, nearly
+all of it those tests' own waits and their retry with twice the budget,
+before the time limit above.
 
 ## Runners that start a process per test file (jobs)
 
