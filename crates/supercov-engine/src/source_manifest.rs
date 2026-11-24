@@ -1048,15 +1048,13 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     .iter()
                     .any(|test| path == test || path.starts_with(&format!("{test}::")))
             };
+            // A declaration added or removed changes the one holding it, so
+            // what changed and what went say where every addition is too.
             let confined = diff
                 .changed
                 .iter()
                 .chain(&diff.removed)
-                .all(|unit| is_test(&before.units[*unit].path))
-                && diff
-                    .added
-                    .iter()
-                    .all(|unit| is_test(&after.units[*unit].path));
+                .all(|unit| is_test(&before.units[*unit].path));
             let module = rust_module_path(file);
             // The test code the change is in: each module or test it touched.
             let moved = diff
@@ -1535,9 +1533,8 @@ fn embedded_files(
         if !source.contains("include") {
             continue;
         }
-        let Some(outline) = crate::rust_reads::outline(&source) else {
-            continue;
-        };
+        // A file that does not parse embeds nothing Supercov can read.
+        let outline = crate::rust_reads::outline(&source).unwrap_or_default();
         let directory = Path::new(file).parent().unwrap_or(Path::new(""));
         // A path that climbs out of the checkout names nothing in it.
         let embeds = outline.embeds.into_iter().filter_map(|embed| {
@@ -1555,10 +1552,9 @@ fn embedded_files(
                 .zip(now_unit)
                 .and_then(|(code, path)| code.units.iter().position(|u| u.path == path))
                 .unwrap_or(0);
-            let what = before.map_or_else(
-                || "top level".to_owned(),
-                |code| code.units[unit].describe(),
-            );
+            let what = before
+                .map(|code| code.units[unit].describe())
+                .unwrap_or_default();
             let prefix = format!("{}/", path.trim_end_matches('/'));
             changed
                 .iter()

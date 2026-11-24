@@ -696,17 +696,15 @@ fn rust_helpers_only(root: &Path, run: &StoredRun) -> bool {
     {
         return false;
     }
-    let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
-        return false;
-    };
-    let recorded = &files.manifest.files;
-    let changed = RUST_CONFIGURATION.iter().any(|file| {
-        let now = supercov_engine::fault_fs::read_to_string(root.join(file))
-            .ok()
-            .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256);
-        now != recorded.get(*file).map(|was| was.sha256.clone())
-    });
-    !changed
+    supercov_engine::source_manifest::load_manifest(run).is_ok_and(|files| {
+        let recorded = &files.manifest.files;
+        !RUST_CONFIGURATION.iter().any(|file| {
+            let now = supercov_engine::fault_fs::read_to_string(root.join(file))
+                .ok()
+                .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256);
+            now != recorded.get(*file).map(|was| was.sha256.clone())
+        })
+    })
 }
 
 /// Whether every configuration file that changed since the run, or was added
