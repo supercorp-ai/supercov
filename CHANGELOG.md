@@ -10,7 +10,7 @@
 
 **Fixed**
 
-- A Playwright pass its budget stopped could record false kills. The stop takes the app's servers down under the tests still running, and a test that then failed (its page's script never served) stood as a kill, since no control came after it; an attempt Playwright reported as interrupted counted as failing too. In a stopped round a kill no control confirmed is now no verdict, an interrupted attempt settles nothing, and the mutant runs that candidate again in the next pass, resuming from the candidates it passed.
+- A Playwright pass its budget stopped could record false kills. The stop takes the app's servers down under the tests still running, and a test that then failed (its page's script never served) stood as a kill, since no control came after it; an attempt Playwright reported as interrupted counted as failing too. Now the pass notes when it began to stop, and no attempt that ended after that counts (as none after an error outside any test does); an interrupted attempt settles nothing, and the mutant runs that candidate again in the next pass, resuming from the candidates it passed. A kill that ended before the stop still stands.
 - A command its budget, a timeout or a signal ended no longer leaves behind a process that left its process group: Playwright starts its web server detached and stops it only as it ends itself, so a stopped pass left the server running, and the next pass failed at once (`... is already used`), its mutants `error`s. Such groups are now told to end with the command, and killed with it after the grace period.
 
 ## 4.29.6

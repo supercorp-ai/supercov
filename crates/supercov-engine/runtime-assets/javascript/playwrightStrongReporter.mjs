@@ -10,6 +10,7 @@
 // verdict its verdict, or the round that runs it next: one verdict a mutant,
 // from whichever invocations ran it, and what was cut short is unfinished.
 import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, queuedWork, readJson, reasonOf, serialFile, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
 
@@ -326,10 +327,13 @@ export default class SupercovPlaywrightStrongReporter {
             else
                 serial.push(job);
         };
-        const trustedUntil = globalError ? globalError.at : Infinity;
-        // A round the budget or a signal stopped: its servers went down
-        // under the tests still running, which then failed for that.
+        // A round the budget or a signal stopped: from the moment it began
+        // to stop (`stopped-at`, beside the results), its servers went down
+        // under the tests still running, and a test that ended after it
+        // says nothing of its mutant. So, from an error outside any test.
         const stopped = process.env["SUPERCOV_STRONG_STOPPED"] === "1";
+        const stoppedAt = Number(readJsonOr(join(dirname(pass.resultsPath), "stopped-at"))) || Infinity;
+        const trustedUntil = Math.min(globalError ? globalError.at : Infinity, stoppedAt);
         // One mutant an invocation: which invocation took each, and where a
         // server of that invocation ran it (an invocation whose server was
         // started before it, outside it, never ran its mutant there).
@@ -373,11 +377,9 @@ export default class SupercovPlaywrightStrongReporter {
                 continue;
             }
             // A kill no control came after (the round ended first): as sure as a
-            // kill on a server no other mutant's attempt shared. Not where the
-            // round was stopped: the stop takes the servers down under the
-            // tests still running, and a test that failed then failed for it.
-            // The mutant runs that candidate again in the next pass.
-            const killer = stopped ? undefined : failed.find((attempt) => !attempt.beside && attempt.endedAt < trustedUntil);
+            // kill on a server no other mutant's attempt shared, where it ended
+            // before the round began to stop.
+            const killer = failed.find((attempt) => !attempt.beside && attempt.endedAt < trustedUntil);
             if (killer) {
                 const { status, reason } = verdictOf(killer);
                 verdict({ status, killedBy: killer.original, reason: `${reason}${suffix}` });

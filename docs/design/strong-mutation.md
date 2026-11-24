@@ -851,12 +851,16 @@ engine runs the strong reporter's `judge`, which gives the rest theirs: a kill
 no control came after (the round ended first) stands, as any kill did before;
 a candidate that failed without the mutant is left out; what did not run is
 unfinished, and runs in a `rest` round. A pass the budget stopped is judged
-too, and keeps what it finished, but no kill there that no control confirmed:
-the stop takes the app's servers down under the tests still running, and a
-test that failed then failed for that. A fixture's survivor failed so, its
-page's script never served, and stood as a kill. Such a mutant runs that
-candidate again in the next pass, and an attempt Playwright reports as
-interrupted settles nothing.
+too, and keeps what it finished, but nothing that ended after the pass began
+to stop: the stop takes the app's servers down under the tests still
+running, and a test that failed then failed for that (a fixture's survivor
+failed so, its page's script never served, and stood as a kill). The CLI
+writes when it began to stop (`stopped-at`, beside the results, a poll early
+for a signal the supervisor heard first), and the judge trusts no attempt
+that ended after it, as it trusts none after an error outside any test. Such
+a mutant runs that candidate again in the next pass; an attempt Playwright
+reports as interrupted settles nothing. A kill that ended before the stop,
+waiting only for its control, still stands.
 
 **What the pass says as it goes.** Each invocation's runner writes a status
 file (its round, the baselines, attempts and controls so far, the tests
@@ -1345,8 +1349,9 @@ passed survived. Three conditions keep the fact the same fact:
 - **Which passes count.** The Playwright judge records, for each mutant its
   round leaves without a verdict, the candidates whose attempt passed before
   any error outside a test (the same set it would count toward a survivor),
-  as a `progress` record in the results. An attempt Playwright interrupted
-  (the budget's termination) neither passed nor failed: it settles nothing.
+  as a `progress` record in the results; in a stopped round, those before
+  it began to stop. An attempt Playwright interrupted (the budget's
+  termination) neither passed nor failed: it settles nothing.
 - **When it stops holding.** It is invalidated as a verdict is, candidate by
   candidate: carried to a later run (`supercov mutants` after an edit, a
   later round's jobs) only where the mutant's file is byte for byte as it

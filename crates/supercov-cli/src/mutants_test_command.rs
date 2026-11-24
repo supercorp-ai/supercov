@@ -1400,6 +1400,18 @@ impl Progress {
                 let Some(signal) = stop_signal(budget_at) else {
                     continue;
                 };
+                if stopping.is_none() {
+                    // From here the command's servers go down under the
+                    // tests still running: the driver trusts no test that
+                    // ends after it (a poll earlier, for a signal the
+                    // supervisor heard first).
+                    let _ = std::fs::write(
+                        results.with_file_name(STOPPED_AT),
+                        now_ms()
+                            .saturating_sub(SAVE_INTERVAL.as_millis() as u64)
+                            .to_string(),
+                    );
+                }
                 let since = *stopping.get_or_insert_with(std::time::Instant::now);
                 if since.elapsed() >= STOP_PATIENCE {
                     end_now(&results, &saving, signal);
@@ -1421,6 +1433,17 @@ impl Drop for Progress {
         let _ = self.stop.send(());
         let _ = self.thread.take().map(std::thread::JoinHandle::join);
     }
+}
+
+/// The file beside a pass's results that says when the pass began to stop,
+/// in milliseconds since the epoch (`playwrightStrongReporter.mjs` reads it).
+const STOPPED_AT: &str = "stopped-at";
+
+/// Now, in milliseconds since the epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 /// How long a pass told to stop has to end before this process ends it.
