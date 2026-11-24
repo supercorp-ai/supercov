@@ -99,10 +99,13 @@ sent the request nor saw its response, and its own evidence never ran the
 code: it runs as without the mutant, which is the rule above. What the
 request left in shared state for a later test is that test's to observe
 without a read, which a by-time credit to the one test running already
-assumes. Every test stays a candidate where any of the work was no request's
-(a server's start, a timer), kept no time, came while no test ran (a
-readiness check, a delayed webhook: a server started with the mutant serves
-it too), or ran outside the servers (a test runner's own process, a page),
+assumes. Only a request the run marks as sent while a test of its
+server ran counts (`REQUEST_DURING_TESTS`); the tests taken are those of any
+server running then, a superset of that server's, as the record no longer
+says which server served it. Every test stays a candidate where any of the
+work was no request's (a server's start, a timer), kept no time, came while
+no test of its server ran (a readiness check, a delayed webhook: a server
+started with the mutant serves it too), or ran outside the servers (a test runner's own process, a page),
 and for a mutant with no point. Such a mutant still runs as the plan says of
 its server (`serverWide`).
 
@@ -110,7 +113,9 @@ On a large application's e2e suite, the billing area's run measured on 4
 slots (486 tests, 450 of them candidates anywhere, 1,709 mutants to run): 515
 of its mutants had every one of the 450 as candidates, from webhooks a
 payment provider's mock sent while the slots' tests ran, and held 87% of the
-area's candidate runs. With their requests' times they have 7 to 450 (90 at
+area's candidate runs. With their requests' times (that run, recorded before the
+during-tests mark, taken as if every such request came during tests where a
+test of any server was running) they have 7 to 450 (90 at
 the median; 9 still 400 or more): 264,936 candidate runs became 79,891, and
 the time a survivor costs (the sum of its candidates' measured times) 142.5 h
 became 45.8 h for the area. 505 of them are `by-time` (a request of theirs
