@@ -143,7 +143,11 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      # A version, not the latest: asking GitHub's API for the latest
+      # release timed out on 2026-11-24 and failed the job before its tests.
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.9"
       - uses: actions/setup-go@v5
         with:
           go-version: stable
