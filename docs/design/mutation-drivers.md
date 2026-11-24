@@ -175,7 +175,9 @@ project root, and two files.
   mutant only work outside any test ran (a run with no test, a test file's
   modules loaded with none of its tests) is decided `no-coverage`
   (`no-test-ran-it`); one only failing tests ran, `survived`
-  (`no-passing-candidate`). A run that recorded no test is refused before
+  (`no-passing-candidate`); a JavaScript module-level value no test read,
+  `survived` (`no-test-read-it`, `strong-mutation.md`, Module-level values).
+  A run that recorded no test is refused before
   any driver runs.
 
 **What the driver does with each mutant**, as `strong-mutation.md` describes

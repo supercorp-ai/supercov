@@ -1290,6 +1290,7 @@ fn instrument_workspace(
                 write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
             }
             if frameworks.testng {
+                // fault-site: jvm-run.instrument-workspace.write-1
                 write(
                     &test.join("SupercovTestNGListener.java"),
                     TESTNG_LISTENER_SOURCE,
@@ -1310,6 +1311,7 @@ fn instrument_workspace(
             continue;
         };
         note_relaxations(&existing, &updated, &mut relaxed);
+        // fault-site: jvm-run.instrument-workspace.write-2
         write(&path, &updated)?;
     }
     let license_check = build == JvmBuild::Maven && checks_license_headers(workspace);
@@ -1399,6 +1401,7 @@ fn instrument_workspace(
                 gradle_with_launcher(&existing, name.ends_with(".kts"), &catalog, &junit4)
             {
                 added_vintage |= !junit4.is_empty();
+                // fault-site: jvm-run.instrument-workspace.write-3
                 write(&path, &updated)?;
                 added_launcher = Some(name);
             }
@@ -1435,6 +1438,7 @@ fn instrument_workspace(
                 if asks_for_parallel_execution(existing.as_deref()) {
                     serialised.insert(module.directory.clone());
                 }
+                // fault-site: jvm-run.instrument-workspace.write-4
                 write(&properties, &sequential_properties(existing.as_deref()))?;
             } else if asks_for_parallel_execution(existing.as_deref()) {
                 // The suite runs the way its author wrote it. Where that means
@@ -1446,6 +1450,7 @@ fn instrument_workspace(
             }
         }
         if frameworks.testng {
+            // fault-site: jvm-run.instrument-workspace.write-5
             write(
                 &resources.join(TESTNG_SERVICES_FILE),
                 &format!("{TESTNG_LISTENER_CLASS}\n"),
@@ -1731,6 +1736,7 @@ fn instrument_ant(
     // tree sorting first is not where the runtime belongs.
     let mut roots: BTreeMap<String, usize> = BTreeMap::new();
     for (relative, _) in &project.files.sources {
+        // fault-site: jvm-run.instrument-ant.read-to-string-1
         let Ok(source) = fs::read_to_string(workspace.join(relative)) else {
             continue;
         };
@@ -1748,6 +1754,7 @@ fn instrument_ant(
                 .into(),
         );
     };
+    // fault-site: jvm-run.instrument-ant.write-1
     write(
         &workspace
             .join(&first)
@@ -1768,34 +1775,40 @@ fn instrument_ant(
     let testng_sources = formatter.join("testng-src");
     let classes = formatter.join("classes");
     let config = configuration(probe_count, &project.decision_widths, &module.evidence);
+    // fault-site: jvm-run.instrument-ant.write-2
     write(
         &sources
             .join(PACKAGE_DIRECTORY)
             .join("SupercovAntFormatter.java"),
         ANT_FORMATTER_SOURCE,
     )?;
+    // fault-site: jvm-run.instrument-ant.write-3
     write(
         &sources.join(PACKAGE_DIRECTORY).join("SupercovConfig.java"),
         &config,
     )?;
+    // fault-site: jvm-run.instrument-ant.write-4
     write(
         &listener_sources
             .join(PACKAGE_DIRECTORY)
             .join("SupercovListener.java"),
         LISTENER_SOURCE,
     )?;
+    // fault-site: jvm-run.instrument-ant.write-5
     write(
         &listener_sources
             .join(PACKAGE_DIRECTORY)
             .join("SupercovConfig.java"),
         &config,
     )?;
+    // fault-site: jvm-run.instrument-ant.write-6
     write(
         &testng_sources
             .join(PACKAGE_DIRECTORY)
             .join("SupercovTestNGListener.java"),
         TESTNG_LISTENER_SOURCE,
     )?;
+    // fault-site: jvm-run.instrument-ant.write-7
     write(
         &testng_sources
             .join(PACKAGE_DIRECTORY)
@@ -1816,6 +1829,7 @@ fn instrument_ant(
     // import chain never reaches. Those sit at the top of the tree the copy
     // is laid out within.
     if let Some(directory) = &tree {
+        // fault-site: jvm-run.instrument-ant.read-dir
         let Ok(entries) = fs::read_dir(directory) else {
             return Err(format!("could not read {}", directory.display()));
         };
@@ -1839,6 +1853,7 @@ fn instrument_ant(
     }
     let mut patched = 0usize;
     for file in candidates {
+        // fault-site: jvm-run.instrument-ant.read-to-string-2
         let Ok(text) = fs::read_to_string(&file) else {
             continue;
         };
@@ -1870,6 +1885,7 @@ fn instrument_ant(
                 format!("could not prepare {} in the copy: {error}", file.display())
             })?;
         }
+        // fault-site: jvm-run.instrument-ant.write-8
         write(&file, &updated)?;
         patched += 1;
     }
@@ -1959,6 +1975,7 @@ pub fn current_jvm_integrity(
     command: &[String],
     source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
+    // fault-site: jvm-run.current-jvm-integrity
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
     let files = crate::jvm_project::discover_jvm_files(&root)?;
     let mut inputs = jvm_integrity_inputs(&files, command);
@@ -2487,6 +2504,7 @@ impl JvmServer {
             .instrumented
             .iter()
             .try_for_each(|(relative, instrumented)| {
+                // fault-site: jvm-run.prepare.write-1
                 write(&workspace.join(relative), instrumented)
             })?;
         let probe_count = project
@@ -2503,6 +2521,7 @@ impl JvmServer {
             .collect::<BTreeSet<_>>();
         // A source instrumented above is in a module.
         modules.iter().try_for_each(|module| {
+            // fault-site: jvm-run.prepare.write-2
             write(
                 &workspace
                     .join(module)
@@ -2513,6 +2532,7 @@ impl JvmServer {
             )
         })?;
         let directory = root.join(".supercov/work").join(run_id).join("jvm");
+        // fault-site: jvm-run.prepare.create-dir-all
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         Ok(Some(Self {
             project,
@@ -3980,9 +4000,15 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1293, 1313, 1402, 1438, 1449] {
+        for place in [
+            "jvm-run.instrument-workspace.write-1",
+            "jvm-run.instrument-workspace.write-2",
+            "jvm-run.instrument-workspace.write-3",
+            "jvm-run.instrument-workspace.write-4",
+            "jvm-run.instrument-workspace.write-5",
+        ] {
             let root = make();
-            let fault = format!("fs.write#jvm_run.rs:{line}");
+            let fault = format!("fs.write#{place}");
             let failed = crate::fault::during(&fault, || {
                 instrument_workspace(&root, &root.join("evidence"), true, None)
             });
@@ -4047,15 +4073,25 @@ mod tests {
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1734@2", || {
-            instrument_workspace(&root, &root.join("evidence"), true, None)
-        })
+        crate::fault::during(
+            "fs.read_to_string#jvm-run.instrument-ant.read-to-string-1@2",
+            || instrument_workspace(&root, &root.join("evidence"), true, None),
+        )
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1751, 1771, 1777, 1781, 1787, 1793, 1799, 1873] {
+        for place in [
+            "jvm-run.instrument-ant.write-1",
+            "jvm-run.instrument-ant.write-2",
+            "jvm-run.instrument-ant.write-3",
+            "jvm-run.instrument-ant.write-4",
+            "jvm-run.instrument-ant.write-5",
+            "jvm-run.instrument-ant.write-6",
+            "jvm-run.instrument-ant.write-7",
+            "jvm-run.instrument-ant.write-8",
+        ] {
             let root = make();
-            let fault = format!("fs.write#jvm_run.rs:{line}");
+            let fault = format!("fs.write#{place}");
             let failed = crate::fault::during(&fault, || {
                 instrument_workspace(&root, &root.join("evidence"), true, None)
             });
@@ -4153,15 +4189,16 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1842", || {
-            instrument_workspace(&workspace, &top.join("evidence"), true, None)
-        });
+        let _ = crate::fault::during(
+            "fs.read_to_string#jvm-run.instrument-ant.read-to-string-2",
+            || instrument_workspace(&workspace, &top.join("evidence"), true, None),
+        );
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1819",
-            "fs.read_dir#workspace.rs:2469",
-            "fs.symlink_metadata#workspace.rs:2354",
+            "fs.read_dir#jvm-run.instrument-ant.read-dir",
+            "fs.read_dir#workspace.copy-small-links-around.read-dir",
+            "fs.symlink_metadata#workspace.unfold-links-to.symlink-metadata",
         ] {
             let (top, _, workspace) = make(false, &beside);
             let failed = crate::fault::during(fault, || {

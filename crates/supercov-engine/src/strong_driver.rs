@@ -481,6 +481,7 @@ mod tests {
             statement: None,
             function: None,
             function_hit_by: Default::default(),
+            narrowed: None,
         };
         let rust = crate::mutant_list::RUST;
         let javascript = crate::mutant_list::JAVASCRIPT;

@@ -89,6 +89,137 @@ candidate, whatever its verdict, when:
 And a mutant in module-level code (no function around it) takes every test
 of each file that ran it, whole: a module loaded lazily by one test keeps the
 mutated value for the file's later tests, which never run that code again.
+Except where its value is read through a literal: see Module-level values.
+
+## Module-level values
+
+A mutant in code that runs as its module loads changes a value once, and the
+module keeps it. By the rule above every test that loaded the module is a
+candidate, and a server loads its modules as it starts, so on a browser suite
+against one server that is every test of the run: on a large application's
+e2e suite of 1,703 tests, 6,815 of 55,565 mutants to run had over a thousand
+candidates, nearly all in translation tables, option lists and table
+definitions, and a survivor among them ran every one. Yet only a test whose
+work reads the value can see it differ. Where Supercov can see every read,
+the candidates are the readers.
+
+**Which values.** A top-level `const`, `let` or `var` whose initializer is an
+object or array literal (under `as`, `satisfies`, `!` or parentheses), and
+the literals it holds as values, at any depth (`js_value_reads.rs`). Not a
+value Next.js reads from the source (`next-segment-config`), and not a value
+made by a call, a member read or anything else, wherever the literal is. A
+mutant is linked to such a literal when:
+
+- it is the literal itself (`ObjectLiteral` `{}`, `ArrayDeclaration` `[]`),
+  and every value the literal holds, at any depth, is one the next item
+  allows: replacing the literal only stops its values being made;
+- or it is in the value of one of the literal's properties or elements, and
+  that value is *inert*: literals, literals of literals, functions (made, not
+  run), and unary, binary (not `in` or `instanceof`), logical, conditional
+  and sequence operators and templates over them, with names read only where
+  no operator applies to them. Evaluating an inert value, skipping it, or
+  evaluating another part of it than before runs no code of the program's,
+  writes nothing and cannot throw: an operator over a name's value can run
+  its `valueOf` or throw (a `BigInt` mixed with a number), a call can keep
+  its arguments anywhere, a member read can run a getter.
+
+So the mutant changes nothing but the value its place in the literal holds,
+and that value is reachable only through the literal. A mutant in a call's
+argument (`pgTable("users", ...)`), in a key, or in a function stays as
+before.
+
+**Recording reads.** Where the mutants' probes are placed
+(`SUPERCOV_MUTANTS=1`, `supercov mutants`), each such literal is made through
+`trackV2(file, base, keys, literal)`, which returns a proxy of it. Its traps
+-- `get`, `has`, `getOwnPropertyDescriptor`, `ownKeys`, `set`,
+`defineProperty`, `deleteProperty` -- each hit the literal's *any* point, and
+the point of the key read where it is one a mutant is under. A hit is a
+coverage hit: it is credited to the test whose work made it, a request's
+test on a server, the page's test in a browser, as a statement's is, and it
+dedupes within a test the same way. Nested literals are proxies of their
+own, made as the outer literal is, so whatever holds one, wherever it was
+passed, reads it through its traps. A mutant is linked to the read point of
+its key, or to the literal's any point where it is the literal, or where its
+key is not known from the source (a computed key, an element after a
+spread).
+
+The points are recorded only: they are not statements, branches or anything
+coverage counts, they come after the file's other points so none moves, and
+a test's hits as queries show them leave them out (ids `read:...`).
+
+**Reads while a module loads.** A read made while a module's top level runs
+may copy the value into something no proxy watches (a lookup table built from
+it, a string taken from it). Each read point has an *escape* twin, hit
+instead while a module is loading: from a module's registration, the first
+thing its instrumented code does, until the first microtask after it, as a
+module graph evaluates without giving up the thread; and again where a
+module's top level resumes after an `await` (`resumeV2`). Where any record
+hit a mutant's escape point, its candidates are those of every test that
+loaded the module, as before.
+
+**The candidates.** For a linked module-level mutant (`reads` in
+`mutants.json`) whose escape point no record hit, a record takes tests by its
+role as an infecting record does (`strong_plan.rs`, `Selecting::select`):
+
+- a test's record that hit its read point takes the test (`read`); in a test
+  runner's own process (Vitest, Jest, Mocha, `node:test`) also every test of
+  its file, whole, as the module is shared with them;
+- a test's record that only loaded the module takes the test and its file in
+  a runner's own process, as before, and nothing in a browser suite: its
+  server's and its page's modules are not its file's;
+- a test file's module setup takes every test of the file;
+- a record no test is credited with (a server's start-up, work between
+  tests) that read the value takes every test; one that only loaded the
+  module takes none;
+- a test whose evidence is not its own (`run-wide`, `partial`) is a
+  candidate, as always.
+
+A mutant no test read is `survived` without running (`no-test-read-it`).
+
+**Why it is sound.** The argument is the one for every candidate, made for a
+value instead of an evaluation. With the mutant on, the program runs as
+without it up to the first moment the mutated value is used, since nothing
+else differs (the literal's evaluation does nothing but make the value). A
+value made at module level is used only through the binding or literal
+holding it, and every use of an object is an operation on it: a property
+read, an enumeration, a key test, a write. Each of those on a tracked literal
+is a trap, and a trap records a hit for whichever test's work made it. So a
+test whose records hit none of the mutant's points never used the value that
+differs, and runs as it did. What escapes the traps is covered: a read while
+a module loads (the escape points), a read no test was credited with (every
+test), a test whose attribution is not exact (always a candidate), and a run
+measured without the probes (no link, so every test, as before).
+
+What it assumes is what every candidate assumes: that a test's own evidence
+is its own. A value one test read and left in a cache another test reads
+later is that other test's to observe without a read; the same holds of a
+function's result kept in a cache, which the plan has always taken as the
+first test's alone.
+
+**What changes for the program.** Only where the probes are placed, and only
+for the tracked literals: a proxy behaves as its target for every operation
+of the language, `Array.isArray` and `instanceof` included. `structuredClone`
+refuses a proxy, so the runtime's own `structuredClone` copies a value
+holding one through its traps and clones the copy. A tracked literal sent
+through `postMessage`, or shown by `util.inspect` (which prints the target
+and reads nothing), is not covered. The strong pass's own copy has no proxy.
+
+**Validation.** `a_module_level_value_s_mutants_run_against_the_tests_that_read_it`
+measures a browser suite with a server's module-level table twice, with the
+probes and without, and runs both passes: every module-level mutant the
+broad pass kills, the narrowed pass kills, with the broad killer among its
+candidates. On a large application's e2e suite, the same check ran on the
+module-level mutants of its heaviest files.
+
+**What the plan says.** Each narrowed mutant carries `narrowed: { from, to }`
+(`escaped: true` where a read while loading kept every test), the plan's and
+the pass's summaries `narrowed: { mutants, candidatesBefore,
+candidatesAfter, escaped }`, and their text a line each:
+
+```text
+  narrowed      7 module-level mutant(s) to the tests that read their value: 6 candidate(s) where loading their module gave 49
+  2 module-level mutant(s) kept every test that loaded their module: their value was read while a module loaded
+```
 
 ## The continuous pass (Vitest 4 and later)
 

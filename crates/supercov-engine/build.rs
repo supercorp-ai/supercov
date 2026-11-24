@@ -69,6 +69,68 @@ fn compile_kotlin_grammar(crate_root: &Path) {
         .compile("supercov-tree-sitter-kotlin");
 }
 
+/// The call sites `src` names for fault injection, written to
+/// `fault_sites.rs` for `crate::fault` to include. A line holding only
+/// `// fault-site: NAME` names the call on the line below it, so a test fails
+/// that call by its name however the lines above it move. A name is
+/// lowercase words joined by `-` and `.`, with a `.` at least. The build
+/// fails on a name given twice, a name that is no such word, or a comment
+/// with no code below it. (The CLI's build script holds the same function
+/// for its own sites.)
+fn name_fault_sites(crate_root: &Path) {
+    let source = crate_root.join("src");
+    let mut files = Vec::new();
+    collect_files(&source, &mut files);
+    let mut named = std::collections::BTreeMap::new();
+    let mut table = String::from("&[\n");
+    for path in files
+        .iter()
+        .filter(|path| path.extension().is_some_and(|e| e == "rs"))
+    {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let relative = path
+            .strip_prefix(&source)
+            .expect("a source under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let lines = text.lines().collect::<Vec<_>>();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(name) = line.trim().strip_prefix("// fault-site:") else {
+                continue;
+            };
+            let name = name.trim();
+            let place = format!("src/{relative}:{}", index + 1);
+            let word = |word: &str| {
+                !word.is_empty()
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            };
+            assert!(
+                name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name.contains('.')
+                    && name.split(['-', '.']).all(word),
+                "{place}: `{name}` is no fault site name: \
+                 lowercase words joined by `-` and `.`, with a `.` at least"
+            );
+            let below = lines.get(index + 1).map_or("", |line| line.trim());
+            assert!(
+                !below.is_empty() && !below.starts_with("//"),
+                "{place}: the fault site `{name}` names no call: the line below it is no code"
+            );
+            if let Some(earlier) = named.insert(name.to_owned(), place.clone()) {
+                panic!("two fault sites are named `{name}`: {earlier} and {place}");
+            }
+            writeln!(table, "    ({name:?}, {relative:?}, {}),", index + 2)
+                .expect("string formatting");
+        }
+    }
+    table.push(']');
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("output directory"));
+    fs::write(out.join("fault_sites.rs"), table).expect("failed to write fault_sites.rs");
+}
+
 fn main() {
     // Everything digested lives inside the crate: the runtime shims are
     // synchronised copies under runtime-assets/, so the tarball cargo packages
@@ -82,6 +144,7 @@ fn main() {
     let go_runtime_root = crate_root.join("runtime-assets/go");
     let jvm_runtime_root = crate_root.join("runtime-assets/jvm");
     compile_kotlin_grammar(&crate_root);
+    name_fault_sites(&crate_root);
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
     collect_files(&runtime_root, &mut files);

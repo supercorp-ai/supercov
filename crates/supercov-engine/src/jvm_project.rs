@@ -278,6 +278,7 @@ fn walk(
     files: &mut JvmFiles,
 ) -> Result<(), String> {
     let jvm_only = targets_only_the_jvm(root);
+    // fault-site: jvm-project.walk
     let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries

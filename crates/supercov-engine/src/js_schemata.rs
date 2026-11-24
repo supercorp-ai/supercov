@@ -95,7 +95,7 @@ const NEXT_SEGMENT_EXPORTS: &[&str] = &[
 /// The static exports Next.js reads from `file`: the segment config in
 /// any file (a route's, or one a route re-exports from), and `config`
 /// where Next.js reads it, in middleware or a proxy and under `pages/`.
-fn next_static_exports(file: &str) -> Vec<&'static str> {
+pub(crate) fn next_static_exports(file: &str) -> Vec<&'static str> {
     let mut names = NEXT_SEGMENT_EXPORTS.to_vec();
     let stem = file
         .rsplit('/')

@@ -1891,6 +1891,7 @@ fn listed_with(
                 ),
             }),
             untestable: None,
+            reads: None,
             is_static: false,
             unplaceable: None,
         })

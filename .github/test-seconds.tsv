@@ -176,7 +176,9 @@ a_rust_run_past_its_timeout_is_stopped_and_ends_124	45.0	30.0
 a_rust_run_that_cannot_publish_says_so_and_clears_its_work	3.3	1.5
 a_rust_run_that_cannot_put_its_wrangler_in_place_says_so	9.0	12.0
 a_rust_run_told_to_stop_takes_its_test_with_it	15.0	10.0
-a_rust_run_whose_own_step_fails_says_so	150.0	250.0
+a_rust_run_whose_own_step_fails_says_so	50.0	83.3
+a_rust_run_whose_own_step_fails_says_so_second_share	50.0	83.3
+a_rust_run_whose_own_step_fails_says_so_third_share	50.0	83.3
 a_saved_answer_to_another_question_is_not_used	0.0	0.0
 a_saved_assessment_reads_from_its_files_down_to_one_statement_and_one_test	0.5	0.6
 a_selector_that_matches_nothing_or_several_says_so	2.0	1.2

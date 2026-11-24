@@ -714,6 +714,7 @@ pub fn coverage_mutants_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
+    // fault-site: mutants-query.coverage-mutants-query
     let mutation = index.mutation()?;
     let files = mutation
         .as_ref()

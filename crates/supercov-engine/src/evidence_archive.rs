@@ -260,6 +260,7 @@ fn collect_directory(
     prefix: Option<&str>,
     entries: &mut Vec<EvidenceArchiveEntry>,
 ) -> Result<(), EvidenceArchiveError> {
+    // fault-site: evidence-archive.collect-directory
     let mut children = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
     children.sort_by_key(|entry| entry.file_name());
     for child in children {
@@ -481,6 +482,7 @@ fn write_entries(
     let parent = destination
         .parent()
         .ok_or_else(|| EvidenceArchiveError::InvalidPath(destination.display().to_string()))?;
+    // fault-site: evidence-archive.write-entries.create-dir-all
     fs::create_dir_all(parent)?;
 
     let (temporary, file) = loop {
@@ -509,6 +511,7 @@ fn write_entries(
         fs::sync_all(&file)?;
         let compressed_bytes = fs::file_metadata(&file)?.len();
         drop(file);
+        // fault-site: evidence-archive.write-entries.rename
         fs::rename(&temporary, destination)?;
         sync_directory(parent);
         Ok(EvidenceArchiveMetadata {
@@ -674,6 +677,7 @@ struct Hashing<R> {
 
 impl<R: Read> Read for Hashing<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        // fault-site: evidence-archive.read.read-from
         let read = fs::read_from(&mut self.inner, buffer)?;
         sha2::Digest::update(&mut self.hash, &buffer[..read]);
         self.bytes += read as u64;
@@ -694,6 +698,7 @@ pub(crate) fn read_archive_each(
     let input = BufReader::with_capacity(
         128 * 1024,
         Hashing {
+            // fault-site: evidence-archive.read-archive-each
             inner: fs::open(path)?,
             hash: sha2::Digest::new(),
             bytes: 0,

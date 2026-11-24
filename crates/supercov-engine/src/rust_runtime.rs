@@ -388,6 +388,7 @@ fn settle_under(
     layout: &crate::rust_instrumenter::RustProbeLayout,
     settled: &mut [u8],
 ) -> Result<(), RustProbeReadError> {
+    // fault-site: rust-runtime.settle-under.read-dir
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -396,6 +397,7 @@ fn settle_under(
     for entry in entries {
         let entry = entry.map_err(|error| RustProbeReadError::Io(error.to_string()))?;
         let kind =
+            // fault-site: rust-runtime.settle-under.file-type
             fs::file_type(&entry).map_err(|error| RustProbeReadError::Io(error.to_string()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if kind.is_dir() {
@@ -404,6 +406,7 @@ fn settle_under(
             && name.starts_with(&format!("{token}-"))
             && name.ends_with(".region")
         {
+            // fault-site: rust-runtime.settle-under.read-file
             let bytes = fs::read(entry.path())
                 .map_err(|error| RustProbeReadError::Io(error.to_string()))?;
             // Both as long as the layout's cfgs, which are some.
@@ -426,6 +429,7 @@ pub fn read_rust_region_directory(
     layout: &crate::rust_instrumenter::RustProbeLayout,
 ) -> Result<Vec<(String, Vec<RustProbeEntry>)>, RustProbeReadError> {
     let mut files = Vec::new();
+    // fault-site: rust-runtime.read-rust-region-directory
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1581,10 +1585,10 @@ fn main() {
         // An entry, its type, a directory below or a region that cannot be
         // read stops the settlement.
         for fault in [
-            "fs.read_dir entry#rust_runtime.rs:391",
-            "fs.read_dir entry#rust_runtime.rs:391@2",
-            "fs.file_type#rust_runtime.rs:399",
-            "fs.read#rust_runtime.rs:407",
+            "fs.read_dir entry#rust-runtime.settle-under.read-dir",
+            "fs.read_dir entry#rust-runtime.settle-under.read-dir@2",
+            "fs.file_type#rust-runtime.settle-under.file-type",
+            "fs.read#rust-runtime.settle-under.read-file",
         ] {
             let read =
                 crate::fault::during(fault, || read_rust_cfg_settlement(&root, TOKEN, &probes));
@@ -1656,9 +1660,10 @@ fn main() {
         ));
         // An entry that cannot be read, and a region that is none.
         assert!(matches!(
-            crate::fault::during("fs.read_dir entry#rust_runtime.rs:429", || {
-                read_rust_region_directory(&directory, TOKEN, &probes)
-            }),
+            crate::fault::during(
+                "fs.read_dir entry#rust-runtime.read-rust-region-directory",
+                || { read_rust_region_directory(&directory, TOKEN, &probes) }
+            ),
             Err(RustProbeReadError::Io(_))
         ));
         fs::remove_dir(directory.join(format!("{TOKEN}-1.overflow"))).unwrap();

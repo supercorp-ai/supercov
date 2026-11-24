@@ -4252,8 +4252,14 @@ fn archive_request_from<D>(
             .filter(|beside| beside.mutant_set.is_some())
             .or(archived),
     };
-    let kept = if keep_listed { listed.clone() } else { None };
-    let mutation = crate::js_weak_mutation::results(&raw_results, listed);
+    // A caller that keeps the list plans from it, and reads no weak
+    // verdict: for a large merged run, working them out for every mutant
+    // was seconds of its plan.
+    let (kept, mutation) = if keep_listed {
+        (listed, None)
+    } else {
+        (None, crate::js_weak_mutation::results(&raw_results, listed))
+    };
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
@@ -4548,37 +4554,64 @@ fn release_leaked_phases(raw_results: &mut [RawTestResult]) {
         .iter()
         .flat_map(|raw| raw.phases.iter().map(|phase| phase.id.clone()))
         .collect::<BTreeSet<_>>();
-    for raw in raw_results.iter_mut() {
-        let own = raw
-            .phases
-            .iter()
-            .map(|phase| phase.id.clone())
-            .collect::<BTreeSet<_>>();
-        // Events come in runs of one phase: the last id's answer is kept.
-        let mut last = None::<(String, bool)>;
-        let mut leaked = |phase: &mut Option<String>| {
-            let Some(id) = phase.as_ref() else { return };
-            let leaks = match &last {
-                Some((known, leaks)) if known == id => *leaks,
-                _ => {
-                    let leaks = !own.contains(id) && declared.contains(id);
-                    last = Some((id.clone(), leaks));
-                    leaks
+    // Each record is its own, and what the run declares is only read: on
+    // every core, a chunk of records at a time, as `resolve_probe_places`
+    // does. A merged run of shards that each measured the whole suite holds
+    // every event of each.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(raw_results.len().max(1));
+    let chunks = std::sync::Mutex::new(raw_results.chunks_mut(64));
+    // One worker at least, as `threads` is.
+    std::thread::scope(|scope| {
+        (0..threads).for_each(|_| {
+            scope.spawn(|| {
+                loop {
+                    let Some(chunk) = chunks.lock().expect("no worker panics holding it").next()
+                    else {
+                        return;
+                    };
+                    chunk
+                        .iter_mut()
+                        .for_each(|raw| release_record_leaked_phases(raw, &declared));
                 }
-            };
-            if leaks {
-                *phase = None;
+            });
+        });
+    });
+}
+
+/// `release_leaked_phases` of one record, given every phase the run
+/// declares.
+fn release_record_leaked_phases(raw: &mut RawTestResult, declared: &BTreeSet<String>) {
+    let own = raw
+        .phases
+        .iter()
+        .map(|phase| phase.id.clone())
+        .collect::<BTreeSet<_>>();
+    // Events come in runs of one phase: the last id's answer is kept.
+    let mut last = None::<(String, bool)>;
+    let mut leaked = |phase: &mut Option<String>| {
+        let Some(id) = phase.as_ref() else { return };
+        let leaks = match &last {
+            Some((known, leaks)) if known == id => *leaks,
+            _ => {
+                let leaks = !own.contains(id) && declared.contains(id);
+                last = Some((id.clone(), leaks));
+                leaks
             }
         };
-        for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
-            leaked(&mut snapshot.phase_id);
-            for event in &mut snapshot.events {
-                leaked(&mut event.phase_id);
-            }
+        if leaks {
+            *phase = None;
         }
-        for record in &mut raw.server {
-            leaked(&mut record.phase_id);
+    };
+    for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
+        leaked(&mut snapshot.phase_id);
+        for event in &mut snapshot.events {
+            leaked(&mut event.phase_id);
         }
+    }
+    for record in &mut raw.server {
+        leaked(&mut record.phase_id);
     }
 }
 

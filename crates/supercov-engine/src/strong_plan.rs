@@ -68,6 +68,8 @@ pub enum CandidateReason {
     /// The mutant's code ran while its file's modules loaded: every test of
     /// the file is a candidate, and the file runs whole.
     ModuleLoad,
+    /// Its own work read the module-level value the mutant is in.
+    Read,
 }
 
 /// One candidate test of a mutant: an index into the plan's tests.
@@ -150,6 +152,25 @@ pub struct PlannedMutant {
     /// How many records of each role ran its function point.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub function_hit_by: BTreeMap<String, usize>,
+    /// Set for a module-level mutant whose value is read through its literal:
+    /// how many candidates the module's loading gave it, and how many read it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrowed: Option<Narrowed>,
+}
+
+/// A module-level mutant's candidates before and after its value's reads
+/// narrowed them (`docs/design/strong-mutation.md`, "Module-level values").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Narrowed {
+    /// The candidates of every test that loaded its module.
+    pub from: usize,
+    /// The candidates of the tests that read its value.
+    pub to: usize,
+    /// A read while a module loaded carried the value elsewhere: its
+    /// candidates stay those of every test that loaded the module.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub escaped: bool,
 }
 
 /// The plan for a run.
@@ -379,8 +400,12 @@ fn merge(into: &mut Observations, from: &Observations) {
         .extend(from.unvalued_hits.iter().cloned());
     for (id, vectors) in &from.decisions {
         let seen = into.decisions.entry(id.clone()).or_default();
+        // Looked up in a set: a decision a test file's modules and its test
+        // both took holds many vectors, and every test of the file is merged
+        // with them.
+        let mut known = seen.iter().cloned().collect::<HashSet<_>>();
         for vector in vectors {
-            if !seen.contains(vector) {
+            if known.insert(vector.clone()) {
                 seen.push(vector.clone());
             }
         }
@@ -403,14 +428,17 @@ fn merge(into: &mut Observations, from: &Observations) {
 /// its function where no statement contains it. A mutant with neither
 /// point cannot be narrowed, and counts as hit by anything.
 fn may_reach(mutant: &CandidateMutant, seen: &Observations) -> bool {
-    mutant
-        .statement
-        .as_ref()
-        .is_none_or(|statement| seen.hits.contains(statement))
-        && mutant
-            .function
-            .as_ref()
-            .is_none_or(|function| seen.hits.contains(function))
+    may_reach_also_hit(mutant, seen, None)
+}
+
+/// `may_reach`, with `also_hit` counted among what `seen` hit.
+fn may_reach_also_hit(
+    mutant: &CandidateMutant,
+    seen: &Observations,
+    also_hit: Option<&str>,
+) -> bool {
+    let hit = |point: &String| also_hit == Some(point.as_str()) || seen.hits.contains(point);
+    mutant.statement.as_ref().is_none_or(hit) && mutant.function.as_ref().is_none_or(hit)
 }
 
 /// Whether `seen` could have infected the mutant: its verdict read from
@@ -427,52 +455,72 @@ fn could_infect(
     // Where this test ran the function and the run ran the statement, the
     // statement counts as run here: it only ever adds a candidate. Only a
     // JavaScript mutant's statement can hold its function: a Python
-    // mutant's is always inside it (`python_mutants`).
-    let widened;
-    let seen = match (&mutant.statement, &mutant.function) {
+    // mutant's is always inside it (`python_mutants`). It is counted, not
+    // added to a copy of what the test saw: copying a record's observations
+    // for each mutant it ran was most of planning a large run.
+    let widened = match (&mutant.statement, &mutant.function) {
         (Some(statement), Some(function))
             if language == crate::mutant_list::JAVASCRIPT
                 && seen.hits.contains(function)
                 && !seen.hits.contains(statement)
                 && whole.hits.contains(statement) =>
         {
-            let mut copy = seen.clone();
-            copy.hits.insert(statement.clone());
-            widened = copy;
-            &widened
+            Some(statement.as_str())
         }
-        _ => seen,
+        _ => None,
     };
-    if !may_reach(mutant, seen) {
+    if !may_reach_also_hit(mutant, seen, widened) {
         return None;
     }
-    match verdict(mutant, seen).0 {
+    match crate::js_weak_mutation::verdict_also_hit(mutant, seen, widened).0 {
         Status::Infected { .. } => Some(CandidateReason::Infected),
         Status::Unknown => Some(CandidateReason::Unknown),
         Status::NotReached | Status::NotInfected | Status::Equivalent => None,
     }
 }
 
-/// Whether a server process ran the mutant's code in this record in a way
-/// a request's own mutant cannot reach, and how.
-fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWide> {
-    let points = [&mutant.statement, &mutant.function]
+/// The points a record's server processes ran, each with whether a request
+/// named none of those runs, and whether one did: read once a record, not
+/// once a mutant, as a record of a large suite holds thousands.
+type ServerRuns<'r> = HashMap<&'r str, (bool, bool)>;
+
+fn server_runs(raw: &RawTestResult) -> ServerRuns<'_> {
+    let mut runs = ServerRuns::new();
+    for record in raw
+        .server
+        .iter()
+        .filter(|record| record.record_type == "hit")
+    {
+        if let Some(id) = &record.id {
+            let ran = runs.entry(id.as_str()).or_default();
+            ran.0 |= record.request.is_none();
+            ran.1 |= record.request.is_some();
+        }
+    }
+    runs
+}
+
+/// Whether a server process ran the mutant's code in this record (`runs`,
+/// its `server_runs`) in a way a request's own mutant cannot reach, and how.
+fn server_wide(
+    raw: &RawTestResult,
+    runs: &ServerRuns<'_>,
+    mutant: &CandidateMutant,
+) -> Option<ServerWide> {
+    let ran = [&mutant.statement, &mutant.function]
         .into_iter()
         .flatten()
+        .filter_map(|point| runs.get(point.as_str()))
         .collect::<Vec<_>>();
-    let mut ran = raw.server.iter().filter(|record| {
-        record.record_type == "hit" && record.id.as_ref().is_some_and(|id| points.contains(&id))
-    });
-    let first = ran.next()?;
+    if ran.is_empty() {
+        return None;
+    }
     if !matches!(role_of(raw), "test" | "setup") {
         // Work for a request that named no test and ran while none did (a
         // web server's readiness check) ran without any mutant in the pass,
         // as each request runs with its own; only work no request started
         // (start-up, timers) needs the server started with the mutant.
-        if std::iter::once(first)
-            .chain(ran)
-            .any(|record| record.request.is_none())
-        {
+        if ran.iter().any(|(unrequested, _)| *unrequested) {
             return Some(ServerWide::Background);
         }
         return mutant.function.is_none().then_some(ServerWide::ModuleLevel);
@@ -480,9 +528,8 @@ fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWi
     if mutant.function.is_none() {
         return Some(ServerWide::ModuleLevel);
     }
-    std::iter::once(first)
-        .chain(ran)
-        .any(|record| record.request.is_some())
+    ran.iter()
+        .any(|(_, requested)| *requested)
         .then_some(ServerWide::ByTime)
 }
 
@@ -587,10 +634,6 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     // Each record's own observations, and an index from a hit point to the
     // records that hit it, so a mutant's verdict is read only from the
     // records that ran its code.
-    struct Seen {
-        record: usize,
-        seen: Observations,
-    }
     for ((test, ok), stated) in tests.iter_mut().zip(&mut runnable).zip(&stated) {
         *ok &= *stated;
         test.runnable = *ok;
@@ -609,13 +652,18 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             merge(loaded.entry(file.as_str()).or_default(), &own);
         }
     }
-    for (record, raw) in raw_results.iter().enumerate() {
+    // Each record's on its own, on every core: a merged run of shards that
+    // each measured the whole suite holds thousands of records.
+    let observed = crate::threads::parallel_map(raw_results, |raw| {
         let mut own = own_observations(raw, &without_values);
         if role_of(raw) == "test"
             && let Some(at_load) = raw.test_file.as_deref().and_then(|file| loaded.get(file))
         {
             merge(&mut own, at_load);
         }
+        own
+    });
+    for (record, (raw, own)) in raw_results.iter().zip(observed).enumerate() {
         let at = seen.len();
         if role_of(raw) == "test" && !exact(raw) {
             unbounded.push(at);
@@ -623,190 +671,329 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         for point in &own.hits {
             by_point.entry(point.clone()).or_default().push(at);
         }
-        seen.push(Seen { record, seen: own });
+        seen.push(Seen {
+            record,
+            seen: own,
+            server: server_runs(raw),
+        });
     }
 
-    let mut mutants = Vec::new();
-    for (file, listed_mutants) in &listed.files {
-        for (index, mutant) in listed_mutants.iter().enumerate() {
-            let (status, reason) = verdict(mutant, &whole);
-            let mut planned = PlannedMutant {
-                id: if mutant.id.is_empty() {
-                    format!(
-                        "{file}:{}:{}-{}:{}:{}:{}",
-                        mutant.start.0,
-                        mutant.start.1,
-                        mutant.end.0,
-                        mutant.end.1,
-                        mutant.mutator,
-                        mutant.replacement
-                    )
-                } else {
-                    mutant.id.clone()
-                },
-                file: file.clone(),
-                language: listed.language_of(file).to_owned(),
-                index,
-                mutator: mutant.mutator.clone(),
-                weak: weak_name(status),
-                decided: None,
-                reason: None,
-                candidates: Vec::new(),
-                whole_files: Vec::new(),
-                server_wide: None,
-                covering: 0,
-                statement: mutant.statement.clone(),
-                function: mutant.function.clone(),
-                function_hit_by: BTreeMap::new(),
-            };
-            if let Some(function) = &mutant.function {
-                for at in by_point.get(function).into_iter().flatten() {
-                    let role = role_of(&raw_results[seen[*at].record]).to_owned();
-                    *planned.function_hit_by.entry(role).or_default() += 1;
-                }
+    // Each mutant is planned on its own, from what is read above, on every
+    // core.
+    let each = listed
+        .files
+        .iter()
+        .flat_map(|(file, listed_mutants)| {
+            listed_mutants
+                .iter()
+                .enumerate()
+                .map(move |(index, mutant)| (file, index, mutant))
+        })
+        .collect::<Vec<_>>();
+    let mutants = crate::threads::parallel_map(&each, |&(file, index, mutant)| {
+        let (status, reason) = verdict(mutant, &whole);
+        let mut planned = PlannedMutant {
+            id: if mutant.id.is_empty() {
+                format!(
+                    "{file}:{}:{}-{}:{}:{}:{}",
+                    mutant.start.0,
+                    mutant.start.1,
+                    mutant.end.0,
+                    mutant.end.1,
+                    mutant.mutator,
+                    mutant.replacement
+                )
+            } else {
+                mutant.id.clone()
+            },
+            file: file.clone(),
+            language: listed.language_of(file).to_owned(),
+            index,
+            mutator: mutant.mutator.clone(),
+            weak: weak_name(status),
+            decided: None,
+            reason: None,
+            candidates: Vec::new(),
+            whole_files: Vec::new(),
+            server_wide: None,
+            covering: 0,
+            statement: mutant.statement.clone(),
+            function: mutant.function.clone(),
+            function_hit_by: BTreeMap::new(),
+            narrowed: None,
+        };
+        if let Some(function) = &mutant.function {
+            for at in by_point.get(function).into_iter().flatten() {
+                let role = role_of(&raw_results[seen[*at].record]).to_owned();
+                *planned.function_hit_by.entry(role).or_default() += 1;
             }
-            match status {
-                Status::Equivalent => {
-                    planned.decided = Some(Decided::Equivalent);
-                    planned.reason = Some(reason.code.to_owned());
-                }
-                Status::NotReached => {
-                    planned.decided = Some(Decided::NoCoverage);
-                    planned.reason = Some(reason.code.to_owned());
-                }
-                // Not infected where the operands are clock or random
-                // readings proves only that this run's values never met:
-                // another run's may. Such a mutant runs against the tests
-                // that reached it.
-                Status::NotInfected if mutant.untestable.is_none() => {
-                    planned.decided = Some(Decided::Survived);
-                    planned.reason = Some(reason.code.to_owned());
-                }
-                Status::Infected { .. } | Status::Unknown | Status::NotInfected => {
-                    let reach_only = status == Status::NotInfected;
-                    let mut chosen = BTreeMap::<usize, CandidateReason>::new();
-                    let mut whole_files = HashSet::<String>::new();
-                    let mut take = |test: usize, why: CandidateReason| {
-                        chosen.entry(test).or_insert(why);
-                    };
-                    // The records that ran the mutant's point (or all, for a
-                    // mutant no point contains), and every record whose
-                    // silence proves nothing.
-                    // Reach needs both points; the function's is the narrower.
-                    let point = mutant.function.as_ref().or(mutant.statement.as_ref());
-                    let mut records = match point {
-                        Some(point) => by_point.get(point).cloned().unwrap_or_default(),
-                        None => (0..seen.len()).collect(),
-                    };
-                    records.extend(unbounded.iter().copied());
-                    records.sort_unstable();
-                    records.dedup();
-                    let mut covering = HashSet::<usize>::new();
-                    for at in records {
-                        let Seen { record, seen: own } = &seen[at];
-                        let raw = &raw_results[*record];
-                        // Every test record was indexed by this id above.
-                        if role_of(raw) == "test"
-                            && (may_reach(mutant, own)
-                                || mutant
-                                    .function
-                                    .as_ref()
-                                    .is_some_and(|function| own.hits.contains(function)))
-                        {
-                            covering.insert(
-                                test_index
-                                    [&raw.test_id.clone().unwrap_or_else(|| raw.test.clone())],
-                            );
-                        }
-                        let why = if role_of(raw) == "test" && !exact(raw) {
-                            Some(CandidateReason::NotExact)
-                        } else if reach_only {
-                            // Every record read here ran the mutant's
-                            // point, or the mutant has none, but an inexact
-                            // test's, which was taken above.
-                            Some(CandidateReason::Unknown)
-                        } else {
-                            could_infect(mutant, own, &whole, &planned.language)
-                        };
-                        let Some(why) = why else { continue };
-                        if planned.server_wide.is_none() {
-                            planned.server_wide = server_wide(raw, mutant);
-                        }
-                        match (role_of(raw), &raw.test_file) {
-                            ("test", _) => {
-                                let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
-                                take(test_index[&id], why);
-                                // Module-level code a test ran (a module it
-                                // loaded first): the module keeps what it
-                                // made for every later test of the file, which
-                                // runs none of that code again.
-                                if mutant.function.is_none()
-                                    && let Some(file) = &raw.test_file
-                                {
-                                    whole_files.insert(file.clone());
-                                    for &test in by_file.get(file).into_iter().flatten() {
-                                        take(test, CandidateReason::ModuleLoad);
-                                    }
-                                }
-                            }
-                            // A file's module setup: every test of the file.
-                            ("setup", Some(file)) => {
-                                whole_files.insert(file.clone());
-                                for &test in by_file.get(file).into_iter().flatten() {
-                                    take(test, CandidateReason::ModuleLoad);
-                                }
-                            }
-                            // Work no test was credited with, a module setup
-                            // that names no test file among it (Mocha loads
-                            // every test file before the first test): any test
-                            // of the run may have caused it.
-                            _ => {
-                                for test in 0..tests.len() {
-                                    take(test, CandidateReason::Unattributed);
-                                }
-                            }
-                        }
-                    }
-                    // No test ran its code: what ran it was work no test of
-                    // the run could have caused (a run with no test, a test
-                    // file's modules loaded with no test of it), and no test
-                    // can kill it. StrykerJS calls it NoCoverage.
-                    let tested = !chosen.is_empty();
-                    let mut candidates = chosen
-                        .into_iter()
-                        .filter(|(test, _)| runnable[*test])
-                        .map(|(test, reason)| Candidate { test, reason })
-                        .collect::<Vec<_>>();
-                    candidates.sort_by(|a, b| {
-                        let (ta, tb) = (&tests[a.test], &tests[b.test]);
-                        (ta.duration_ms.is_none(), ta.duration_ms, &ta.name).cmp(&(
-                            tb.duration_ms.is_none(),
-                            tb.duration_ms,
-                            &tb.name,
-                        ))
-                    });
-                    if !tested {
-                        planned.decided = Some(Decided::NoCoverage);
-                        planned.reason = Some("no-test-ran-it".into());
-                    } else if candidates.is_empty() {
-                        planned.decided = Some(Decided::Survived);
-                        planned.reason = Some("no-passing-candidate".into());
-                    }
-                    let mut whole_files = whole_files.into_iter().collect::<Vec<_>>();
-                    whole_files.sort();
-                    planned.candidates = candidates;
-                    planned.whole_files = whole_files;
-                    planned.covering = covering.len();
-                }
-            }
-            mutants.push(planned);
         }
-    }
+        match status {
+            Status::Equivalent => {
+                planned.decided = Some(Decided::Equivalent);
+                planned.reason = Some(reason.code.to_owned());
+            }
+            Status::NotReached => {
+                planned.decided = Some(Decided::NoCoverage);
+                planned.reason = Some(reason.code.to_owned());
+            }
+            // Not infected where the operands are clock or random
+            // readings proves only that this run's values never met:
+            // another run's may. Such a mutant runs against the tests
+            // that reached it.
+            Status::NotInfected if mutant.untestable.is_none() => {
+                planned.decided = Some(Decided::Survived);
+                planned.reason = Some(reason.code.to_owned());
+            }
+            Status::Infected { .. } | Status::Unknown | Status::NotInfected => {
+                let reach_only = status == Status::NotInfected;
+                let context = Selecting {
+                    raw_results,
+                    seen: &seen,
+                    by_point: &by_point,
+                    unbounded: &unbounded,
+                    tests: &tests,
+                    test_index: &test_index,
+                    by_file: &by_file,
+                    whole: &whole,
+                    language: &planned.language,
+                };
+                let broad = context.select(mutant, reach_only, None);
+                // A module-level value read through its literal: the
+                // tests that read it, unless a read while a module loaded
+                // carried it elsewhere.
+                let reads = mutant
+                    .reads
+                    .as_ref()
+                    .filter(|_| mutant.function.is_none() && !reach_only);
+                let mut chosen = broad.chosen.clone();
+                let mut whole_files = broad.whole_files.clone();
+                if let Some(reads) = reads {
+                    let broad_count = broad.chosen.keys().filter(|test| runnable[**test]).count();
+                    if whole.hits.contains(&reads.escape) {
+                        planned.narrowed = Some(Narrowed {
+                            from: broad_count,
+                            to: broad_count,
+                            escaped: true,
+                        });
+                    } else {
+                        let narrow = context.select(mutant, reach_only, Some(reads));
+                        planned.narrowed = Some(Narrowed {
+                            from: broad_count,
+                            to: narrow.chosen.keys().filter(|test| runnable[**test]).count(),
+                            escaped: false,
+                        });
+                        chosen = narrow.chosen;
+                        whole_files = narrow.whole_files;
+                    }
+                }
+                planned.server_wide = broad.server_wide;
+                // No test ran its code: what ran it was work no test of
+                // the run could have caused (a run with no test, a test
+                // file's modules loaded with no test of it), and no test
+                // can kill it. StrykerJS calls it NoCoverage.
+                let tested = !broad.chosen.is_empty();
+                let mut candidates = chosen
+                    .into_iter()
+                    .filter(|(test, _)| runnable[*test])
+                    .map(|(test, reason)| Candidate { test, reason })
+                    .collect::<Vec<_>>();
+                candidates.sort_by(|a, b| {
+                    let (ta, tb) = (&tests[a.test], &tests[b.test]);
+                    (ta.duration_ms.is_none(), ta.duration_ms, &ta.name).cmp(&(
+                        tb.duration_ms.is_none(),
+                        tb.duration_ms,
+                        &tb.name,
+                    ))
+                });
+                if !tested {
+                    planned.decided = Some(Decided::NoCoverage);
+                    planned.reason = Some("no-test-ran-it".into());
+                } else if candidates.is_empty() {
+                    planned.decided = Some(Decided::Survived);
+                    planned.reason = Some(
+                        // Narrowed to none of the tests that could run.
+                        if planned.narrowed.is_some()
+                            && broad.chosen.keys().any(|test| runnable[*test])
+                        {
+                            "no-test-read-it"
+                        } else {
+                            "no-passing-candidate"
+                        }
+                        .into(),
+                    );
+                }
+                let mut whole_files = whole_files.into_iter().collect::<Vec<_>>();
+                whole_files.sort();
+                planned.candidates = candidates;
+                planned.whole_files = whole_files;
+                planned.covering = broad.covering;
+            }
+        }
+        planned
+    });
     Some(StrongPlan {
         mutant_set,
         tests,
         mutants,
     })
+}
+
+/// One record's own observations, by its place among the run's.
+struct Seen<'r> {
+    record: usize,
+    seen: Observations,
+    server: ServerRuns<'r>,
+}
+
+/// A mutant's candidates, the test files it runs whole, and how a server
+/// must run it.
+struct Selection {
+    chosen: BTreeMap<usize, CandidateReason>,
+    whole_files: HashSet<String>,
+    server_wide: Option<ServerWide>,
+    /// How many tests ran its code.
+    covering: usize,
+}
+
+/// What choosing a mutant's candidates reads.
+struct Selecting<'r> {
+    raw_results: &'r [RawTestResult],
+    seen: &'r [Seen<'r>],
+    by_point: &'r HashMap<String, Vec<usize>>,
+    unbounded: &'r [usize],
+    tests: &'r [PlannedTest],
+    test_index: &'r HashMap<String, usize>,
+    by_file: &'r BTreeMap<String, Vec<usize>>,
+    whole: &'r Observations,
+    language: &'r str,
+}
+
+impl Selecting<'_> {
+    /// The mutant's candidates. With `reads`, those of a module-level value
+    /// read through its literal (`docs/design/strong-mutation.md`,
+    /// "Module-level values"): its module's loading is not a read, so a
+    /// record that only loaded it takes no test, but where the loading was
+    /// in a test runner's own process, whose later tests share the module;
+    /// and a record that read it takes the tests as one that infected it
+    /// does.
+    fn select(
+        &self,
+        mutant: &CandidateMutant,
+        reach_only: bool,
+        reads: Option<&crate::mutant_list::ReadLink>,
+    ) -> Selection {
+        let mut chosen = BTreeMap::<usize, CandidateReason>::new();
+        let mut whole_files = HashSet::<String>::new();
+        let mut server_wide = None;
+        let mut take = |test: usize, why: CandidateReason| {
+            chosen.entry(test).or_insert(why);
+        };
+        // The records that ran the mutant's point (or all, for a mutant no
+        // point contains), those that read it, and every record whose
+        // silence proves nothing. Reach needs both points; the function's is
+        // the narrower.
+        let point = mutant.function.as_ref().or(mutant.statement.as_ref());
+        let mut records = match point {
+            Some(point) => self.by_point.get(point).cloned().unwrap_or_default(),
+            None => (0..self.seen.len()).collect(),
+        };
+        if let Some(reads) = reads {
+            records.extend(self.by_point.get(&reads.read).into_iter().flatten());
+        }
+        records.extend(self.unbounded.iter().copied());
+        records.sort_unstable();
+        records.dedup();
+        let mut covering = HashSet::<usize>::new();
+        for at in records {
+            let Seen {
+                record,
+                seen: own,
+                server,
+            } = &self.seen[at];
+            let raw = &self.raw_results[*record];
+            let role = role_of(raw);
+            let test = (role == "test")
+                .then(|| self.test_index[&raw.test_id.clone().unwrap_or_else(|| raw.test.clone())]);
+            // Every test record was indexed by this id above.
+            if let Some(test) = test
+                && (may_reach(mutant, own)
+                    || mutant
+                        .function
+                        .as_ref()
+                        .is_some_and(|function| own.hits.contains(function)))
+            {
+                covering.insert(test);
+            }
+            let why = if test.is_some() && !exact(raw) {
+                Some(CandidateReason::NotExact)
+            } else if reach_only {
+                // Every record read here ran the mutant's point, or the
+                // mutant has none, but an inexact test's, which was taken
+                // above.
+                Some(CandidateReason::Unknown)
+            } else {
+                could_infect(mutant, own, self.whole, self.language)
+            };
+            if why.is_some() && server_wide.is_none() {
+                server_wide = self::server_wide(raw, server, mutant);
+            }
+            let why = match reads {
+                None => why,
+                Some(reads) if own.hits.contains(&reads.read) => Some(CandidateReason::Read),
+                Some(_) => match (why, test) {
+                    (Some(CandidateReason::NotExact), _) => Some(CandidateReason::NotExact),
+                    // Loaded in a test runner's own process: its later tests
+                    // share the module, as without reads.
+                    (Some(why), Some(test)) if self.tests[test].runner != "playwright" => Some(why),
+                    (Some(why), None) if role == "setup" && raw.test_file.is_some() => Some(why),
+                    _ => None,
+                },
+            };
+            let Some(why) = why else { continue };
+            match (role, &raw.test_file) {
+                ("test", _) => {
+                    let test = test.expect("a test record names its test");
+                    take(test, why);
+                    // Module-level code a test ran (a module it loaded
+                    // first): the module keeps what it made for every later
+                    // test of the file, which runs none of that code again.
+                    // A browser test's modules are its server's and its
+                    // page's, not its file's.
+                    if mutant.function.is_none()
+                        && (reads.is_none() || self.tests[test].runner != "playwright")
+                        && let Some(file) = &raw.test_file
+                    {
+                        whole_files.insert(file.clone());
+                        for &test in self.by_file.get(file).into_iter().flatten() {
+                            take(test, CandidateReason::ModuleLoad);
+                        }
+                    }
+                }
+                // A file's module setup: every test of the file.
+                ("setup", Some(file)) => {
+                    whole_files.insert(file.clone());
+                    for &test in self.by_file.get(file).into_iter().flatten() {
+                        take(test, CandidateReason::ModuleLoad);
+                    }
+                }
+                // Work no test was credited with, a module setup that names
+                // no test file among it (Mocha loads every test file before
+                // the first test): any test of the run may have caused it.
+                _ => {
+                    for test in 0..self.tests.len() {
+                        take(test, CandidateReason::Unattributed);
+                    }
+                }
+            }
+        }
+        Selection {
+            chosen,
+            whole_files,
+            server_wide,
+            covering: covering.len(),
+        }
+    }
 }
 
 /// What a copy of a test file costs beside its tests' own time, in
@@ -1033,6 +1220,221 @@ mod tests {
 
     fn planned<'p>(plan: &'p StrongPlan, id: &str) -> &'p PlannedMutant {
         plan.mutants.iter().find(|mutant| mutant.id == id).unwrap()
+    }
+
+    /// A module-level mutant whose value is read through its literal, and
+    /// the records of a browser suite against one server: the server loaded
+    /// the module as it started, one test's request loaded nothing new but
+    /// read the value, one loaded another route's modules, and one did
+    /// neither.
+    fn read_through_literal() -> (CandidateMutant, Vec<RawTestResult>) {
+        let module_level = mutant(serde_json::json!({
+            "id": "m", "statement": "s", "reads": {"read": "r", "escape": "e"}
+        }));
+        let browser = |id: &str, file: &str, hits: &[&str]| {
+            let mut raw = record(id, "test", Some(file), hits);
+            raw.provenance.runner = "playwright".into();
+            raw
+        };
+        let mut started = record("bg", "background", None, &[]);
+        // A hit that names no point says nothing of any mutant.
+        let unnamed = ServerRecord {
+            id: None,
+            ..server_hit("s", None)
+        };
+        started.server = vec![server_hit("s", None), unnamed];
+        let raw_results = vec![
+            started,
+            browser("reader", "t/a.spec.js", &["r"]),
+            browser("loader", "t/a.spec.js", &["s"]),
+            browser("sibling", "t/a.spec.js", &[]),
+            browser("other", "t/b.spec.js", &[]),
+        ];
+        (module_level, raw_results)
+    }
+
+    /// Only the tests that read a module-level value are its mutant's
+    /// candidates: loading the module, at the server's start or in a test's
+    /// request, is not a read, and a browser test's file shares nothing
+    /// with the server. The plan says how far it narrowed them.
+    #[test]
+    fn a_module_level_value_s_candidates_are_the_tests_that_read_it() {
+        let (module_level, raw_results) = read_through_literal();
+        let plan = super::plan(&raw_results, listed(vec![module_level.clone()], &[])).unwrap();
+        assert_eq!(
+            candidates(&plan, "m"),
+            [("reader".to_owned(), CandidateReason::Read)]
+        );
+        let narrowed = planned(&plan, "m");
+        assert_eq!(
+            narrowed.narrowed,
+            Some(Narrowed {
+                from: 4,
+                to: 1,
+                escaped: false
+            })
+        );
+        assert!(narrowed.whole_files.is_empty());
+        // The server still starts with it switched on, as it ran there.
+        assert_eq!(narrowed.server_wide, Some(ServerWide::Background));
+        assert_eq!(narrowed.covering, 1);
+        let json = serde_json::to_value(narrowed).unwrap();
+        assert_eq!(json["narrowed"], serde_json::json!({"from": 4, "to": 1}));
+        assert_eq!(json["candidates"][0]["reason"], "read");
+
+        // Read while a module loaded: what read it keeps it, and every test
+        // that loaded the module stays a candidate.
+        let mut escaped = raw_results.clone();
+        escaped.push(record("bg2", "background", None, &["e"]));
+        let plan = super::plan(&escaped, listed(vec![module_level.clone()], &[])).unwrap();
+        assert_eq!(candidates(&plan, "m").len(), 4);
+        assert_eq!(
+            planned(&plan, "m").narrowed,
+            Some(Narrowed {
+                from: 4,
+                to: 4,
+                escaped: true
+            })
+        );
+
+        // Read by work no test was credited with: any test may have caused
+        // it. Read by a file's module setup: the file's tests.
+        let mut background = raw_results.clone();
+        background.push(record("bg3", "background", None, &["r"]));
+        let plan = super::plan(&background, listed(vec![module_level.clone()], &[])).unwrap();
+        assert_eq!(candidates(&plan, "m").len(), 4);
+        let mut setup = raw_results.clone();
+        setup.push(record("setup", "setup", Some("t/b.spec.js"), &["r"]));
+        let plan = super::plan(&setup, listed(vec![module_level.clone()], &[])).unwrap();
+        // (A test's evidence is read with its file's module setup's.)
+        assert_eq!(
+            candidates(&plan, "m"),
+            [
+                ("other".to_owned(), CandidateReason::Read),
+                ("reader".to_owned(), CandidateReason::Read),
+            ]
+        );
+        assert_eq!(planned(&plan, "m").whole_files, ["t/b.spec.js"]);
+
+        // A test whose evidence is not its own stays a candidate.
+        let mut inexact = raw_results.clone();
+        inexact[4].attribution = ATTRIBUTION_RUN_WIDE.into();
+        let plan = super::plan(&inexact, listed(vec![module_level.clone()], &[])).unwrap();
+        assert_eq!(
+            candidates(&plan, "m"),
+            [
+                ("other".to_owned(), CandidateReason::NotExact),
+                ("reader".to_owned(), CandidateReason::Read),
+            ]
+        );
+
+        // Read by no test: none can tell it apart.
+        let unread = raw_results
+            .iter()
+            .filter(|raw| raw.test != "reader")
+            .cloned()
+            .collect::<Vec<_>>();
+        let plan = super::plan(&unread, listed(vec![module_level.clone()], &[])).unwrap();
+        let decided = planned(&plan, "m");
+        assert!(decided.candidates.is_empty());
+        assert_eq!(decided.decided, Some(Decided::Survived));
+        assert_eq!(decided.reason.as_deref(), Some("no-test-read-it"));
+        // Unless no test it could take would run: then as before.
+        let mut failing = unread.clone();
+        for raw in &mut failing {
+            raw.status = Some("failed".into());
+        }
+        let plan = super::plan(&failing, listed(vec![module_level], &[])).unwrap();
+        assert_eq!(
+            planned(&plan, "m").reason.as_deref(),
+            Some("no-passing-candidate")
+        );
+    }
+
+    /// In a test runner's own process the module a test loaded serves the
+    /// file's later tests, which read it without loading it: the loading
+    /// test and its file stay candidates, as do a reading test's. A mutant
+    /// in a function, or one only reach tells of, is not narrowed.
+    #[test]
+    fn a_module_loaded_in_the_runner_s_process_keeps_its_file() {
+        let (module_level, raw_results) = read_through_literal();
+        let in_process = raw_results
+            .into_iter()
+            .map(|mut raw| {
+                raw.provenance.runner = "vitest".into();
+                raw
+            })
+            .collect::<Vec<_>>();
+        let plan = super::plan(&in_process, listed(vec![module_level.clone()], &[])).unwrap();
+        assert_eq!(
+            candidates(&plan, "m"),
+            [
+                ("loader".to_owned(), CandidateReason::ModuleLoad),
+                ("reader".to_owned(), CandidateReason::Read),
+                ("sibling".to_owned(), CandidateReason::ModuleLoad),
+            ]
+        );
+        assert_eq!(planned(&plan, "m").whole_files, ["t/a.spec.js"]);
+        // A file's module setup that loaded the module, in the runner's
+        // process: the file's tests, as without reads.
+        let mut setup = in_process.clone();
+        setup.push(record("setup", "setup", Some("t/b.spec.js"), &["s"]));
+        let plan = super::plan(&setup, listed(vec![module_level.clone()], &[])).unwrap();
+        assert!(
+            planned(&plan, "m")
+                .whole_files
+                .contains(&"t/b.spec.js".to_owned())
+        );
+        assert!(
+            candidates(&plan, "m")
+                .iter()
+                .any(|(test, _)| test == "other")
+        );
+        let in_function = mutant(serde_json::json!({
+            "id": "f", "statement": "s", "function": "fn",
+            "reads": {"read": "r", "escape": "e"}
+        }));
+        let raw_results = [
+            record("a", "test", Some("t/a.test.js"), &["s", "fn"]),
+            record("b", "test", Some("t/a.test.js"), &["r"]),
+        ];
+        let plan = super::plan(&raw_results, listed(vec![in_function], &[])).unwrap();
+        assert_eq!(planned(&plan, "f").narrowed, None);
+        assert_eq!(
+            candidates(&plan, "f"),
+            [("a".to_owned(), CandidateReason::Infected)]
+        );
+        // A clock's value: no infection to read, so as before.
+        let clock = mutant(serde_json::json!({
+            "id": "c", "mutator": "ConditionalExpression", "replacement": "true",
+            "original": "a > b", "statement": "s", "decision": {"id": "d"},
+            "reads": {"read": "r", "escape": "e"},
+            "untestable": {"rule": "clock", "reason": "reads the clock"}
+        }));
+        let mut loaded = record("a", "test", Some("t/a.test.js"), &["s"]);
+        loaded.runtime[0].decisions = vec![decision("d", &[(true, true)])];
+        let plan = super::plan(
+            &[loaded, record("b", "test", Some("t/b.test.js"), &["r"])],
+            listed(vec![clock], &[]),
+        )
+        .unwrap();
+        let clocked = planned(&plan, "c");
+        assert_eq!(clocked.weak, "not-infected");
+        assert_eq!(clocked.narrowed, None);
+        // Mocha's setup, which names no test file, loading the module takes
+        // no test; a test with no file reading it takes itself alone.
+        let mut setup = record("setup", "setup", None, &["s"]);
+        setup.provenance.runner = "mocha".into();
+        let mut reader = record("reader", "test", None, &["r"]);
+        reader.provenance.runner = "mocha".into();
+        let mut other = record("other", "test", Some("t/o.test.js"), &[]);
+        other.provenance.runner = "mocha".into();
+        let plan = super::plan(&[setup, reader, other], listed(vec![module_level], &[])).unwrap();
+        assert_eq!(
+            candidates(&plan, "m"),
+            [("reader".to_owned(), CandidateReason::Read)]
+        );
+        assert!(planned(&plan, "m").whole_files.is_empty());
     }
 
     #[test]
@@ -1449,8 +1851,63 @@ mod tests {
         raw.server = vec![server_hit("s", Some(1))];
         let module_level = mutant(serde_json::json!({"statement": "s"}));
         assert_eq!(
-            server_wide(&raw, &module_level),
+            server_wide(&raw, &server_runs(&raw), &module_level),
             Some(ServerWide::ModuleLevel)
+        );
+    }
+
+    /// Planning reads each mutant from the records that ran its code, and
+    /// costs about that: not, for each of them, the size of the record. A
+    /// merged run of shards that each measured a whole browser suite holds
+    /// thousands of records, each with thousands of hits and server records,
+    /// and 65,092 mutants; reading each mutant's verdict from a copy of every
+    /// such record's observations (its method's statement added) and from a
+    /// scan of its server records took that merge over 12 minutes. Here 600
+    /// mutants and 200 records of 2,000 hits and 1,000 server records each:
+    /// 26 s that way in a debug build, and half a second now.
+    #[test]
+    fn planning_costs_each_mutant_s_records_and_not_their_size() {
+        const MUTANTS: usize = 600;
+        const RECORDS: usize = 200;
+        let functions = (0..MUTANTS).map(|i| format!("f{i}")).collect::<Vec<_>>();
+        let statements = (0..MUTANTS).map(|i| format!("s{i}")).collect::<Vec<_>>();
+        // Each test ran every method and none of the statements around
+        // them, which the run ran as its modules loaded, outside any test.
+        let hits = functions
+            .iter()
+            .cloned()
+            .chain((0..2_000 - MUTANTS).map(|i| format!("other{i}")))
+            .collect::<Vec<_>>();
+        let hits = hits.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut raw_results = (0..RECORDS)
+            .map(|i| {
+                let mut raw = record(&format!("t{i}"), "test", Some("t/a.test.js"), &hits);
+                raw.server = (0..1_000)
+                    .map(|j| server_hit(&format!("served{j}"), Some(1)))
+                    .collect();
+                raw
+            })
+            .collect::<Vec<_>>();
+        let loaded = statements.iter().map(String::as_str).collect::<Vec<_>>();
+        raw_results.push(record("load", "background", None, &loaded));
+        let mutants = (0..MUTANTS)
+            .map(|i| {
+                mutant(serde_json::json!({
+                    "id": format!("m{i}"),
+                    "statement": statements[i],
+                    "function": functions[i],
+                }))
+            })
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let plan = plan(&raw_results, listed(mutants, &[])).unwrap();
+        let took = started.elapsed();
+        assert_eq!(plan.mutants.len(), MUTANTS);
+        // Every test ran each method, and its statement counts as run there.
+        assert!(plan.mutants.iter().all(|mutant| mutant.covering == RECORDS));
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "planning {MUTANTS} mutants over {RECORDS} records took {took:?}"
         );
     }
 
@@ -1649,6 +2106,7 @@ mod tests {
                     statement: None,
                     function: None,
                     function_hit_by: BTreeMap::new(),
+                    narrowed: None,
                 })
                 .collect(),
         }

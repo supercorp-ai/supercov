@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:677",
+                "fs.read_from#evidence-archive.read.read-from",
             )],
         )
         .exits(2);
@@ -530,9 +530,9 @@ fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
     // Clearing is best effort: a level or an entry that cannot be read
     // leaves it, and the run goes on.
     for fault in [
-        "fs.read_dir#workspace.rs:2269",
-        "fs.read_dir entry#workspace.rs:2269",
-        "fs.symlink_metadata#workspace.rs:2274",
+        "fs.read_dir#workspace.clear-around.read-dir",
+        "fs.read_dir entry#workspace.clear-around.read-dir",
+        "fs.symlink_metadata#workspace.clear-around.symlink-metadata",
     ] {
         let ran =
             project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
@@ -655,14 +655,17 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1260")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read#javascript-run.run-javascript.interrupt-run-state",
+        )],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1260"),
+        seen.contains("test fault at fs (javascript-run.run-javascript.interrupt-run-state"),
         "{seen}"
     );
 }
@@ -681,12 +684,12 @@ fn a_terminal_supercov_cannot_open_is_not_lent() {
         &["--", "node", "ask.mjs"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.open_with#process_supervision.rs:1708",
+            "fs.open_with#process-supervision.give",
         )],
     );
     terminal.wait_for("asking");
     terminal.press("first\n");
-    terminal.wait_for("test fault at fs (process_supervision.rs:1708");
+    terminal.wait_for("test fault at fs (process-supervision.give");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_eq!(code, 130, "{seen}");
@@ -1012,12 +1015,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:677",
+            "fs.read_from#evidence-archive.read.read-from",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:677"), "{said}");
+    assert!(fired_at(&said, "evidence-archive.read.read-from"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1143,23 +1146,26 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "tests", "affected"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:695"), "{unlisted}");
+    assert!(unlisted.contains("run-store.discover-runs"), "{unlisted}");
     // So is a file's source asked of a store that cannot be listed.
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "source", "src/cart.js"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:695"), "{unlisted}");
+    assert!(unlisted.contains("run-store.discover-runs"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
             &["runs"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:695")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.read_dir entry#run-store.discover-runs",
+            )],
         )
         .succeeds();
     assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
@@ -1385,11 +1391,11 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
     let second = project.measure(&["--test-name-pattern=shipping"]);
     for (fault, said) in [
         (
-            "fs.read_dir#run_store.rs:695",
+            "fs.read_dir#run-store.discover-runs",
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:677",
+            "fs.read_from#evidence-archive.read.read-from",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -7322,7 +7328,10 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:697=50")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.open#evidence-archive.read-archive-each=50",
+            )],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -8637,7 +8646,10 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
     let unread = project
         .supercov_with(
             &["merge", &javascript, &python],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:697")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.open#evidence-archive.read-archive-each",
+            )],
         )
         .exits(2);
     assert!(unread.contains("recorded by another build"), "{unread}");
@@ -11378,12 +11390,15 @@ fn comparisons_and_their_mistakes_read_as_what_they_are() {
         &["import", "gone.info", "--test", "missing"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#outside_evidence.rs:421",
+            "fs.canonicalize#outside-evidence.import-line-evidence",
         )],
     );
     let said = format!("{}{}", missing.stdout(), missing.stderr());
     assert_eq!(missing.code(), 0, "{said}");
-    assert!(fired_at(&said, "outside_evidence.rs:421"), "{said}");
+    assert!(
+        fired_at(&said, "outside-evidence.import-line-evidence"),
+        "{said}"
+    );
     assert!(
         said.contains("src/missing.js (no such file in the project)"),
         "{said}"
@@ -11581,11 +11596,14 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     // a store that cannot be listed cannot answer.
     let unlisted = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695@2")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_dir#run-store.discover-runs@2",
+        )],
     );
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
-    assert!(fired_at(&said, "run_store.rs:695"), "{said}");
+    assert!(fired_at(&said, "run-store.discover-runs"), "{said}");
     // A run it was merged from that is no longer stored cannot answer.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
     let gone = project
@@ -14069,8 +14087,8 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:697=50",
-        "fs.open#source_manifest.rs:381@2",
+        "fs.open#evidence-archive.read-archive-each=50",
+        "fs.open#source-manifest.load-optional-manifest@2",
     ] {
         let unjudged = project
             .supercov_with(
@@ -14390,12 +14408,18 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
         &["--", "npm", "test"],
         &[
             ("EDITED_PROJECT", &root),
-            ("SUPERCOV_TEST_FAULT", "fs.read#source_tools.rs:685"),
+            (
+                "SUPERCOV_TEST_FAULT",
+                "fs.read#source-tools.apply-directory.read",
+            ),
         ],
     );
     let said = unread.stderr();
     assert_eq!(unread.code(), 0, "{said}");
-    assert!(fired_at(&said, "source_tools.rs:685"), "{said}");
+    assert!(
+        fired_at(&said, "source-tools.apply-directory.read"),
+        "{said}"
+    );
     assert!(
         said.contains("the source changes the command's tools made could not be applied"),
         "{said}"
@@ -14405,19 +14429,19 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
     // or what it wrote stays out of the workspace, and the command passes.
     for (fault, told) in [
         (
-            "fs.read_dir entry#source_tools.rs:678",
+            "fs.read_dir entry#source-tools.apply-directory.sorted-entries",
             "the source changes the command's tools made could not be applied",
         ),
         (
-            "fs.read_dir entry#source_tools.rs:403",
+            "fs.read_dir entry#source-tools.refresh-directory.sorted-entries-1",
             "reads the instrumented files",
         ),
         (
-            "fs.read_dir entry#source_tools.rs:443",
+            "fs.read_dir entry#source-tools.refresh-directory.sorted-entries-2",
             "reads the instrumented files",
         ),
         (
-            "fs.read_dir entry#source_tools.rs:493",
+            "fs.read_dir entry#source-tools.reconcile-directory",
             "could not be brought into the workspace",
         ),
     ] {
@@ -14472,13 +14496,16 @@ fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
             ("RELAYED", "0"),
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.create_dir_all#docker_proxy.rs:219",
+                "fs.create_dir_all#docker-proxy.start.create-dir-all-1",
             ),
         ],
     );
     let said = unrelayed.stderr();
     assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
-    assert!(fired_at(&said, "docker_proxy.rs:219"), "{said}");
+    assert!(
+        fired_at(&said, "docker-proxy.start.create-dir-all-1"),
+        "{said}"
+    );
     assert!(
         said.contains(
             "containers the tests start are not measured: the Docker relay could not start"
@@ -14655,25 +14682,37 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1684",
+            "coverage-query.coverage-decision-query",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2861"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2955@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2847@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3279"),
+        (
+            vec!["diff", &older, "latest"],
+            "coverage-query.diff-snapshot.hit-metadata",
+        ),
+        (
+            vec!["diff", &older, "latest"],
+            "coverage-query.coverage-diff-query@2",
+        ),
+        (
+            vec!["diff", &older, "latest"],
+            "coverage-query.diff-snapshot.summary@2",
+        ),
+        (
+            vec!["runs", "latest", "summary"],
+            "coverage-query.coverage-summary-query.dimensions",
+        ),
         // Every file's details, the scope read last of all.
         (
             vec!["runs", "latest", "gaps", "--format", "jsonl"],
-            "coverage_query.rs:2228@2",
+            "coverage-query.not-measured-files@2",
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3816",
+            "coverage-query.filtered-dimensions",
         ),
         // The dimensions read again, by runner.
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3816@2",
+            "coverage-query.filtered-dimensions@2",
         ),
         (
             vec![
@@ -14686,7 +14725,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3959",
+            "coverage-query.coverage-file-decisions-query.decision-gaps",
         ),
         (
             vec![
@@ -14699,21 +14738,21 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:4009",
+            "coverage-query.coverage-file-decisions-query.test-summaries",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3557",
+            "coverage-query.coverage-areas-query.file-gaps-1",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3565",
+            "coverage-query.coverage-areas-query.file-gaps-2",
         ),
         // A line's anchors; a file with no decisions under a kind, its gaps
         // read to tell it from a kind no test has.
         (
             vec!["runs", "latest", "line", "src/cart.js:14"],
-            "coverage_query.rs:874",
+            "coverage-query.coverage-covers-query-cached",
         ),
         (
             vec![
@@ -14726,7 +14765,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3964",
+            "coverage-query.coverage-file-decisions-query.file-gaps",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -14740,7 +14779,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "files", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(2);
     assert!(
@@ -14759,8 +14798,8 @@ fn a_run_listed_whose_index_cannot_be_read_carries_the_error() {
     for fault in [
         "coverage-index",
         "coverage-index@2",
-        "coverage-index-read#run_query.rs:72",
-        "coverage-index-read#run_query.rs:73",
+        "coverage-index-read#run-query.run-list-query.summary",
+        "coverage-index-read#run-query.run-list-query.projection",
     ] {
         let listed = project
             .supercov_with(&["runs", "--json"], &[("SUPERCOV_TEST_FAULT", fault)])
@@ -14805,12 +14844,15 @@ fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
     project.measure(&[]);
     for (fault, place) in [
-        ("fs.open#query_index.rs:337", "query_index.rs:337"),
         (
-            "fs.read_exact_from#query_index.rs:337",
-            "query_index.rs:337",
+            "fs.open#query-index.recorded-evidence",
+            "query-index.recorded-evidence",
         ),
-        ("fs.open#query_index.rs:354", "query_index.rs:354"),
+        (
+            "fs.read_exact_from#query-index.recorded-evidence",
+            "query-index.recorded-evidence",
+        ),
+        ("fs.open#query-index.open", "query-index.open"),
     ] {
         let ran = project.supercov_with(
             &["runs", "latest", "files"],
@@ -14873,7 +14915,10 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
     // Nor whose published run cannot be found again to read.
     for (fault, place) in [
         ("coverage-index@2", "coverage-index"),
-        ("fs.symlink_metadata#run_store.rs:641", "run_store.rs:641"),
+        (
+            "fs.symlink_metadata#run-store.load-run",
+            "run-store.load-run",
+        ),
     ] {
         let project = Project::cart("index-failed-run");
         project.edit("test/cart.test.js", "20);", "21);");
@@ -15101,12 +15146,15 @@ fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() 
         "unrecorded",
         &[("merged", listed), ("merged.out", a)],
         &["--test", "src/lib.rs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:931")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.write#rust-owned-doctests.rustdoc-wrapper-inner.fail-package",
+        )],
     );
     let said = ran.stderr();
     assert_ne!(ran.code(), 0, "{said}");
     assert!(
-        said.contains("test fault at fs (rust_owned_doctests.rs:931"),
+        said.contains("test fault at fs (rust-owned-doctests.rustdoc-wrapper-inner.fail-package"),
         "{said}"
     );
     // A harness that failed may have stopped short: it is not held to its
@@ -15320,11 +15368,12 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         "named",
         "bin/doctest",
         &[("doctest.out", "\nrunning 0 tests\n")],
-        "fs.write#rust_owned_doctests.rs:1265",
+        "fs.write#rust-owned-doctests.doctest-runtool-inner.write-record-2",
     );
     let output = ran.exits(101);
     assert!(
-        output.contains("test fault at fs (rust_owned_doctests.rs:1265"),
+        output
+            .contains("test fault at fs (rust-owned-doctests.doctest-runtool-inner.write-record-2"),
         "{output}"
     );
     // A merged harness whose children's records went missing reports its
@@ -15461,7 +15510,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         "watchdog-exec",
         "watchdog-read",
         "proc-fd",
-        "fs.read_dir#process_supervision.rs",
+        "fs.read_dir#process-supervision.watch-parent-process-group",
     ];
     let reached = |fault: &str, said: &str| {
         for site in fault.split(',') {
@@ -15507,7 +15556,10 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1620", watchdog),
+        (
+            "fs.read_dir#process-supervision.watch-parent-process-group",
+            watchdog,
+        ),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
@@ -15568,14 +15620,17 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     // launcher that cannot be written.
     for (fault, place) in [
         (
-            "fs.symlink_metadata#source_tools.rs:211",
-            "source_tools.rs:211",
+            "fs.symlink_metadata#source-tools.path-with-launchers.remove",
+            "source-tools.path-with-launchers.remove",
         ),
         (
-            "fs.create_dir_all#source_tools.rs:232",
-            "source_tools.rs:232",
+            "fs.create_dir_all#source-tools.path-with-launchers.create-dir-all",
+            "source-tools.path-with-launchers.create-dir-all",
         ),
-        ("fs.write#source_tools.rs:240", "source_tools.rs:240"),
+        (
+            "fs.write#source-tools.path-with-launchers.write-launcher",
+            "source-tools.path-with-launchers.write-launcher",
+        ),
     ] {
         let kept = project.supercov_with(
             &["--", "node", "--test"],
@@ -16006,7 +16061,22 @@ fn exact_attribution_runs_the_command_after_it() {
 /// run leaves behind would change which call the next one's fault names.
 /// A fault written `fault => place` must fail the call made there.
 fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], faults: &[&str]) {
+    each_step_of_a_run_fails_in((0, 1), label, write, command, faults);
+}
+
+/// `each_step_of_a_run_fails` for one share of the faults, every `parts`th
+/// from `part`: a sweep too long for one test runs as several side by side.
+fn each_step_of_a_run_fails_in(
+    (part, parts): (usize, usize),
+    label: &str,
+    write: fn(&Project),
+    command: &[&str],
+    faults: &[&str],
+) {
     for (number, entry) in faults.iter().enumerate() {
+        if number % parts != part {
+            continue;
+        }
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty(&format!("{label}-{number}"));
         write(&project);
@@ -16039,7 +16109,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
             "fs.write@2",
-            "fs.write@10 => python_run.rs:449",
+            "fs.write@10 => python-run.run-direct-python-in.write",
             "fs.rename@2",
             "fs.rename@9",
             "fs.open@7",
@@ -16055,9 +16125,9 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.symlink_metadata@15",
             "fs.open@5",
             "fs.read@10",
-            "fs.read@6 => source_capture.rs:54",
-            "fs.read_dir entry#1 => python_project.rs:125",
-            "fs.read_dir entry#2 => python_evidence.rs:374",
+            "fs.read@6 => source-capture.capture.read",
+            "fs.read_dir entry#1 => python-project.walk",
+            "fs.read_dir entry#2 => python-evidence.read-evidence-directory-with.read-dir",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16100,15 +16170,15 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "fs.rename@1",
             "fs.rename@2",
             "fs.copy@1",
-            "fs.read_dir@36 => workspace.rs:1157",
-            "fs.read_dir@37 => workspace.rs:706",
-            "fs.read_dir@51 => workspace.rs:1358",
+            "fs.read_dir@36 => workspace.recover-cached-workspace",
+            "fs.read_dir@37 => workspace.copy-tree.read-dir-1",
+            "fs.read_dir@51 => workspace.walk-output-files.read-dir",
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2679 => main.rs:2679",
+            "fs.canonicalize#main.public-coverage-run => main.public-coverage-run",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
+            "fs.read_to_string#javascript-frontend.prepare-javascript-frontend => javascript-frontend.prepare-javascript-frontend",
         ],
     );
 }
@@ -16139,9 +16209,27 @@ fn a_rust_run_that_cannot_write_its_tests_reports_says_so() {
     }
 }
 
+/// A Rust run each of whose own steps fails says so, in three shares side
+/// by side: as one test the sweep took up to nine of the ten minutes a
+/// Windows runner gives a test, and a slow one ran past them.
 #[test]
 fn a_rust_run_whose_own_step_fails_says_so() {
-    each_step_of_a_run_fails(
+    a_rust_run_whose_own_step_fails((0, 3));
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so_second_share() {
+    a_rust_run_whose_own_step_fails((1, 3));
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so_third_share() {
+    a_rust_run_whose_own_step_fails((2, 3));
+}
+
+fn a_rust_run_whose_own_step_fails(share: (usize, usize)) {
+    each_step_of_a_run_fails_in(
+        share,
         "own-step-rs",
         small_crate,
         &["--", "cargo", "test", "-q"],
@@ -16195,36 +16283,38 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // it recorded listed and read, a doctest's evidence listed.
             "fs.canonicalize#15",
             "fs.read_dir#10",
-            "fs.read#9 => rust_owned_doctests.rs:289",
+            "fs.read#9 => rust-owned-doctests.run-doctests.read-file",
             "fs.read_dir#9@2",
             // The processes the run starts: Cargo's metadata, the test
             // build, rustc's libdir and sysroot, a test binary's listing,
             // the test processes and the doctests'.
-            "spawn#rust_project.rs:182 => rust_project.rs:182",
+            "spawn#rust-project.cargo-metadata => rust-project.cargo-metadata",
             // The copy's own path, resolved to read its module tree.
-            "fs.canonicalize#rust_project.rs:320 => rust_project.rs:320",
-            "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
-            "spawn#rust_test_runner.rs:1570 => rust_test_runner.rs:1570",
-            "spawn#rust_test_runner.rs:1570@2 => rust_test_runner.rs:1570",
-            "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:255 => child_signal_guard.rs:255",
-            "spawn#child_signal_guard.rs:255@2 => child_signal_guard.rs:255",
+            "fs.canonicalize#rust-project.resolve-module-tree => rust-project.resolve-module-tree",
+            "spawn#rust-test-runner.build-test-artifacts => rust-test-runner.build-test-artifacts",
+            "spawn#rust-test-runner.rustc-print-path => rust-test-runner.rustc-print-path",
+            "spawn#rust-test-runner.rustc-print-path@2 => rust-test-runner.rustc-print-path",
+            "spawn#rust-test-runner.list-tests => rust-test-runner.list-tests",
+            "spawn#child-signal-guard.output => child-signal-guard.output",
+            "spawn#child-signal-guard.output@2 => child-signal-guard.output",
             "spawn",
             // The store of copies made.
-            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
+            "fs.create_dir_all#workspace.ensure-container => workspace.ensure-container",
         ],
     );
     // A binary none of whose tests were asked for is listed again for how
     // many it has.
-    each_step_of_a_run_fails(
+    each_step_of_a_run_fails_in(
+        share,
         "own-step-rs-unasked",
         small_crate,
         &["--", "cargo", "test", "-q", "--lib", "--", "none"],
-        &["spawn#rust_test_runner.rs:1268@2 => rust_test_runner.rs:1268"],
+        &["spawn#rust-test-runner.list-tests@2 => rust-test-runner.list-tests"],
     );
     if nextest_installed() {
         // Nextest's runner fails the attempt, and nextest exits 100.
-        each_step_of_a_run_fails(
+        each_step_of_a_run_fails_in(
+            share,
             "own-step-nextest",
             small_crate,
             &["--", "cargo", "nextest", "run"],
@@ -16241,14 +16331,14 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "fs.read_dir#10",
                 // nextest's version, rustc through Cargo's configuration,
                 // the test list, Cargo's metadata, the run.
-                "spawn#rust_owned_nextest.rs:136 => rust_owned_nextest.rs:136",
-                "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
-                "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
-                "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:328 => child_signal_guard.rs:328",
+                "spawn#rust-owned-nextest.run-nextest.launch-output-1 => rust-owned-nextest.run-nextest.launch-output-1",
+                "spawn#rust-cargo-configuration.compiler-host@3 => rust-cargo-configuration.compiler-host",
+                "spawn#rust-owned-nextest.run-nextest.launch-output-2 => rust-owned-nextest.run-nextest.launch-output-2",
+                "spawn#rust-owned-nextest.run-nextest.launch-output-3 => rust-owned-nextest.run-nextest.launch-output-3",
+                "spawn#child-signal-guard.status => child-signal-guard.status",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
-                "__nextest-runner/spawn#rust_owned_nextest.rs:604",
+                "__nextest-runner/spawn#rust-owned-nextest.nextest-runner-inner",
                 "__nextest-runner/fs.read@1",
                 "__nextest-runner/fs.create_dir_all@1",
                 "__nextest-runner/fs.create_dir_all@2",
@@ -16382,7 +16472,10 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         ("fs.canonicalize@20", "injected fault at fs"),
         // The Worker workspace's inputs walked, and a port found for its
         // inspector.
-        ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
+        (
+            "fs.read_dir#rust-run.collect-project-inputs",
+            "rust-run.collect-project-inputs",
+        ),
         ("free-port", "injected fault at free-port"),
     ] {
         let project = Project::cart("worker-server-steps");
@@ -16516,13 +16609,13 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:569",
-        "fs.read_dir@6 => python_run.rs:112",
-        "fs.read_dir@7 => python_run.rs:112",
-        "fs.file_type@9 => python_run.rs:115",
-        "fs.create_dir_all@7 => python_run.rs:119",
-        "fs.copy@1 => python_run.rs:122",
-        "fs.read_dir entry#3 => python_run.rs:112",
+        "fs.create_dir_all@6 => python-run.run-direct-python-in.create-dir-all",
+        "fs.read_dir@6 => python-run.copy-tree.read-dir",
+        "fs.read_dir@7 => python-run.copy-tree.read-dir",
+        "fs.file_type@9 => python-run.copy-tree.file-type",
+        "fs.create_dir_all@7 => python-run.copy-tree.create-dir-all",
+        "fs.copy@1 => python-run.copy-tree.copy",
+        "fs.read_dir entry#3 => python-run.copy-tree.read-dir",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("python-keep-work");
@@ -16594,11 +16687,11 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@15",
             "fs.create_dir_all@24",
             // The project's Go listed again as the run prepares it.
-            "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
+            "fs.read_dir#go-project.walk@2 => go-project.walk",
             // The harness a test package is given.
-            "fs.write#go_run.rs:527 => go_run.rs:527",
+            "fs.write#go-run.instrument-workspace => go-run.instrument-workspace",
             // The run's evidence archive.
-            "fs.create_dir_all#evidence_archive.rs:484 => evidence_archive.rs:484",
+            "fs.create_dir_all#evidence-archive.write-entries.create-dir-all => evidence-archive.write-entries.create-dir-all",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16662,7 +16755,7 @@ fn a_maven_run_whose_own_step_fails_says_so() {
             "spawn",
             // The store of copies made, and the copy released after a run
             // that passed.
-            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
+            "fs.create_dir_all#workspace.ensure-container => workspace.ensure-container",
             "copy-release",
         ],
     );
@@ -16701,8 +16794,8 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read@7",
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
-            "fs.read_dir entry#1 => ruby_project.rs:106",
-            "fs.read_dir entry#2 => ruby_evidence.rs:343",
+            "fs.read_dir entry#1 => ruby-project.walk",
+            "fs.read_dir entry#2 => ruby-evidence.read-evidence-directory",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16721,13 +16814,13 @@ fn a_ruby_run_that_cannot_keep_its_work_says_so() {
     };
     let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
     for entry in [
-        "fs.create_dir_all@5 => ruby_run.rs:335",
-        "fs.read_dir@5 => ruby_run.rs:98",
-        "fs.read_dir@6 => ruby_run.rs:98",
-        "fs.file_type@7 => ruby_run.rs:101",
-        "fs.create_dir_all@6 => ruby_run.rs:105",
-        "fs.copy@1 => ruby_run.rs:108",
-        "fs.read_dir entry#2 => ruby_run.rs:98",
+        "fs.create_dir_all@5 => ruby-run.run-direct-ruby-in",
+        "fs.read_dir@5 => ruby-run.copy-tree.read-dir",
+        "fs.read_dir@6 => ruby-run.copy-tree.read-dir",
+        "fs.file_type@7 => ruby-run.copy-tree.file-type",
+        "fs.create_dir_all@6 => ruby-run.copy-tree.create-dir-all",
+        "fs.copy@1 => ruby-run.copy-tree.copy",
+        "fs.read_dir entry#2 => ruby-run.copy-tree.read-dir",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("ruby-keep-work");
@@ -17176,7 +17269,7 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@3",
         "fs.rename@4",
         // The store of runs listed, and the lock released after importing.
-        "fs.read_dir#run_store.rs:695",
+        "fs.read_dir#run-store.discover-runs",
         "copy-release",
     ] {
         let project = Project::cart("import-steps");
@@ -17449,7 +17542,7 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
         ("fs.read_dir@54", "workspaces"),
         ("fs.read_dir@55", "/out"),
-        ("fs.read#workspace.rs:1646", "workspaces"),
+        ("fs.read#workspace.naming-the-project.read", "workspaces"),
         ("fs.create_dir_all@18", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),
@@ -17486,108 +17579,120 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         (
             "fs.read_dir entry#6",
             "injected fault at fs",
-            "workspace.rs:706",
+            "workspace.copy-tree.read-dir-1",
         ),
         (
             "fs.read_dir entry#9",
             "injected fault at fs",
-            "workspace.rs:1053",
+            "workspace.link-node-modules.read-dir",
         ),
         (
             "fs.read_dir entry#10",
             "injected fault at fs",
-            "workspace.rs:990",
+            "workspace.link-tools.read-dir",
         ),
         (
             "fs.read_dir entry#11",
             "injected fault at fs",
-            "workspace.rs:937",
+            "workspace.link-package.read-dir",
         ),
         (
             "fs.read_dir entry#15",
             "injected fault at fs",
-            "workspace.rs:1358",
+            "workspace.walk-output-files.read-dir",
         ),
-        ("fs.read_dir@53", "injected fault at fs", "workspace.rs:706"),
+        (
+            "fs.read_dir@53",
+            "injected fault at fs",
+            "workspace.copy-tree.read-dir-1",
+        ),
         (
             "fs.read_dir@62",
             "/node_modules: injected",
-            "workspace.rs:1053",
+            "workspace.link-node-modules.read-dir",
         ),
         (
             "fs.read_dir@63",
             "node_modules/.bin: injected",
-            "workspace.rs:990",
+            "workspace.link-tools.read-dir",
         ),
         (
             "fs.read_dir@64",
             "node_modules/@scope: injected",
-            "workspace.rs:937",
+            "workspace.link-package.read-dir",
         ),
-        ("fs.create_dir_all@4", "staging", "workspace.rs:705"),
+        (
+            "fs.create_dir_all@4",
+            "staging",
+            "workspace.copy-tree.create-dir-all-1",
+        ),
         (
             "fs.create_dir_all@9",
             "/node_modules: injected",
-            "workspace.rs:1052",
+            "workspace.link-node-modules.create-dir-all",
         ),
         (
             "fs.create_dir_all@10",
             "node_modules/.bin: injected",
-            "workspace.rs:987",
+            "workspace.link-tools.create-dir-all",
         ),
         (
             "fs.create_dir_all@11",
             "node_modules/@scope: injected",
-            "workspace.rs:936",
+            "workspace.link-package.create-dir-all",
         ),
     ];
     let unlinkable = [
         (
             "fs.read_dir entry#8",
             "injected fault at fs",
-            "workspace.rs:769",
+            "workspace.copy-tree.read-dir-2",
         ),
         (
             "fs.read_dir@58",
             "packages/web/node_modules: injected",
-            "workspace.rs:769",
+            "workspace.copy-tree.read-dir-2",
         ),
         (
             "fs.read_dir@59",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:990",
+            "workspace.link-tools.read-dir",
         ),
         (
             "fs.create_dir_all@7",
             "packages/web/node_modules: injected",
-            "workspace.rs:768",
+            "workspace.copy-tree.create-dir-all-2",
         ),
         (
             "fs.create_dir_all@8",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:987",
+            "workspace.link-tools.create-dir-all",
         ),
         (
             "fs.symlink@1",
             "packages/web/node_modules/.bin/webtool",
-            "workspace.rs:1009",
+            "workspace.link-tools.create-link",
         ),
         (
             "fs.symlink@2",
             "packages/web/node_modules/dep",
-            "workspace.rs:780",
+            "workspace.copy-tree.create-link",
         ),
         (
             "fs.symlink@3",
             "node_modules/.bin/tool",
-            "workspace.rs:1009",
+            "workspace.link-tools.create-link",
         ),
         (
             "fs.symlink@4",
             "node_modules/@scope/pkg",
-            "workspace.rs:972",
+            "workspace.link-package.create-link-2",
         ),
-        ("fs.symlink@5", "node_modules/plain", "workspace.rs:972"),
+        (
+            "fs.symlink@5",
+            "node_modules/plain",
+            "workspace.link-package.create-link-2",
+        ),
     ];
     // A directory is never cloned, so every system links the same way:
     // hard links where it can, one link per package where it cannot.
@@ -17641,12 +17746,12 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
 #[test]
 fn a_run_that_cannot_reuse_the_last_copy_says_so() {
     for entry in [
-        "fs.canonicalize@10 => workspace.rs:1286",
-        "fs.create_dir_all@6 => workspace.rs:1301",
-        "fs.copy@1 => workspace.rs:551",
-        "fs.rename@1 => workspace.rs:562",
-        "fs.rename@3 => workspace.rs:1320",
-        "fs.create_dir_all@10 => workspace.rs:1320",
+        "fs.canonicalize@10 => workspace.prepare-cached-workspace-with-operations.canonicalize-simplified",
+        "fs.create_dir_all@6 => workspace.prepare-cached-workspace-with-operations.create-dir-all",
+        "fs.copy@1 => workspace.copy-file",
+        "fs.rename@1 => workspace.rename",
+        "fs.rename@3 => workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-1",
+        "fs.create_dir_all@10 => workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-1",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::cart("reuse-copy");
@@ -17673,19 +17778,19 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1434",
-        "fs.create_dir_all#javascript_run.rs:764",
-        "fs.write#javascript_run.rs:1116",
-        "fs.canonicalize#process_supervision.rs:1924",
-        "fs.create_dir_all#javascript_run.rs:1199",
-        "fs.create_dir_all#javascript_run.rs:1398",
-        "fs.read_dir#evidence_archive.rs:263",
-        "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1677",
-        "fs.create_dir_all#javascript_run.rs:1679",
-        "fs.create_dir_all#lifecycle.rs:1038",
-        "fs.create_dir_all#javascript_run.rs:1780",
-        "fs.create_dir_all#javascript_run.rs:1782",
+        "fs.create_dir_all#lifecycle.recover-abandoned-runs",
+        "fs.create_dir_all#javascript-run.run-javascript.write-run-state",
+        "fs.write#javascript-run.run-javascript.write-2",
+        "fs.canonicalize#process-supervision.new-crash-safe",
+        "fs.create_dir_all#javascript-run.run-javascript.update-run-state-1",
+        "fs.create_dir_all#javascript-run.run-javascript.update-run-state-3",
+        "fs.read_dir#evidence-archive.collect-directory",
+        "fs.create_dir_all#evidence-archive.write-entries.create-dir-all",
+        "fs.create_dir_all#javascript-run.run-javascript.remove-stored-tree-deferred-3",
+        "fs.create_dir_all#javascript-run.run-javascript.remove-stored-tree-deferred-4",
+        "fs.create_dir_all#lifecycle.publish-run-with-fault.create-dir-all",
+        "fs.create_dir_all#javascript-run.run-javascript.update-run-state-5",
+        "fs.create_dir_all#javascript-run.run-javascript.finalize-published-run-4",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17928,9 +18033,9 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:354@2,fs.open#query_index.rs:354@3,fs.read_from#evidence_archive.rs:677",
+        "fs.open#query-index.open@2,fs.open#query-index.open@3,fs.read_from#evidence-archive.read.read-from",
         // The runs listed again for the details.
-        "fs.read_dir#run_store.rs:695@2",
+        "fs.read_dir#run-store.discover-runs@2",
     ] {
         let refused = project
             .supercov_with(
@@ -17942,7 +18047,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2301"),
+                refused.contains("coverage-query.read"),
                 "{fault}: {refused}"
             );
         }
@@ -17961,12 +18066,20 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     project.supercov(&["--", "node", "--test"]).succeeds();
     project.supercov(&["runs", "latest", "--json"]).succeeds();
     for (fault, output, place) in [
-        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:388"),
-        ("fs.read_to_string@6", "unread.html", "html_report.rs:423"),
         (
-            "fs.metadata#html_report.rs:410",
+            "fs.canonicalize@2",
+            "unresolved.html",
+            "html-report.safe-relative-source",
+        ),
+        (
+            "fs.read_to_string@6",
+            "unread.html",
+            "html-report.collect-sources.read-to-string",
+        ),
+        (
+            "fs.metadata#html-report.collect-sources.metadata",
             "unsized.html",
-            "html_report.rs:410",
+            "html-report.collect-sources.metadata",
         ),
     ] {
         let ran = project.supercov_with(
@@ -17991,11 +18104,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1370,fs.read_from#evidence_archive.rs:677",
+            "fs.read#run-store.read-statement-spans,fs.read_from#evidence-archive.read.read-from",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:677"),
+        fired_at(&spanless.stderr(), "evidence-archive.read.read-from"),
         "{}",
         spanless.stderr()
     );
@@ -18073,13 +18186,34 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:711", "python_run.rs:711"),
-        ("fs.create_dir_all#python_run.rs:712", "python_run.rs:712"),
-        ("fs.create_dir_all#ruby_run.rs:515", "ruby_run.rs:515"),
-        ("fs.create_dir_all#ruby_run.rs:516", "ruby_run.rs:516"),
-        ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
-        ("fs.create_dir_all#go_run.rs:374", "go_run.rs:374"),
-        ("fs.create_dir_all#go_run.rs:413", "go_run.rs:413"),
+        (
+            "fs.create_dir_all#python-run.prepare.write-runtime",
+            "python-run.prepare.write-runtime",
+        ),
+        (
+            "fs.create_dir_all#python-run.prepare.create-dir-all",
+            "python-run.prepare.create-dir-all",
+        ),
+        (
+            "fs.create_dir_all#ruby-run.prepare.write-runtime",
+            "ruby-run.prepare.write-runtime",
+        ),
+        (
+            "fs.create_dir_all#ruby-run.prepare.create-dir-all",
+            "ruby-run.prepare.create-dir-all",
+        ),
+        (
+            "fs.create_dir_all#go-run.instrument-sources.write-1",
+            "go-run.instrument-sources.write-1",
+        ),
+        (
+            "fs.create_dir_all#go-run.instrument-sources.write-2",
+            "go-run.instrument-sources.write-2",
+        ),
+        (
+            "fs.create_dir_all#go-run.instrument-sources.write-3",
+            "go-run.instrument-sources.write-3",
+        ),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18107,14 +18241,17 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
         return;
     }
     for (fault, place) in [
-        ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
+        ("fs.read_dir#go-project.walk", "go-project.walk"),
         (
-            "fs.canonicalize#source_capture.rs:25@2",
-            "source_capture.rs:25",
+            "fs.canonicalize#source-capture.capture.canonicalize-simplified-1@2",
+            "source-capture.capture.canonicalize-simplified-1",
         ),
-        ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1233", "go_run.rs:1233"),
-        ("fs.create_dir_all#go_run.rs:1243", "go_run.rs:1243"),
+        ("fs.open#integrity.digest-paths@4", "integrity.digest-paths"),
+        ("fs.write#go-run.prepare.write", "go-run.prepare.write"),
+        (
+            "fs.create_dir_all#go-run.prepare.create-dir-all",
+            "go-run.prepare.create-dir-all",
+        ),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18141,18 +18278,33 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
         // The project's tree walked, then the copy's: the seventh listing.
-        ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
-        ("fs.read_dir#jvm_project.rs:281@7", "jvm_project.rs:281"),
+        ("fs.read_dir#jvm-project.walk", "jvm-project.walk"),
+        ("fs.read_dir#jvm-project.walk@7", "jvm-project.walk"),
         (
-            "fs.canonicalize#source_capture.rs:25@2",
-            "source_capture.rs:25",
+            "fs.canonicalize#source-capture.capture.canonicalize-simplified-1@2",
+            "source-capture.capture.canonicalize-simplified-1",
         ),
-        ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2490", "jvm_run.rs:2490"),
-        ("fs.create_dir_all#jvm_run.rs:2506", "jvm_run.rs:2506"),
-        ("fs.create_dir_all#jvm_run.rs:2516", "jvm_run.rs:2516"),
-        ("fs.write#jvm_run.rs:2490", "jvm_run.rs:2490"),
-        ("fs.write#jvm_run.rs:2506", "jvm_run.rs:2506"),
+        ("fs.open#integrity.digest-paths@4", "integrity.digest-paths"),
+        (
+            "fs.create_dir_all#jvm-run.prepare.write-1",
+            "jvm-run.prepare.write-1",
+        ),
+        (
+            "fs.create_dir_all#jvm-run.prepare.write-2",
+            "jvm-run.prepare.write-2",
+        ),
+        (
+            "fs.create_dir_all#jvm-run.prepare.create-dir-all",
+            "jvm-run.prepare.create-dir-all",
+        ),
+        (
+            "fs.write#jvm-run.prepare.write-1",
+            "jvm-run.prepare.write-1",
+        ),
+        (
+            "fs.write#jvm-run.prepare.write-2",
+            "jvm-run.prepare.write-2",
+        ),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18182,14 +18334,17 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:363",
-            "javascript_frontend.rs:363",
+            "fs.read#javascript-frontend.load-cached-javascript-frontend.read-1",
+            "javascript-frontend.load-cached-javascript-frontend.read-1",
         ),
         (
-            "fs.read#javascript_frontend.rs:375",
-            "javascript_frontend.rs:375",
+            "fs.read#javascript-frontend.load-cached-javascript-frontend.read-2",
+            "javascript-frontend.load-cached-javascript-frontend.read-2",
         ),
-        ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
+        (
+            "fs.symlink_metadata#workspace.prepare-cached-workspace-with-operations.symlink-metadata",
+            "workspace.prepare-cached-workspace-with-operations.symlink-metadata",
+        ),
     ] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();
@@ -18217,12 +18372,18 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1839@2",
+            "fs.read_to_string#javascript-frontend.track-assertions.read-to-string@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1839"), "{stderr}");
+    assert!(
+        fired_at(
+            &stderr,
+            "javascript-frontend.track-assertions.read-to-string"
+        ),
+        "{stderr}"
+    );
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -18248,23 +18409,23 @@ fn a_javascript_run_that_cannot_write_its_diagnostics_says_so() {
 fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#python_project.rs:269@1",
-            "python_project.rs:269",
+            "fs.read#python-project.prepare@1",
+            "python-project.prepare",
             "server/app.py",
         ),
         (
-            "fs.open#integrity.rs:427@4",
-            "integrity.rs:427",
+            "fs.open#integrity.digest-paths@4",
+            "integrity.digest-paths",
             "server/app.py",
         ),
         (
-            "fs.read#source_capture.rs:54@5",
-            "source_capture.rs:54",
+            "fs.read#source-capture.capture.read@5",
+            "source-capture.capture.read",
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:718@1",
-            "python_run.rs:718",
+            "fs.write#python-run.prepare.write-file@1",
+            "python-run.prepare.write-file",
             "plan.json",
         ),
     ] {
@@ -18289,26 +18450,30 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#ruby_project.rs:233@1",
-            "ruby_project.rs:233",
+            "fs.read#ruby-project.prepare@1",
+            "ruby-project.prepare",
             "web/app.rb",
         ),
         (
-            "fs.open#integrity.rs:427@4",
-            "integrity.rs:427",
+            "fs.open#integrity.digest-paths@4",
+            "integrity.digest-paths",
             "web/app.rb",
         ),
         (
-            "fs.read#source_capture.rs:54@5",
-            "source_capture.rs:54",
+            "fs.read#source-capture.capture.read@5",
+            "source-capture.capture.read",
             "web/app.rb",
         ),
         (
-            "fs.write#ruby_run.rs:93@1",
-            "ruby_run.rs:93",
+            "fs.write#ruby-run.write-runtime@1",
+            "ruby-run.write-runtime",
             "supercov_runtime.rb",
         ),
-        ("fs.write#ruby_run.rs:520@1", "ruby_run.rs:520", "plan.rb"),
+        (
+            "fs.write#ruby-run.prepare.write-file@1",
+            "ruby-run.prepare.write-file",
+            "plan.rb",
+        ),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19243,43 +19408,43 @@ fn a_doctest_runtool_step_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1189",
-            "rust_owned_doctests.rs:1189",
+            "fs.create_dir_all#rust-owned-doctests.doctest-runtool-inner.create-dir-all",
+            "rust-owned-doctests.doctest-runtool-inner.create-dir-all",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1194",
-            "rust_owned_doctests.rs:1194",
+            "spawn#rust-owned-doctests.doctest-runtool-inner.launch-output-2",
+            "rust-owned-doctests.doctest-runtool-inner.launch-output-2",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1202",
-            "rust_owned_doctests.rs:1202",
+            "fs.read#rust-owned-doctests.doctest-runtool-inner.read-1",
+            "rust-owned-doctests.doctest-runtool-inner.read-1",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1213",
-            "rust_owned_doctests.rs:1213",
+            "fs.read#rust-owned-doctests.doctest-runtool-inner.read-2",
+            "rust-owned-doctests.doctest-runtool-inner.read-2",
         ),
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1158",
-            "rust_owned_doctests.rs:1158",
+            "fs.create_dir_all#rust-owned-doctests.doctest-runtool-inner.next-sequence",
+            "rust-owned-doctests.doctest-runtool-inner.next-sequence",
         ),
         (
             "2024",
-            "fs.write#rust_owned_doctests.rs:1248",
-            "rust_owned_doctests.rs:1248",
+            "fs.write#rust-owned-doctests.doctest-runtool-inner.write-record-1",
+            "rust-owned-doctests.doctest-runtool-inner.write-record-1",
         ),
         (
             "2021",
-            "spawn#rust_owned_doctests.rs:1258",
-            "rust_owned_doctests.rs:1258",
+            "spawn#rust-owned-doctests.doctest-runtool-inner.launch-output-3",
+            "rust-owned-doctests.doctest-runtool-inner.launch-output-3",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1171",
-            "rust_owned_doctests.rs:1171",
+            "spawn#rust-owned-doctests.doctest-runtool-inner.launch-output-1",
+            "rust-owned-doctests.doctest-runtool-inner.launch-output-1",
         ),
     ] {
         let project = Project::empty("doctest-runtool-steps");
@@ -19407,8 +19572,11 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
         std::fs::remove_file(project.root.join("linked")).unwrap();
     }
     for (fault, place) in [
-        ("fs.canonicalize#python_run.rs:213", "python_run.rs:213"),
-        ("fs.read_dir#python_project.rs:125", "python_project.rs:125"),
+        (
+            "fs.canonicalize#python-run.current-python-integrity",
+            "python-run.current-python-integrity",
+        ),
+        ("fs.read_dir#python-project.walk", "python-project.walk"),
     ] {
         let read = project.supercov_with(&["runs", "latest"], &[("SUPERCOV_TEST_FAULT", fault)]);
         let said = format!("{}{}", read.stdout(), read.stderr());
@@ -19458,10 +19626,19 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
     stale_when(
         &project,
         &[
-            ("fs.canonicalize#rust_run.rs:244", "rust_run.rs:244"),
-            ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
-            ("fs.read_dir entry#rust_run.rs:88", "rust_run.rs:88"),
-            ("fs.open#integrity.rs:427", "integrity.rs:427"),
+            (
+                "fs.canonicalize#rust-run.current-rust-integrity",
+                "rust-run.current-rust-integrity",
+            ),
+            (
+                "fs.read_dir#rust-run.collect-project-inputs",
+                "rust-run.collect-project-inputs",
+            ),
+            (
+                "fs.read_dir entry#rust-run.collect-project-inputs",
+                "rust-run.collect-project-inputs",
+            ),
+            ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
         ],
     );
     #[cfg(unix)]
@@ -19471,9 +19648,12 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:746", "go_run.rs:746"),
-                ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
-                ("fs.open#integrity.rs:427", "integrity.rs:427"),
+                (
+                    "fs.canonicalize#go-run.current-go-integrity",
+                    "go-run.current-go-integrity",
+                ),
+                ("fs.read_dir#go-project.walk", "go-project.walk"),
+                ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
             ],
         );
         #[cfg(unix)]
@@ -19492,9 +19672,12 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
-                ("fs.read_dir#ruby_project.rs:106", "ruby_project.rs:106"),
-                ("fs.open#integrity.rs:427", "integrity.rs:427"),
+                (
+                    "fs.canonicalize#ruby-run.current-ruby-integrity",
+                    "ruby-run.current-ruby-integrity",
+                ),
+                ("fs.read_dir#ruby-project.walk", "ruby-project.walk"),
+                ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
             ],
         );
         refused_under_a_link(&project, "lib", &command);
@@ -19518,9 +19701,12 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1962", "jvm_run.rs:1962"),
-                ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
-                ("fs.open#integrity.rs:427", "integrity.rs:427"),
+                (
+                    "fs.canonicalize#jvm-run.current-jvm-integrity",
+                    "jvm-run.current-jvm-integrity",
+                ),
+                ("fs.read_dir#jvm-project.walk", "jvm-project.walk"),
+                ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
             ],
         );
         // A run under a root that is a link is refused.
@@ -20008,13 +20194,13 @@ fn a_rust_run_whose_step_after_the_build_fails_says_so() {
         (&["cargo", "test"][..], "diagnostics@3", "diagnostics"),
         (
             &["cargo", "test"][..],
-            "fs.read_dir#rust_runtime.rs:391",
-            "rust_runtime.rs:391",
+            "fs.read_dir#rust-runtime.settle-under.read-dir",
+            "rust-runtime.settle-under.read-dir",
         ),
         (
             &["cargo", "nextest", "run"][..],
-            "fs.read_dir#rust_runtime.rs:391",
-            "rust_runtime.rs:391",
+            "fs.read_dir#rust-runtime.settle-under.read-dir",
+            "rust-runtime.settle-under.read-dir",
         ),
     ] {
         let project = Project::empty("rust-settlement");
@@ -20252,11 +20438,14 @@ fn a_quality_snapshot_or_scope_that_cannot_be_read_is_left_out_or_refused() {
         .succeeds();
     let scope = project.supercov_with(
         &["quality", "scope"],
-        &[("SUPERCOV_TEST_FAULT", "fs.symlink_metadata#quality.rs:1094")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.symlink_metadata#quality.discover-for",
+        )],
     );
     let said = scope.stderr();
     assert_ne!(scope.code(), 0, "{said}");
-    assert!(fired_at(&said, "quality.rs:1094"), "{said}");
+    assert!(fired_at(&said, "quality.discover-for"), "{said}");
 }
 
 /// A report names what it cannot show: a run to compare with where there is
@@ -20308,10 +20497,10 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     assert!(missing.contains("coverage run not found"), "{missing}");
     let unlisted = project.supercov_with(
         &report,
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
     );
     assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
-    assert!(fired_at(&unlisted.stderr(), "run_store.rs:695"));
+    assert!(fired_at(&unlisted.stderr(), "run-store.discover-runs"));
     snapshot(&project, "q_0000000000000001", serde_json::json!([]));
     snapshot(
         &project,
@@ -20339,21 +20528,27 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#source_manifest.rs:816",
+            "fs.canonicalize#source-manifest.affected-tests.canonicalize-simplified",
         )],
     );
     assert_ne!(unresolved.code(), 0, "{}", unresolved.stderr());
-    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:816"));
+    assert!(fired_at(
+        &unresolved.stderr(),
+        "source-manifest.affected-tests.canonicalize-simplified"
+    ));
     let unread = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#source_manifest.rs:827",
+            "fs.read_to_string#source-manifest.affected-tests.read-to-string",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert!(!said.contains("panicked"), "{said}");
-    assert!(fired_at(&said, "source_manifest.rs:827"), "{said}");
+    assert!(
+        fired_at(&said, "source-manifest.affected-tests.read-to-string"),
+        "{said}"
+    );
 }
 
 /// A JavaScript run beside a wasm library prepares the library in the copy:
@@ -20362,8 +20557,11 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
 #[test]
 fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("spawn#rust_project.rs:182", "rust_project.rs:182"),
-        ("fs.create_dir_all#rust_wasm.rs:185", "rust_wasm.rs:185"),
+        (
+            "spawn#rust-project.cargo-metadata",
+            "rust-project.cargo-metadata",
+        ),
+        ("fs.create_dir_all#rust-wasm.prepare", "rust-wasm.prepare"),
     ] {
         let project = Project::cart("wasm-library-unprepared");
         project.write(".gitignore", "out/\nnode_modules/\ntarget/\n");
@@ -20419,7 +20617,7 @@ fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.create_dir_all#source_manifest.rs:465",
+            "fs.create_dir_all#source-manifest.write-json",
         )],
     );
     assert_eq!(ran.code(), 1, "{}", ran.stderr());
@@ -20444,12 +20642,15 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:323")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.rename#query-index.write-query-index",
+        )],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (query_index.rs:323 rename)"),
+            .contains("test fault at fs (query-index.write-query-index rename)"),
         "{}",
         ran.stderr()
     );
@@ -20476,12 +20677,18 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
         &["runs", "latest"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#coverage_query.rs:3404",
+            "coverage-index-read#coverage-query.coverage-summary-query.unclassified-source",
         )],
     );
     let said = format!("{}{}", refused.stdout(), refused.stderr());
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "coverage_query.rs:3404"), "{said}");
+    assert!(
+        fired_at(
+            &said,
+            "coverage-query.coverage-summary-query.unclassified-source"
+        ),
+        "{said}"
+    );
 }
 
 /// A record the run's evidence holds that is no JSON -- a process that tore
@@ -20514,11 +20721,14 @@ fn a_stale_query_whose_record_cannot_be_read_still_answers() {
     project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
     let ran = project.supercov_with(
         &["runs", "latest", "files", "--json"],
-        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:381")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.open#source-manifest.load-optional-manifest",
+        )],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (source_manifest.rs:381 open)"),
+            .contains("test fault at fs (source-manifest.load-optional-manifest open)"),
         "{}",
         ran.stderr()
     );
@@ -20537,11 +20747,14 @@ fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
     project.supercov(&["merge", &first, &second]).succeeds();
     let ran = project.supercov_with(
         &["runs", "latest", "files"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695@2")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_dir#run-store.discover-runs@2",
+        )],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (run_store.rs:695 read_dir)"),
+            .contains("test fault at fs (run-store.discover-runs read_dir)"),
         "{}",
         ran.stderr()
     );
@@ -20558,23 +20771,23 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:820@1"),
-            "rust_owned_doctests.rs:820",
+            format!("{stand_in}spawn#rust-owned-doctests.rustdoc-wrapper-inner.launch-output@1"),
+            "rust-owned-doctests.rustdoc-wrapper-inner.launch-output",
         ),
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:820@2"),
-            "rust_owned_doctests.rs:820",
+            format!("{stand_in}spawn#rust-owned-doctests.rustdoc-wrapper-inner.launch-output@2"),
+            "rust-owned-doctests.rustdoc-wrapper-inner.launch-output",
         ),
         (
             "2021",
-            "fs.read#rust_owned_doctests.rs:289".to_owned(),
-            "rust_owned_doctests.rs:289",
+            "fs.read#rust-owned-doctests.run-doctests.read-file".to_owned(),
+            "rust-owned-doctests.run-doctests.read-file",
         ),
         (
             "2024",
-            format!("{stand_in}fs.read#rust_owned_doctests.rs:1104@1"),
-            "rust_owned_doctests.rs:1104",
+            format!("{stand_in}fs.read#rust-owned-doctests.read-invocations@1"),
+            "rust-owned-doctests.read-invocations",
         ),
         // The stand-in's own path, and the merged harness runner's: each
         // resolves itself first.
@@ -20591,13 +20804,13 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         // The merged harness's order, and a child's record, read back.
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1202".to_owned(),
-            "rust_owned_doctests.rs:1202",
+            "__doctest-runner/fs.read#rust-owned-doctests.doctest-runtool-inner.read-1".to_owned(),
+            "rust-owned-doctests.doctest-runtool-inner.read-1",
         ),
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1213".to_owned(),
-            "rust_owned_doctests.rs:1213",
+            "__doctest-runner/fs.read#rust-owned-doctests.doctest-runtool-inner.read-2".to_owned(),
+            "rust-owned-doctests.doctest-runtool-inner.read-2",
         ),
     ] {
         let project = Project::empty("doctest-stand-in-steps");
@@ -20639,7 +20852,7 @@ fn a_line_read_from_the_working_tree_is_stale_only_by_the_runs_record() {
     };
     assert_eq!(origin(""), "working-tree-stale");
     assert_eq!(
-        origin("fs.open#source_manifest.rs:381=10"),
+        origin("fs.open#source-manifest.load-optional-manifest=10"),
         "working-tree-current"
     );
 }
@@ -20713,14 +20926,17 @@ fn a_go_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
         &[
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.symlink_metadata#source_discovery.rs:475@3",
+                "fs.symlink_metadata#source-discovery.existing-roots@3",
             ),
             ("SUPERCOV_SOURCE_ROOTS", "src,main.go"),
         ],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "source_discovery.rs:475"), "{stderr}");
+    assert!(
+        fired_at(&stderr, "source-discovery.existing-roots"),
+        "{stderr}"
+    );
 }
 
 /// The source roots named, read again in the copy for a Java server beside
@@ -20746,14 +20962,17 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
         &[
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.symlink_metadata#source_discovery.rs:475@2",
+                "fs.symlink_metadata#source-discovery.existing-roots@2",
             ),
             ("SUPERCOV_SOURCE_ROOTS", "src"),
         ],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "source_discovery.rs:475"), "{stderr}");
+    assert!(
+        fired_at(&stderr, "source-discovery.existing-roots"),
+        "{stderr}"
+    );
 }
 
 /// A directory discovery cannot list, or whose listing breaks off, while
@@ -20761,8 +20980,8 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
 #[test]
 fn a_directory_discovery_cannot_list_holds_no_configuration() {
     for fault in [
-        "fs.read_dir#project_discovery.rs:349",
-        "fs.read_dir entry#project_discovery.rs:349",
+        "fs.read_dir#project-discovery.visit",
+        "fs.read_dir entry#project-discovery.visit",
     ] {
         let project = Project::cart("discovery-unlisted");
         let ran =
@@ -20770,7 +20989,7 @@ fn a_directory_discovery_cannot_list_holds_no_configuration() {
         let said = ran.stderr();
         assert_eq!(ran.code(), 0, "{fault}: {said}");
         assert!(
-            fired_at(&said, "project_discovery.rs:349"),
+            fired_at(&said, "project-discovery.visit"),
             "{fault}: {said}"
         );
     }
@@ -21767,9 +21986,12 @@ fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
 #[test]
 fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
     for (fault, emptied) in [
-        ("fs.remove_file:2#lifecycle.rs:1762", true),
-        ("fs.read_dir:2#lifecycle.rs:1731", true),
-        ("fs.remove_file#lifecycle.rs:1762", false),
+        (
+            "fs.remove_file:2#lifecycle.remove-tree-on.remove-file",
+            true,
+        ),
+        ("fs.read_dir:2#lifecycle.remove-tree-on.read-dir", true),
+        ("fs.remove_file#lifecycle.remove-tree-on.remove-file", false),
     ] {
         let project = Project::cart("sweep");
         assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
@@ -21805,7 +22027,10 @@ fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
         let said = ran.stderr();
         assert_eq!(ran.code(), 0, "{said}");
         assert_eq!(
-            fired_at(&said, "workspace.rs:2226"),
+            fired_at(
+                &said,
+                "workspace.prune-cached-workspace-sources.remove-scratch-tree-deferred"
+            ),
             !fault.is_empty(),
             "{said}"
         );
@@ -21825,7 +22050,11 @@ fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
     };
     assert_eq!(left_in_copy(""), 0);
     // The prune stops there: that source and those after it stay.
-    assert!(left_in_copy("fs.rename#workspace.rs:2226") > 0);
+    assert!(
+        left_in_copy(
+            "fs.rename#workspace.prune-cached-workspace-sources.remove-scratch-tree-deferred"
+        ) > 0
+    );
 }
 
 /// `mutants test --plan`: a mutant no test infected is decided without
@@ -22649,12 +22878,12 @@ fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
     let restored = project.latest();
     for fault in [
         "run-store-unlisted",
-        "fs.create_dir_all#lifecycle.rs:1256",
-        "fs.read_dir#lifecycle.rs:1257",
-        "fs.symlink_metadata#lifecycle.rs:892",
-        "fs.create_dir_all#lifecycle.rs:1279",
-        "fs.rename#lifecycle.rs:1281",
-        "fs.open#lifecycle.rs:1282",
+        "fs.create_dir_all#lifecycle.derive-run.create-dir-all",
+        "fs.read_dir#lifecycle.derive-run.read-dir",
+        "fs.symlink_metadata#lifecycle.copy-regular-file",
+        "fs.create_dir_all#lifecycle.derive-run.atomic-write",
+        "fs.rename#lifecycle.derive-run.rename",
+        "fs.open#lifecycle.derive-run.sync-directory",
     ] {
         let ran = project.supercov_with(
             &["mutants", "--shard", "1/2", "--", "npx", "vitest", "run"],
@@ -22676,7 +22905,11 @@ fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
             .count();
         assert_eq!(
             runs,
-            if fault.ends_with(":1282") { 2 } else { 1 },
+            if fault.ends_with("sync-directory") {
+                2
+            } else {
+                1
+            },
             "{fault}"
         );
         if runs == 2 {
@@ -23387,16 +23620,6 @@ fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
     assert_eq!(reply["summary"]["survived"], 1, "{reply}");
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     // A pass that cannot switch the crate's mutants in ends, saying why.
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../supercov-engine/src/rust_strong.rs"),
-    )
-    .unwrap();
-    let line = source
-        .lines()
-        .position(|line| line.contains("crate::fault_fs::read(plan_path)"))
-        .unwrap()
-        + 1;
     std::fs::remove_file(
         project
             .root
@@ -23409,7 +23632,7 @@ fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
         &["runs", &rust, "mutants", "test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            &format!("fs.read#rust_strong.rs:{line}"),
+            "fs.read#rust-strong.switch-wasm.read",
         )],
     );
     assert_ne!(failed.code(), 0, "{}", failed.stderr());
@@ -23772,6 +23995,224 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     });
     let _ = std::fs::remove_file(&served);
     assert!(shared, "{log}\n{context}");
+}
+
+/// A module-level table a server builds as it starts, read by few of a
+/// browser suite's tests: each of its mutants has for candidates the tests
+/// that read its value, not every test of the run, and the plan says how
+/// far that narrowed them. A value read while the server's modules loaded,
+/// and a value no literal holds, keep every test. Soundness: the same suite
+/// measured without the probes plans every test for each, and every mutant
+/// that broad pass kills, the narrowed one kills, with the broad killer
+/// among its candidates.
+#[cfg(unix)]
+#[test]
+fn a_module_level_value_s_mutants_run_against_the_tests_that_read_it() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-module-values");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-module-values", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    let words = "export const WORDS = {\n  en: { hello: \"Hello\", bye: \"Bye\" },\n  fr: { hello: \"Bonjour\", bye: \"Au revoir\" },\n};\nconst LETTERS = { a: \"A\" };\nexport const COPIED = LETTERS.a;\nexport const PLAIN = \"plain\";\nexport function word(lang, key) {\n  return WORDS[lang][key];\n}\n";
+    project.write("server/words.js", words);
+    // A word the mutant took away is a 500 for the request that read it.
+    // Uncaught, it took the server down, and a test that reads no word,
+    // its request in flight on the other worker, failed first and was
+    // named the broad pass's killer.
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { word, COPIED, PLAIN } from \"../server/words.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/word\") {\n    try {\n      return response.end(word(url.searchParams.get(\"lang\"), url.searchParams.get(\"key\")));\n    } catch (error) {\n      response.statusCode = 500;\n      return response.end(String(error));\n    }\n  }\n  if (url.pathname === \"/copied\") return response.end(COPIED);\n  if (url.pathname === \"/plain\") return response.end(PLAIN);\n  response.end(\"other\");\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/words.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"greets in English\", async ({ request }) => {\n  expect(await (await request.get(\"/word?lang=en&key=hello\")).text()).toBe(\"Hello\");\n});\ntest(\"says goodbye in French\", async ({ request }) => {\n  expect(await (await request.get(\"/word?lang=fr&key=bye\")).text()).toBe(\"Au revoir\");\n});\n",
+    );
+    project.write(
+        "tests/other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nfor (const n of [1, 2, 3]) {\n  test(`answers otherwise ${n}`, async ({ request }) => {\n    expect(await (await request.get(\"/other\")).text()).toBe(\"other\");\n  });\n}\ntest(\"copies a letter\", async ({ request }) => {\n  expect(await (await request.get(\"/copied\")).text()).toBe(\"A\");\n});\ntest(\"answers plainly\", async ({ request }) => {\n  expect(await (await request.get(\"/plain\")).text()).toBe(\"plain\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("module-level values");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "server");
+    // Each run's plan, and its pass's verdicts, by mutant id.
+    let measure_and_test = |probes: bool| {
+        let mut env = vec![roots];
+        if probes {
+            env.push(("SUPERCOV_MUTANTS", "1"));
+        }
+        project
+            .supercov_with(&["--", "npx", "playwright", "test"], &env)
+            .succeeds();
+        let plan = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--plan", "--json"],
+                &[roots],
+            )
+            .json();
+        let text = project
+            .supercov_with(&["runs", "latest", "mutants", "test", "--plan"], &[roots])
+            .succeeds();
+        let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &[roots]);
+        let said = ran.stderr();
+        let reply = ran.json();
+        let verdicts = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap().to_owned(),
+                    mutant["strong"].clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (plan, text, reply, said, verdicts)
+    };
+    let (plan, text, reply, said, narrowed) = measure_and_test(true);
+    let context = format!("{plan}\n{reply}\n{said}");
+    let tests = plan["tests"].as_array().unwrap().clone();
+    // The mutant of `text` on its line, by its mutator.
+    let planned = |text: &str, mutator: &str| {
+        let (line, column) = words
+            .lines()
+            .enumerate()
+            .find_map(|(line, source)| source.find(text).map(|at| (line + 1, at + 1)))
+            .unwrap();
+        let prefix = format!(
+            "server/words.js:{line}:{column}-{line}:{}:{mutator}:",
+            column + text.len()
+        );
+        plan["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"].as_str().unwrap().starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{prefix}\n{context}"))
+            .clone()
+    };
+    let names = |mutant: &serde_json::Value| {
+        let mut names = mutant["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| {
+                tests[candidate["test"].as_u64().unwrap() as usize]["title"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    // The English greeting: the one test that read it, of the seven that
+    // ran with the server that loaded it.
+    let hello = planned("\"Hello\"", "StringLiteral");
+    assert_eq!(names(&hello), ["greets in English"], "{context}");
+    assert_eq!(
+        hello["narrowed"],
+        serde_json::json!({"from": 7, "to": 1}),
+        "{context}"
+    );
+    let goodbye = planned("\"Au revoir\"", "StringLiteral");
+    assert_eq!(names(&goodbye), ["says goodbye in French"], "{context}");
+    // Read by no test: decided without running it.
+    let bonjour = planned("\"Bonjour\"", "StringLiteral");
+    assert_eq!(bonjour["decided"], "survived", "{context}");
+    assert_eq!(bonjour["reason"], "no-test-read-it", "{context}");
+    // The English words replaced whole: what reads English.
+    let english = planned("{ hello: \"Hello\", bye: \"Bye\" }", "ObjectLiteral");
+    assert_eq!(names(&english), ["greets in English"], "{context}");
+    // Copied while the module loaded: every test stays.
+    let letter = planned("\"A\"", "StringLiteral");
+    assert_eq!(names(&letter).len(), 7, "{context}");
+    assert_eq!(letter["narrowed"]["escaped"], true, "{context}");
+    // No literal holds it: every test.
+    let plain = planned("\"plain\"", "StringLiteral");
+    assert_eq!(names(&plain).len(), 7, "{context}");
+    assert!(plain["narrowed"].is_null(), "{context}");
+    // The plan and the pass say so.
+    let summary = &plan["summary"]["narrowed"];
+    assert!(summary["mutants"].as_u64() > Some(3), "{context}");
+    assert_eq!(summary["escaped"], 2, "{context}");
+    assert!(
+        summary["candidatesAfter"].as_u64() < summary["candidatesBefore"].as_u64(),
+        "{context}"
+    );
+    assert!(
+        text.contains("module-level mutant(s) to the tests that read their value"),
+        "{text}"
+    );
+    assert_eq!(reply["summary"]["narrowed"], *summary, "{context}");
+    // The same suite measured without the probes: every module-level mutant
+    // has every test for a candidate.
+    let (broad_plan, _, broad_reply, broad_said, broad) = measure_and_test(false);
+    let broad_context = format!("{broad_plan}\n{broad_reply}\n{broad_said}\n{context}");
+    assert!(
+        broad_plan["summary"]["narrowed"].is_null(),
+        "{broad_context}"
+    );
+    let module_level = plan["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["function"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(module_level.len(), 10, "{broad_context}");
+    let mut killed = 0;
+    for mutant in module_level {
+        let id = mutant["id"].as_str().unwrap();
+        let (narrow, wide) = (&narrowed[id], &broad[id]);
+        if wide["status"] != "killed" {
+            continue;
+        }
+        killed += 1;
+        assert_eq!(narrow["status"], "killed", "{id}\n{broad_context}");
+        let killer = wide["killedBy"].as_str().unwrap();
+        let candidate = mutant["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| tests[candidate["test"].as_u64().unwrap() as usize]["id"] == killer);
+        assert!(
+            candidate,
+            "{id}: {killer} is not a candidate\n{broad_context}"
+        );
+    }
+    assert!(killed >= 6, "{broad_context}");
 }
 
 /// A Playwright mutant attempt is stopped at its time limit, its test's
@@ -24742,9 +25183,12 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         ("SUPERCOV_SOURCE_ROOTS", "server"),
         ("LISTED", listed_env.as_str()),
     ];
+    // How long the suite takes on this machine, list and all.
+    let measuring = std::time::Instant::now();
     project
         .supercov_with(&["--", "node", "e2e.mjs"], &roots)
         .succeeds();
+    let measuring = measuring.elapsed().as_secs();
     let _ = std::fs::remove_file(&listed);
     let planning = std::time::Instant::now();
     let plan = project
@@ -24766,8 +25210,11 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     // even on a slow runner: with six hundred an ARM runner's first
     // invocation used the whole minute, and with a hundred and twenty a
     // macOS runner's. The budget counts planning too, which takes a slow
-    // runner most of a minute here: the pass gets its minute after it.
-    let budget = (60 + 2 * planning).to_string();
+    // runner most of a minute here: the pass gets its minute after it, or
+    // four times the suite's own run where that is longer. A fixed minute
+    // was spent by the first round on a slow arm64 or macOS runner, and the
+    // budget ended the second invocation before it had listed the tests.
+    let budget = (60.max(4 * measuring) + 2 * planning).to_string();
     let ran = project.supercov_with(
         &[
             "runs", "latest", "mutants", "test", "--json", "--budget", &budget,
@@ -24786,14 +25233,17 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     let context = format!("{reply}\n{said}");
     assert!(!said.contains("ran out of memory"), "{context}");
     assert!(!said.contains("heap out of memory"), "{context}");
-    // The list saw the project's thirty tests, once each, every time.
+    // The list saw the project's thirty tests, once each, every time it
+    // finished: the budget ends the invocation it falls in, which may be
+    // listing. That the pass went on to further invocations is asserted
+    // below from its own record.
     let counts = std::fs::read_to_string(&listed).unwrap_or_default();
     let _ = std::fs::remove_file(&listed);
     let listings = counts
         .lines()
         .map(|line| line.split_once(' ').unwrap())
         .collect::<Vec<_>>();
-    assert!(listings.len() >= 2, "{counts}\n{context}");
+    assert!(!listings.is_empty(), "{counts}\n{context}");
     assert!(
         listings.iter().all(|(count, _)| *count == "30"),
         "{counts}\n{context}"
@@ -26090,10 +26540,10 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:695")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(1);
-    assert!(unlisted.contains("run_store.rs:695"), "{unlisted}");
+    assert!(unlisted.contains("run-store.discover-runs"), "{unlisted}");
     // A run whose evidence is cut short after its header, its size as
     // recorded, has no plan. Where the cut lands (a section's header or its
     // compressed body) depends on the run's sizes, so the reason may be either.
@@ -26256,12 +26706,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:2007",
+            "fs.write#mutants-test-command.run-language",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:2007"),
+        fired_at(&unwritten.stderr(), "mutants-test-command.run-language"),
         "{}",
         unwritten.stderr()
     );
@@ -26509,7 +26959,10 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:395")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "spawn#mutants-test-command.mutants-command",
+            )],
         )
         .exits(2);
     assert!(
@@ -26708,13 +27161,16 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:717",
+            "coverage-index-read#mutants-query.coverage-mutants-query",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:717"), "{said}");
+    assert!(
+        fired_at(&said, "mutants-query.coverage-mutants-query"),
+        "{said}"
+    );
 
     // The table of files.
     contains_all(
@@ -27483,8 +27939,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:962",
-        "fs.read_dir entry#public_query.rs:962",
+        "fs.read_dir#public-query.json-files",
+        "fs.read_dir entry#public-query.json-files",
     ] {
         let unlisted = project
             .supercov_with(
@@ -27497,7 +27953,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:962"),
+            fired_at(&unlisted, "public-query.json-files"),
             "{fault}: {unlisted}"
         );
     }

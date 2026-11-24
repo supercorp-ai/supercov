@@ -69,7 +69,9 @@ pub fn run_list_query(
             let summary = open_or_rebuild_query_index(run).and_then(|container| {
                 let index = CoverageIndex::new(&container)?;
                 Ok((
+                    // fault-site: run-query.run-list-query.summary
                     index.summary(view)?,
+                    // fault-site: run-query.run-list-query.projection
                     index.projection(view, None, None)?.tests,
                 ))
             });

@@ -88,6 +88,7 @@ fn ignore_store(path: &Path) -> Result<(), String> {
 /// reader sees either the whole previous content or the whole new content.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or("invalid path")?;
+    // fault-site: quality-store.write-atomic.create-dir-all
     fs::create_dir_all(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
     ignore_store(path)?;
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
@@ -99,6 +100,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
                 .truncate(true),
             &temp,
         )?;
+        // fault-site: quality-store.write-atomic.write-all
         fs::write_all(&mut file, bytes)?;
         fs::sync_all(&file)?;
         fs::rename(&temp, path)

@@ -889,6 +889,7 @@ impl Drop for ProjectLock {
 }
 
 fn copy_regular_file(source: &Path, destination: &Path) -> Result<u64, LifecycleError> {
+    // fault-site: lifecycle.copy-regular-file
     let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
     if !metadata.file_type().is_file() {
         return Err(LifecycleError::UnsafePath(source.into()));
@@ -1035,6 +1036,7 @@ pub(crate) fn publish_run_with_fault(
         clear_staging(root, &staging)?;
     }
     let evidence_sha256 = file_sha256(evidence_source)?;
+    // fault-site: lifecycle.publish-run-with-fault.create-dir-all
     fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
     let copied = copy_regular_file(evidence_source, &staging.join("evidence.raw.gz"))?;
     if copied != metadata.raw_evidence.compressed_bytes {
@@ -1191,6 +1193,7 @@ pub(crate) fn publish_run_with_fault(
         let _ = remove_stored_tree_deferred(root, &staging);
         return Err(error);
     }
+    // fault-site: lifecycle.publish-run-with-fault.rename
     fs::rename(&staging, &destination).map_err(|source| io_error(&destination, source))?;
     sync_directory(runs)?;
     Ok(destination)
@@ -1253,7 +1256,9 @@ pub fn derive_run(
     metadata.supersedes = measured_before(root, &metadata)?;
     let runs = root.join(".supercov/runs");
     let staging = root.join(".supercov/work").join(id).join("run-derivation");
+    // fault-site: lifecycle.derive-run.create-dir-all
     fs::create_dir_all(&staging).map_err(|error| io_error(&staging, error))?;
+    // fault-site: lifecycle.derive-run.read-dir
     let names = fs::read_dir(&source.directory)
         .and_then(|entries| {
             entries
@@ -1276,9 +1281,12 @@ pub fn derive_run(
     }
     let mut json = serde_json::to_vec_pretty(&metadata).expect("plain data serializes");
     json.push(b'\n');
+    // fault-site: lifecycle.derive-run.atomic-write
     atomic_write(root, &staging.join("run.json"), &json)?;
     let destination = runs.join(id);
+    // fault-site: lifecycle.derive-run.rename
     fs::rename(&staging, &destination).map_err(|error| io_error(&destination, error))?;
+    // fault-site: lifecycle.derive-run.sync-directory
     sync_directory(&runs)?;
     Ok(destination)
 }
@@ -1331,6 +1339,7 @@ fn child_directories(path: &Path) -> Result<Vec<String>, LifecycleError> {
         .unwrap_or(path);
     reject_linked_ancestors(root, path, true)?;
     let entries = match crate::fault::io("store-list", io::ErrorKind::PermissionDenied, || {
+        // fault-site: lifecycle.child-directories
         fs::read_dir(path)
     }) {
         Ok(entries) => entries,
@@ -1406,6 +1415,7 @@ their evidence is kept at {} -- this is a Supercov bug, and that directory is wh
 }
 
 fn copy_evidence(source: &Path, destination: &Path, files: &mut usize) -> std::io::Result<()> {
+    // fault-site: lifecycle.copy-evidence
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let target = destination.join(entry.file_name());
@@ -1431,6 +1441,7 @@ pub fn recover_abandoned_runs(
     updated_at: &str,
 ) -> Result<Vec<String>, LifecycleError> {
     let locks = root.join(".supercov/locks");
+    // fault-site: lifecycle.recover-abandoned-runs
     fs::create_dir_all(&locks).map_err(|source| io_error(&locks, source))?;
     let Some(_recovering) = take_lock(&locks.join("recover.lock"), false, || false)? else {
         return Ok(Vec::new());
@@ -1596,6 +1607,7 @@ pub fn cleanup_storage_locked(
         if remove_history {
             result.removed_runs.push(id.clone());
             if !options.dry_run {
+                // fault-site: lifecycle.cleanup-storage-locked
                 remove_stored_tree_deferred(root, &runs_root.join(&id))?;
             }
         }
@@ -1728,6 +1740,7 @@ fn remove_tree_on(root: &Path, threads: usize) -> io::Result<()> {
         }
         let mut below = Vec::new();
         for directory in directories {
+            // fault-site: lifecycle.remove-tree-on.read-dir
             let entries = match fs::read_dir(&directory) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -1759,6 +1772,7 @@ fn remove_tree_on(root: &Path, threads: usize) -> io::Result<()> {
                         gone(if *directory {
                             fs::remove_dir_all(path)
                         } else {
+                            // fault-site: lifecycle.remove-tree-on.remove-file
                             fs::remove_file(path)
                         })?;
                     }
@@ -1874,16 +1888,17 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1599", || {
-            cleanup_storage_locked(
-                &root,
-                CleanupOptions {
-                    keep: 0,
-                    dry_run: false,
-                },
-                false,
-            )
-        });
+        let stopped =
+            crate::fault::during("fs.create_dir_all#lifecycle.cleanup-storage-locked", || {
+                cleanup_storage_locked(
+                    &root,
+                    CleanupOptions {
+                        keep: 0,
+                        dry_run: false,
+                    },
+                    false,
+                )
+            });
         assert!(stopped.is_err(), "{stopped:?}");
         assert!(root.join(".supercov/runs").join(id).exists());
         fs::remove_dir_all(root).unwrap();
@@ -1899,7 +1914,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1334", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.child-directories", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1907,7 +1922,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1409", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.copy-evidence", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()

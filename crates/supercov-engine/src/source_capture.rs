@@ -22,6 +22,7 @@ pub fn capture(
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Inputs, String> {
     let supplied_root = simplified(root.to_owned());
+    // fault-site: source-capture.capture.canonicalize-simplified-1
     let root = canonicalize_simplified(root).map_err(|e| e.to_string())?;
     let mut inputs = Inputs {
         language: language.into(),
@@ -42,6 +43,7 @@ pub fn capture(
             .to_string_lossy()
             .replace('\\', "/");
         if !local_path(&relative)
+            // fault-site: source-capture.capture.canonicalize-simplified-2
             || !canonicalize_simplified(&full)
                 .map_err(|e| e.to_string())?
                 .starts_with(&root)
@@ -51,6 +53,7 @@ pub fn capture(
         if inputs.files.contains_key(&relative) {
             continue;
         }
+        // fault-site: source-capture.capture.read
         let bytes = fs::read(&full).map_err(|e| format!("{relative}: {e}"))?;
         // A file that is not UTF-8 has no text to fingerprint by declaration
         // or to show; it is left out.
@@ -100,10 +103,12 @@ pub fn current_sources_for(
         }
         let path = root.join(file);
         let source = (|| {
+            // fault-site: source-capture.current-sources-for.canonicalize-simplified
             let canonical = canonicalize_simplified(&path).ok()?;
             if !canonical.starts_with(&root) || !canonical.is_file() {
                 return None;
             }
+            // fault-site: source-capture.current-sources-for.read-to-string
             let text = fs::read_to_string(canonical).ok()?;
             FileFingerprint::of(&text)
                 .same_bytes(expected)
@@ -184,9 +189,10 @@ mod tests {
         assert_eq!(captured.files.keys().collect::<Vec<_>>(), ["src/a.js"]);
         // A file that cannot be resolved is refused.
         assert!(
-            crate::fault::during("fs.canonicalize#source_capture.rs:45", || {
-                capture(&root, "javascript", [PathBuf::from("src/a.js")])
-            })
+            crate::fault::during(
+                "fs.canonicalize#source-capture.capture.canonicalize-simplified-2",
+                || { capture(&root, "javascript", [PathBuf::from("src/a.js")]) }
+            )
             .is_err()
         );
         let gone = root.join("gone");
@@ -223,8 +229,8 @@ mod tests {
         assert_eq!(read(&climbing), "Invalid source path: ../secret.js");
         // A file that cannot be resolved or read now is unavailable.
         for fault in [
-            "fs.canonicalize#source_capture.rs:103",
-            "fs.read_to_string#source_capture.rs:107",
+            "fs.canonicalize#source-capture.current-sources-for.canonicalize-simplified",
+            "fs.read_to_string#source-capture.current-sources-for.read-to-string",
         ] {
             assert!(
                 crate::fault::during(fault, || current_sources(&root, &manifest))
