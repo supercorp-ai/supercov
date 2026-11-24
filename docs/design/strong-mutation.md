@@ -86,6 +86,38 @@ candidate, whatever its verdict, when:
   all (it cannot pass as a baseline), and a mutant whose only candidates are
   such tests is recorded `survived` with that reason.
 
+**Requests no test named, sent while tests ran.** A server's work for a
+request that named no test (a webhook a mock server sends, a call from a
+client the runtime does not reach) is credited by time to the one test
+running then; where several ran at once, it stays no test's. Its mutants used
+to take every test of the run, as a server's start does. They take the tests
+running when the requests ran their code: each of the record's server hits on
+the mutant's statement and function point keeps when it ran, and a test's
+time is its attempt's span (or its phases), the time the run credits a
+request's work by, taken as widely. A test that was not running then neither
+sent the request nor saw its response, and its own evidence never ran the
+code: it runs as without the mutant, which is the rule above. What the
+request left in shared state for a later test is that test's to observe
+without a read, which a by-time credit to the one test running already
+assumes. Every test stays a candidate where any of the work was no request's
+(a server's start, a timer), kept no time, came while no test ran (a
+readiness check, a delayed webhook: a server started with the mutant serves
+it too), or ran outside the servers (a test runner's own process, a page),
+and for a mutant with no point. Such a mutant still runs as the plan says of
+its server (`serverWide`).
+
+On a large application's e2e suite, the billing area's run measured on 4
+slots (486 tests, 450 of them candidates anywhere, 1,709 mutants to run): 515
+of its mutants had every one of the 450 as candidates, from webhooks a
+payment provider's mock sent while the slots' tests ran, and held 87% of the
+area's candidate runs. With their requests' times they have 7 to 450 (90 at
+the median; 9 still 400 or more): 264,936 candidate runs became 79,891, and
+the time a survivor costs (the sum of its candidates' measured times) 142.5 h
+became 45.8 h for the area. 505 of them are `by-time` (a request of theirs
+was credited to the one test running) and run alone with the server started
+with them, one restart of the command each, against every candidate. The 33
+module-level mutants a server's start ran keep every test.
+
 And a mutant in module-level code (no function around it) takes every test
 of each file that ran it, whole: a module loaded lazily by one test keeps the
 mutated value for the file's later tests, which never run that code again.
@@ -966,18 +998,43 @@ slow tests, which 4.29.5 never reached, ran 73 times. That slot still bounds the
 about a minute there), and the progress lines say so: the costliest tests
 left are that file's, and the time left in the round is the slot's.
 
-**Controls: a run with no mutant first in each invocation.** A test's first
-run in an invocation, its first there after it failed without a mutant, and
-its first after a kill there have no mutant. The first such run of a test in
-a main round is its baseline: a test that fails without a mutant is no
-candidate (a second control that passes makes it one again). A test runs with
-a mutant only on a server (an invocation's) where it passed without one. A
-kill's next run of its test is a control: passing, it confirms the kills
-before it on the same server; failing, it puts them in doubt, and they run
-again one test at a time. A test whose control fails twice in an invocation
-is not run there again. Controls stand in for the canaries rows had (rows with
-no mutant, planted among the mutated ones): each kill is followed by one, at
-the cost of a run of the test.
+**Controls: a run with no mutant after a failure.** A kill's next run of its
+test in the invocation has no mutant: a control. Passing, it confirms the
+kills before it on the same server; failing, it puts them in doubt, and they
+run again one test at a time. A test whose control fails twice in an
+invocation is not run there again, and one whose control failed takes no
+mutant there until one passes. The first control of a test in a main round
+is its baseline: a test that fails without a mutant is no candidate (a
+second control that passes makes it one again). Controls stand in for the
+canaries rows had (rows with no mutant, planted among the mutated ones):
+each kill is followed by one, at the cost of a run of the test.
+
+A test's first run in an invocation takes a mutant. It used to have none: a
+baseline on each invocation's server before the test took any mutant there,
+so that a kill was judged on a server where the test passed. An attempt that
+passes needs no such run (the test passed with the mutant), and a failure is
+judged by the control after it. What the run before was also for is a cold
+server: a first request to a page can be slow or fail where the next is not
+(a route compiled on first use, a cache), and a control after a failure
+that coldness caused passes, warm, and would confirm a false kill. So an
+attempt that started before any control of its test passed on its server is
+*cold*, and a cold failure (a kill or a timeout) decides nothing: its mutant
+is held (no other copy takes it), the next copy of the test runs a control,
+and after it the test runs the mutant again, once, now warm (or where the
+test fails without any mutant, which makes it no candidate as before); a
+round that ends first leaves the candidate for the next. A timeout's limit
+is then also set by a control on that server, as every decisive attempt's
+was. Each test gets two more copies for this. A test whose mutants all live
+costs no run without a mutant at all; a test's first failure in an
+invocation costs one more run than before (the attempt again).
+
+On a large application's e2e suite, the billing area's late rounds (8 jobs
+of 4 slots, about 7.5 minutes of each job's pass): of one job's runs, 81
+baselines and 8 controls beside 458 mutant attempts in round 3, and 163 and
+57 beside 341 in round 4, where 9 and 6 attempts failed; at about 2.9 s a
+run, that was 11% and 31% of the job's slot time, which now goes to
+attempts. The `fails` line of a cold failure says so: `<mutant>: "<test>"
+fails (2.1s, before any control here: runs again after one)`.
 
 A failed test gives Playwright's next test a new worker, and the first run of
 each test in each worker used to be a control too. With a file's copies in

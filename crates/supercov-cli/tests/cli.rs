@@ -24758,6 +24758,145 @@ fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
     assert!(said.contains(" left in this round"), "{context}");
 }
 
+/// A test's first run in an invocation takes a mutant: a test whose mutants
+/// live needs no run without one, and a failure is judged by the control
+/// after it. Here the app's server fails the first page it serves in a
+/// strong pass (a cold cache), so the first attempt of the page's only
+/// mutant, a log line nothing reads, fails before any control has passed on
+/// that server. That failure decides nothing: the control after it passes,
+/// the mutant runs the test again, and survives, where a kill confirmed by
+/// that control would have been false. The server served the page once
+/// without a mutant, the control; a baseline first would have been a second
+/// (failing on the cold server, then run again).
+#[cfg(unix)]
+#[test]
+fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-cold");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-cold", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // Notes each page it serves and the mutant the request's attempt named
+    // (`-`: a control), outside the project.
+    let served = project.root.with_extension("served.jsonl");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { appendFileSync, readFileSync } from \"node:fs\";\n// A strong pass's server fails the first page it serves: a cold cache.\nlet cold = Boolean(process.env.SUPERCOV_STRONG_PLAN);\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  if (path === \"/\") {\n    appendFileSync(process.env.SERVED_LOG, JSON.stringify({ mutant: scope.get(\"m\"), cold }) + \"\\n\");\n    if (cold) {\n      cold = false;\n      response.statusCode = 503;\n      return response.end(\"warming up\");\n    }\n  }\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><body><p id=\"out\">Ready</p><script src=\"/app.js\"></script></body>\n",
+    );
+    project.write("public/app.js", "console.log(\"shown\");\n");
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
+            served.display().to_string()
+        ),
+    );
+    project.write(
+        "tests/page.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"shows the page\", async ({ page }) => {\n  const response = await page.goto(\"/\");\n  expect(response.status()).toBe(200);\n  await expect(page.locator(\"#out\")).toHaveText(\"Ready\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright cold");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let _ = std::fs::remove_file(&served);
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[roots, ("SUPERCOV_VERBOSE", "1")],
+    );
+    let said = format!("{}\n{}", ran.stdout(), ran.stderr());
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let pages = std::fs::read_to_string(&served).unwrap_or_default();
+    let context = format!(
+        "{}\n{pages}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let logged = mutants
+        .iter()
+        .filter(|mutant| {
+            mutant["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("public/app.js:1:")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(logged.len(), 1, "{context}");
+    // Its first attempt failed on the cold server, and said it runs again.
+    assert!(
+        said.contains("before any control here: runs again after one"),
+        "{context}"
+    );
+    // Run again once the control passed: it lives, and survives.
+    assert_eq!(logged[0]["strong"]["status"], "survived", "{context}");
+    assert_eq!(logged[0]["strong"]["tests"], 1, "{context}");
+    // The page was served with the mutant first, cold; then once without
+    // it, the control; then with it again.
+    let runs = pages
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let kinds = runs
+        .iter()
+        .map(|run| {
+            (
+                run["mutant"].as_str().unwrap_or("").to_owned(),
+                run["cold"] == true,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kinds.len(), 3, "{context}");
+    assert!(
+        kinds[0].0.starts_with("public/app.js#") && kinds[0].1,
+        "{context}"
+    );
+    assert_eq!(kinds[1], ("-".to_owned(), false), "{context}");
+    assert!(
+        kinds[2].0.starts_with("public/app.js#") && !kinds[2].1,
+        "{context}"
+    );
+}
+
 /// A pass its budget stopped keeps, for each mutant it left open, the
 /// candidates that already passed with it, and the next pass resumes there:
 /// in a spec file with a serial describe of six tests that each wait for
@@ -24808,10 +24947,12 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
         "static/index.html",
         "<!doctype html><body><p id=\"state\"></p><script src=\"/public/log.js\"></script><script src=\"/app.js\"></script></body>\n",
     );
-    // The page becomes active after a while: every test waits for it.
+    // The page becomes active after a while: every test waits for it, long
+    // enough that a pass stopped at 32 s runs only some of the six with a
+    // mutant (a test's first run takes one: there is no baseline first).
     project.write(
         "static/app.js",
-        "setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 2500);\n",
+        "setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 5000);\n",
     );
     // The mutants: what the page logs (no test reads it) and a flag only
     // the last test reads.
