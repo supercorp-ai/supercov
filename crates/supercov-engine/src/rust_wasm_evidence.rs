@@ -573,6 +573,7 @@ mod tests {
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         }
     }
 
@@ -850,7 +851,7 @@ mod tests {
             "report-request",
             "fs.create_dir_all@1",
             "fs.rename#evidence_archive.rs:512",
-            "fs.rename#lifecycle.rs:1216",
+            "fs.rename#lifecycle.rs:1194",
         ] {
             let attempt = fresh();
             assert!(

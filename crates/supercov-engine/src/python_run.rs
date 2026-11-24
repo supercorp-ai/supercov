@@ -605,6 +605,7 @@ fn run_direct_python_in(
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         drop(run);
         let run_directory = publish_archived_run(
@@ -1221,6 +1222,7 @@ mod tests {
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         }
     }
 

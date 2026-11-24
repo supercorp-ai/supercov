@@ -227,7 +227,7 @@ pub fn plan_for_run(
     plan_for_archive(
         &ArchiveReportRequest {
             archive_path: run.evidence_path.clone(),
-            run_id: run.id.clone(),
+            run_id: run.evidence_run_id().to_owned(),
             generated_at: run.metadata.started_at.clone(),
             integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
             test_exit_code: crate::coverage_report::ExitCodeInput::Present(

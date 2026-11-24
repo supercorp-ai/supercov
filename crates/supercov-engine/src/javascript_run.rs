@@ -1444,6 +1444,7 @@ fn run_javascript(
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         // Each server's run is built before any is published, so each can
         // name the others: the first under the command's run id, which `runs
@@ -1711,6 +1712,7 @@ fn run_javascript(
         recorded_by: None,
         companions: None,
         supersedes: None,
+        measured_as: None,
     };
     // Each server's run beside the browser run, under an id of its own that
     // sorts after it: `runs latest` stays the browser run. Published first,

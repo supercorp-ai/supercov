@@ -308,6 +308,22 @@ pub fn load_manifest(run: &StoredRun) -> Result<RunManifest, String> {
         "This run has no source manifest. Run tests once with this version of Supercov".into()
     })
 }
+/// Whether two runs were measured on the same files, byte for byte: each
+/// names the same files, the sources, the tests and what they load, with
+/// the same digests. Not where either has no manifest to say.
+pub fn same_files(one: &StoredRun, other: &StoredRun) -> bool {
+    let digests = |run: &StoredRun| {
+        load_manifest(run).ok().map(|stored| {
+            stored
+                .manifest
+                .files
+                .into_iter()
+                .map(|(file, fingerprint)| (file, fingerprint.sha256))
+                .collect::<BTreeMap<_, _>>()
+        })
+    };
+    digests(one).is_some_and(|files| Some(files) == digests(other))
+}
 /// An archive entry's name as its run wrote it. A merged run keeps each
 /// parent's entries under `shards/<n>/`, and a parent that was itself merged
 /// brings its own level along.
@@ -695,6 +711,7 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
     const BUCKETS: [&str; 3] = ["affected", "undetermined", "unaffected"];
     let mut tests = BTreeMap::<(String, String), (usize, Value)>::new();
     let mut changed = BTreeMap::<String, Value>::new();
+    let mut beyond = BTreeSet::<String>::new();
     let mut meaning = Value::Null;
     // Not empty, as just checked.
     parents.iter().try_for_each(|parent| -> Result<(), String> {
@@ -734,6 +751,14 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
                 .entry(file["file"].as_str().unwrap_or_default().to_owned())
                 .or_insert_with(|| file.clone());
         }
+        beyond.extend(
+            report["beyondTheRun"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
         if meaning.is_null() {
             meaning = report["meaning"].clone();
         }
@@ -764,9 +789,14 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
         "undetermined": undetermined,
         "unaffected": unaffected,
         "changedFiles": changed.into_values().collect::<Vec<_>>(),
+        "beyondTheRun": beyond,
         "meaning": meaning,
     }))
 }
+
+/// Why a test that failed in the run is affected: what it ran was cut short,
+/// so its record bounds nothing.
+pub const DID_NOT_PASS: &str = "did not pass in the run";
 
 pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // What each test ran is recorded when a run is published, beside the
@@ -993,7 +1023,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         // test is known to check.
         let mut changed_code = Vec::new();
         if !record.passed {
-            reasons.push("did not pass in the run".to_owned());
+            reasons.push(DID_NOT_PASS.to_owned());
         }
         match changes.get(record.test.file.as_str()) {
             None | Some(FileChange::Same | FileChange::CommentsOnly | FileChange::Added) => {}
@@ -1189,6 +1219,9 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         "undetermined": undetermined,
         "unaffected": unaffected,
         "changedFiles": files,
+        // What the change reached of code the run covered: the bound of what
+        // a test whose own record is incomplete could have reached.
+        "beyondTheRun": beyond_the_run,
         "summary": {
             "tests": executions.tests.len(),
             "affected": affected.len(),
@@ -1339,7 +1372,7 @@ fn own_lines(code: &crate::source_units::Code, index: usize) -> Vec<[usize; 2]> 
 pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
+        run_id: run.evidence_run_id().to_owned(),
         generated_at: run.metadata.started_at.clone(),
         integrity: None,
         test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),

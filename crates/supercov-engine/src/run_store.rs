@@ -172,6 +172,11 @@ pub struct RunMetadata {
     /// shards of one suite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<Vec<String>>,
+    /// For a run made from another without measuring (`supercov mutants
+    /// --shard` on a checkout unchanged since a run it restored): the id its
+    /// evidence was recorded under, which the evidence names as its scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_as: Option<String>,
 }
 
 /// A run published from the same command as another.
@@ -484,6 +489,7 @@ fn create_analyzable_run(
         recorded_by: None,
         companions: None,
         supersedes: None,
+        measured_as: None,
     };
     fs::write(
         directory.join("run.json"),
@@ -501,6 +507,14 @@ pub struct StoredRun {
     pub metadata_path: PathBuf,
     pub query_index_path: PathBuf,
     pub metadata: RunMetadata,
+}
+
+impl StoredRun {
+    /// The id the run's evidence names as its scope: its own, or, for a run
+    /// made from another without measuring, the one it was recorded under.
+    pub fn evidence_run_id(&self) -> &str {
+        self.metadata.measured_as.as_deref().unwrap_or(&self.id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1143,7 +1157,7 @@ pub fn analyze_stored_run_filtered(
 ) -> Result<CoverageReport, RunIndexError> {
     Ok(analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
+        run_id: run.evidence_run_id().to_owned(),
         generated_at: run.metadata.started_at.clone(),
         integrity: Some(
             serde_json::to_value(&run.metadata.integrity).expect("plain data serializes"),
@@ -1169,7 +1183,7 @@ fn index_sections(
     let (_, normalized, transport, read, mutation) =
         crate::coverage_report::archive_request(&ArchiveReportRequest {
             archive_path: run.evidence_path.clone(),
-            run_id: run.id.clone(),
+            run_id: run.evidence_run_id().to_owned(),
             generated_at: run.metadata.started_at.clone(),
             integrity: Some(
                 serde_json::to_value(&run.metadata.integrity).expect("plain data serializes"),
@@ -1724,7 +1738,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1288", || {
+        crate::fault::during("fs.read_dir#run_store.rs:1302", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());
@@ -1836,6 +1850,7 @@ mod tests {
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         fs::write(
             directory.join("run.json"),

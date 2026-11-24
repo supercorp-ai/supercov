@@ -1308,8 +1308,36 @@ runs again) where
   is every test of the files it runs whole.
 
 A new test that could kill it is a candidate the earlier run did not have, so
-it runs. `runs <id> mutants test` keeps nothing of another run: it tests the
-run it names.
+it runs. A test that failed in the earlier run is affected in `tests affected`
+(its record was cut short, and an agent should run it again), but for keeping
+a verdict its failing is what varies from run to run: it counts as reached
+only where the change reaches code the run covered (`beyondTheRun`), the
+bound a test with no record of its own gets. Measured on 4.29.6 against a
+large application's e2e suite, one job's measurement had four tests fail at
+random, and the next round dropped that run's verdicts for every mutant whose
+candidates shared a test file with them. `runs <id> mutants test` keeps
+nothing of another run: it tests the run it names.
+
+### On the files as they are
+
+An earlier run measured on the same files, byte for byte (every file its
+source manifest names, the sources, the tests and what they load, with the
+same digests, `source_manifest::same_files`), keeps every verdict a pass
+reached: killed, survived, timeout, or unviable. Nothing it rests on
+changed; what differs between two measurements of the same files is what
+varies from run to run (a test whose path depends on the time, a test that
+failed once), and a verdict is the pass's, made with its own baselines and
+controls, not the measurement's. An error runs again, and a mutant the run
+had no test for (no-coverage) is not a verdict a pass reached. A mutant the
+new run's plan decides without running is decided by that plan, as before.
+
+The pass says what it kept and what it did not, by why (`carried.notKept`):
+an error, the mutant's file changed, a file it runs whole changed, a test that
+could kill it is new or could reach a change, a mutant that did not compile
+where the code it compiles with changed, or no test could kill it in that
+run. On 4.29.6 the summary named only what it kept, so the survivors the new
+run's plan decides again, about 110 of 1,323 decided in that suite's billing
+area, read as dropped.
 
 A shadow comparison on uuid 9.0.1 (Jest 28, 567 mutants run of 682 listed),
 one edit after another, each measured and passed by `supercov mutants`: a
