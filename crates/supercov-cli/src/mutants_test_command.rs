@@ -2079,6 +2079,8 @@ fn kept_verdicts(
         .chain(&failed)
         .map(named)
         .collect::<BTreeSet<_>>();
+    // Every test the run had: one not unaffected was reached, and its file
+    // with it.
     let known = unaffected
         .iter()
         .cloned()
@@ -2120,7 +2122,7 @@ fn kept_verdicts(
                 Err(NEW_TEST)
             } else if candidates
                 .iter()
-                .any(|test| reached_files.contains(&test.0) || !unaffected.contains(test))
+                .any(|test| reached_files.contains(&test.0))
             {
                 Err(TEST_REACHED)
             } else {
@@ -2421,6 +2423,14 @@ mod tests {
                 && unchanged.contains("  10 earlier verdict(s) not kept, so run again: 4 their file changed, 1 were errors, which run again, 1 a test that could kill them is new, 1 no test could kill them in that run, 1 a test that could kill them could reach a change, 1 did not compile, and the code they compile with changed, 1 a file they run whole changed\n")
                 && unchanged.contains("  not measured: the checkout is unchanged since run r2, which this run was made from\n"),
             "{unchanged}"
+        );
+        let both = plan_text(&json!({"run": "r3", "summary": summary,
+            "carried": {"from": ["r2", "r1"], "mutants": 9, "unchanged": true}}));
+        assert!(
+            both.contains(
+                "  9 verdict(s) kept from runs r2, r1: the checkout is unchanged since them\n"
+            ),
+            "{both}"
         );
         // Measuring that took half the budget is said; less is not.
         let measured = |seconds: u64| {

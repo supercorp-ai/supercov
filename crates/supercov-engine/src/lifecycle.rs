@@ -1784,6 +1784,85 @@ mod tests {
         root
     }
 
+    /// A run made from another holds the records of its evidence, not what
+    /// is the source's own (its metadata, its verdicts, its query index,
+    /// temporary files), names the id its evidence was recorded under, and
+    /// supersedes the runs of its command; one made from that keeps naming
+    /// the first. A source that holds nothing gives a run of its metadata.
+    #[test]
+    fn a_run_made_from_another_keeps_its_evidence_records_and_names_its_measurement() {
+        let root = project();
+        let stored = |id: &str| {
+            let directory = root.join(".supercov/runs").join(id);
+            crate::run_store::StoredRun {
+                id: id.into(),
+                evidence_path: directory.join("evidence.raw.gz"),
+                metadata_path: directory.join("run.json"),
+                query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+                directory,
+                metadata: metadata(id, 4),
+            }
+        };
+        let source = stored("2026-01-01T00-00-00-000Z");
+        fs::create_dir_all(&source.directory).unwrap();
+        for (name, contents) in [
+            ("evidence.raw.gz", "evid"),
+            ("test-executions.json", "{}"),
+            ("run.json", "{}"),
+            (crate::strong_plan::STRONG_VERDICTS_FILE, "{}"),
+            (crate::run_store::RUST_QUERY_INDEX_FILE, "index"),
+            ("query-index.v1.bin.verified", "1"),
+            (".strong-mutation.json.partial", "{}"),
+        ] {
+            fs::write(source.directory.join(name), contents).unwrap();
+        }
+        let id = "2026-01-02T00-00-00-000Z";
+        let made = derive_run(&root, &source, id, "2026-01-02T00:00:00Z").unwrap();
+        let mut names = fs::read_dir(&made)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            ["evidence.raw.gz", "run.json", "test-executions.json"]
+        );
+        assert_eq!(
+            fs::read_to_string(made.join("evidence.raw.gz")).unwrap(),
+            "evid"
+        );
+        let written: RunMetadata =
+            serde_json::from_slice(&fs::read(made.join("run.json")).unwrap()).unwrap();
+        assert_eq!(written.id, id);
+        assert_eq!(written.started_at, "2026-01-02T00:00:00Z");
+        assert_eq!(written.measured_as.as_deref(), Some(source.id.as_str()));
+        // The store lists none of its runs: the test's metadata is not one
+        // it reads.
+        assert_eq!(written.supersedes, None);
+        // Made from the made run: still the first run's measurement.
+        let again = crate::run_store::StoredRun {
+            metadata: written,
+            ..stored(id)
+        };
+        assert_eq!(again.evidence_run_id(), source.id);
+        let empty = stored("2026-01-03T00-00-00-000Z");
+        fs::create_dir_all(&empty.directory).unwrap();
+        let third = "2026-01-04T00-00-00-000Z";
+        let from_empty = derive_run(&root, &empty, third, "2026-01-04T00:00:00Z").unwrap();
+        assert_eq!(
+            fs::read_dir(&from_empty)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            ["run.json"]
+        );
+        let chained = derive_run(&root, &again, "2026-01-05T00-00-00-000Z", "x").unwrap();
+        let chained: RunMetadata =
+            serde_json::from_slice(&fs::read(chained.join("run.json")).unwrap()).unwrap();
+        assert_eq!(chained.measured_as.as_deref(), Some(source.id.as_str()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A run's history that cannot be moved to the trash stops the clean.
     #[test]
     fn a_run_history_that_cannot_be_moved_stops_the_clean() {

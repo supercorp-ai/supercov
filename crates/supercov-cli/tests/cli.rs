@@ -22322,6 +22322,49 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         "{again}"
     );
     assert_eq!(again["summary"]["ran"], 0, "{again}");
+
+    // A shard of this checkout continues the newest run of it that passed
+    // with the command given: not a merge, not a run whose command failed,
+    // not one of another command, not one measured before the edit.
+    let latest_measured = again["run"].as_str().unwrap().to_owned();
+    let run_json = |run: &str| format!(".supercov/runs/{run}/run.json");
+    let mut failed =
+        serde_json::from_str::<serde_json::Value>(&project.read(&run_json(&first))).unwrap();
+    failed["testExitCode"] = serde_json::json!(1);
+    project.write(&run_json(&first), &failed.to_string());
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run", "--silent"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let shard = |command: &[&str]| {
+        let mut args = vec!["mutants", "--shard", "1/1", "--json", "--"];
+        args.extend(command);
+        let ran = project.supercov(&args);
+        (ran.json(), ran.stderr())
+    };
+    let (continued, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains(&format!(
+            "[supercov] not measuring: the checkout is unchanged since run {latest_measured}, so this shard saves its verdicts into run {}, made from it",
+            continued["run"].as_str().unwrap()
+        )),
+        "{said}"
+    );
+    // None of this command: measured.
+    let (_, said) = shard(&["npx", "vitest", "run", "--reporter=dot"]);
+    assert!(
+        said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values and whose command passed can be made into one): npx vitest run --reporter=dot"),
+        "{said}"
+    );
+    // After an edit: measured.
+    project.edit("src/tax.js", "sum / 5", "sum * 0.2");
+    let (_, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains("measuring first (the checkout changed since the latest run)"),
+        "{said}"
+    );
 }
 
 /// A split strong pass continued round after round on the same commit:
@@ -22588,6 +22631,15 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
 #[test]
 fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
     let project = vitest_mutants_project("strong-derive-faults");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    project.commit("tax");
     project
         .supercov_with(
             &["--", "npx", "vitest", "run"],
@@ -22632,6 +22684,22 @@ fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
             std::fs::remove_dir_all(project.root.join(".supercov/runs").join(made)).unwrap();
         }
     }
+    // A run made from it holds cart.js's verdicts; a shard of tax.js's
+    // mutants keeps none of them, and runs its own.
+    let job = |file: &str| {
+        project
+            .supercov(&[
+                "mutants", "--shard", "1/1", "--file", file, "--json", "--", "npx", "vitest", "run",
+            ])
+            .json()
+    };
+    let cart = job("src/cart.js");
+    assert!(cart["summary"]["ran"].as_u64() > Some(0), "{cart}");
+    let tax = job("src/tax.js");
+    assert!(
+        tax["carried"].is_null() && tax["summary"]["ran"].as_u64() > Some(0),
+        "{tax}"
+    );
 }
 
 /// A Vitest project like `mutants_project`'s, with the repository's
