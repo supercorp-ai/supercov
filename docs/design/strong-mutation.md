@@ -942,6 +942,13 @@ harness that sees it may give a serial file (or any file) to every slot. With
 (see below), since a harness that shared them out would keep a serial file's
 copies together just the same.
 
+Measured on the same area with its harness changed so (the serial files
+given to every slot when the variable is set): the files ran in every slot
+and the line below no longer appeared. But the harness is code every e2e
+test runs through, so carry-over rightly treated the edit as reaching every
+test and kept none of the earlier rounds' verdicts; its effect on the tail
+is to be measured from a state the changed harness measured.
+
 Where it does not, the progress lines say so. The runner records the spec
 files it loaded with a serial describe (in `playwright test`'s runner
 process, which loads every file before the first test); each invocation's
@@ -1367,6 +1374,18 @@ that settles a mutant drops its progress, and an `error` (which runs again)
 keeps it. The engine takes the candidates off the plan before it shares the
 mutants out, so the shares, the order and the driver see the work that is
 left; a survivor's verdict counts the candidates it passed before.
+
+**Measured** on that area, from the state 4.29.6 left after its four rounds
+(1,764 of 2,160 decided; its rounds had added 309, 108 and 73), with two more
+rounds of the same 8 jobs of 32 CPUs (a pass of about 350 s each): 1,814
+(+50) and 1,866 (+52), against 4.29.6's 73 in its last round. Those 73
+included kills a stopped round made as its servers went down, which this
+pass no longer counts (above), and these jobs had about 20 s less of a pass. Each job of the second round resumed about 187 mutants and did
+not run again about 3,600 candidate runs they had passed; what it decided
+was mostly survivors (39 of 52, against 24 of 78 in 4.29.6's fourth round),
+the mutants that need every candidate. The serial file still bounds each
+job: the progress lines named it in every job, 6 to 14 mutants waiting
+about 6 to 13 minutes in one slot while the others had 30 s to 2 min left.
 
 **Why the slow tail was bounded, and what this does to it.** Within a
 Playwright pass the order already ran cheap candidates first; across passes
