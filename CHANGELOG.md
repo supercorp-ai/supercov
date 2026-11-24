@@ -1,14 +1,17 @@
 # Changelog
 
-## Unreleased
+## 4.29.9
 
 **Changed**
 
 - A mutant in a module-level object or array literal -- a translation table, a list of options, a navigation menu -- has for candidates the tests that read its value, not every test that loaded its module. A run measured with the mutants' probes reads each such literal through a proxy that records which test's work read which of its keys; a value read while a module loaded, or one made by a call, keeps every test as before. On a browser suite against one server, where loading a module was every test of the run, a survivor no longer runs them all: on a large application's e2e suite of 1,703 tests, 1,767 module-level mutants went from 2,444,383 candidates to 199,766, a translation table's 628 mutants from 1,605 candidates each to at most 32 (594 of them read by no test), and a list of languages' 317 from 1,605 to at most 65. The plan and the pass's summary say how many mutants were narrowed and by how much (`narrowed      7 module-level mutant(s) to the tests that read their value: 6 candidate(s) where loading their module gave 49`), and a mutant no test read is `survived` without running (`no-test-read-it`). `docs/design/strong-mutation.md` has the argument.
 
+- `supercov merge` keeps once what the runs it merges recorded byte for byte alike. Each run's copy of each test (its records in order, with the entry each is in) and each entry's records of no test are hashed, and a copy an earlier run in the merge already holds is left out; one that differs in anything is kept beside the others. Shards of a continuation round, made from one measured run, merge to the size of that run: 351 MB where eight such runs made 2.8 GB. Shards that each measured the suite differ in their timestamps and keep every copy, as before.
+
 **Fixed**
 
-- Planning a strong pass reads each record's server work once, not once for each mutant: the plan of a large application's whole e2e suite (1,703 tests, 65,092 mutants) took 1 m 46 s instead of over 8 minutes.
+- Planning a strong pass no longer costs each record's size for each mutant. A test that ran a method whose export only the run as a whole ran used to copy the record's observations, every hit and decision, to add one statement; it now counts the statement as hit. A record's server work is read once, not once for each mutant; a decision's vectors are added through a set; and records and mutants are planned on every core. Planning one shard of a large application's e2e suite (973 records, 65,092 mutants) took 2.1 s where it took 86 s, its plan byte for byte the same, and the whole suite's plan (1,703 tests) 1 m 46 s where it took over 8 minutes.
+- `supercov merge` of eight such shard runs, which plans the merged run to keep their strong verdicts, ran for more than 12 minutes without a word, and a CI job's limit ended it before the next round had a merged run to start from. It now takes about a minute, with the same verdicts: it lets go of the runs' evidence once the merged run holds it, and reads which tests each run measured on every core.
 
 ## 4.29.8
 
