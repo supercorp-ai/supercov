@@ -97,6 +97,25 @@ for version in "$@"; do
         supercov() { node /opt/supercov/node_modules/supercov/bin/supercov.js "$@"; }
       else
         supercov() { npx -y "supercov@$VERSION" "$@"; }
+        # Just after a publish, npm can serve the release before its optional
+        # native packages: npx then installs it without one and every command
+        # fails ("the optional native package ... is missing"), the install
+        # kept in npx'"'"'s cache. Ask again, metadata fresh and that install
+        # dropped, until it runs, for at most about five minutes.
+        for attempt in $(seq 1 20); do
+          if npx -y --prefer-online "supercov@$VERSION" --version >/tmp/version.txt 2>&1 \
+            && grep -qF "$VERSION" /tmp/version.txt; then
+            break
+          fi
+          if [ "$attempt" = 20 ]; then
+            cat /tmp/version.txt >&2
+            echo "npx does not run supercov@$VERSION with its native package after 20 attempts" >&2
+            exit 1
+          fi
+          echo "supercov@$VERSION does not run yet (attempt $attempt): $(tail -1 /tmp/version.txt)" >&2
+          rm -rf /root/.npm/_npx
+          sleep 15
+        done
       fi
       record() {
         local name=$1; shift
