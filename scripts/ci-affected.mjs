@@ -212,7 +212,9 @@ const WORKFLOWS = {
         'scripts/rust-transform-benchmark.mjs', 'crates/supercov-engine/src/js_*.rs', 'crates/supercov-engine/src/javascript*.rs',
         'crates/supercov-engine/runtime-assets/javascript/**', 'tests/fixtures/no-build-node/**'],
     },
-    'clang-mcdc-oracle': { os: ['macos-latest'], paths: ['scripts/clang-mcdc-oracle.mjs', 'tests/fixtures/clang-mcdc/**'] },
+    // Apple clang's own MC/DC is its oracle, so it runs on macOS alone: on a
+    // pull request, only when its own files change.
+    'clang-mcdc-oracle': { os: ['macos-latest'], ownPlatform: true, paths: ['scripts/clang-mcdc-oracle.mjs', 'tests/fixtures/clang-mcdc/**'] },
     'kotlin-grammar': {
       paths: ['crates/supercov-engine/vendor/tree-sitter-kotlin/**', 'crates/supercov-engine/src/kotlin_grammar.rs',
         'crates/supercov-engine/tests/kotlin_corpus.rs', 'scripts/kotlin-*'],
@@ -277,7 +279,8 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
   const touched = (patterns) => changed.filter((file) => matches(file, patterns ?? []));
   const timing = seconds();
   for (const [name, spec] of Object.entries(specs)) {
-    const os = spec.os && (mode.platforms === 'all' ? spec.os : spec.os.filter((each) => each === LINUX));
+    const own = spec.ownPlatform && mode.mode !== 'skip' && touched(spec.paths).length > 0;
+    const os = spec.os && (mode.platforms === 'all' || own ? spec.os : spec.os.filter((each) => each === LINUX));
     if (mode.mode === 'skip') {
       jobs[name] = { run: false, mode: 'skip', why: mode.reason, matrix: spec.matrix?.(true), os };
       continue;
@@ -364,7 +367,8 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       : { run: true, mode: 'full', why: reasons.join('; ') };
   }
   for (const [name, spec] of Object.entries(specs)) {
-    if (spec.os && jobs[name].os === undefined) jobs[name].os = mode.platforms === 'all' ? spec.os : spec.os.filter((each) => each === LINUX);
+    const own = spec.ownPlatform && touched(spec.paths).length > 0;
+    if (spec.os && jobs[name].os === undefined) jobs[name].os = mode.platforms === 'all' || own ? spec.os : spec.os.filter((each) => each === LINUX);
   }
   return { jobs, selection, why };
 }
