@@ -25,7 +25,9 @@ const tracked = execFileSync("git", ["ls-files", "crates", "scripts"], {
   encoding: "utf8",
 })
   .split("\n")
-  .filter((file) => /\.(rs|mjs|js)$/u.test(file) && !file.includes("/fixtures/"));
+  // This script, whose examples are the pins it refuses, is not checked.
+  .filter((file) => /\.(rs|mjs|js)$/u.test(file) && !file.includes("/fixtures/"))
+  .filter((file) => file !== "scripts/check-fault-sites.mjs");
 const read = (file) => readFileSync(resolve(repository, file), "utf8");
 const failures = [];
 
