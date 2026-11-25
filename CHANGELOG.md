@@ -14,6 +14,10 @@
 
 - `tests affected` names changed code no probe of the run measured -- another platform's, a feature the build left off, a `const fn` -- under `unmeasured` (`--json`) and in the text: no test's record can say what it reaches.
 
+**Fixed**
+
+- A strong pass with `--budget` is ended at most 45 s past its budget, whatever holds it up, by a deadline of its own: the stop at the budget was made by the progress loop alone, and on a large e2e suite's area every job of a sharded pass ran 130 s past its budget and was killed by the job's time limit with nothing saved. The pass now also says when its budget is spent (`[supercov] budget spent, 452 s into the pass: stopping it; what it decided is saved into the run`), and a process ended past the deadline says so. The verdicts were saved into the run as they came.
+
 ## 4.29.11
 
 **Changed**

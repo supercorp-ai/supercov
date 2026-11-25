@@ -411,6 +411,21 @@ left have no verdict, for the next pass, and the summary says how many. A
 pass that spent its budget before deciding any mutant is not one that could
 run none.
 
+The stop is the progress loop's: once a second it checks the budget, says so
+when it is spent (`[supercov] budget spent, 452 s into the pass: stopping
+it; ...`), signals the command, and ends the process 8 s later if the pass
+has not ended. That holds only while the loop runs, and a CI job's time limit
+counts everything after it too. So a thread that does nothing else ends the
+process 45 s past the budget, whatever holds it up (the loop itself, the
+work after the pass), saying so; the verdicts were saved into the run as they
+came. A budget measuring spent already arms no such deadline: that pass runs
+nothing and says so. A sharded e2e pass on 4.29.11 ran 130 s past its
+budget on every job of an area, killed by the job's 10-minute limit with
+nothing saved, where no log line said whether the budget's stop had come;
+a fixture of the same shape (two slots, a spread serial file, a 25 s budget,
+as a continuation shard) stops on time, so the cause is not known yet, and
+these two make the next such job end in time and say where it was.
+
 **The time left.** The progress line's estimate is the plan's: the estimated
 cost of the mutants left, at the pace of the cost decided so far over the
 time it took. Counting mutants, the pass above said "37 of 2460 ... about
