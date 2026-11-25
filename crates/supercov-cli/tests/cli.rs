@@ -22733,7 +22733,8 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
         job_at(shard, more, hidden.as_slice(), false)
     };
     // The verdicts a pass reached that a run holds, by mutant id: not
-    // those the run's plan decides, with no test run.
+    // those the run's plan decides, with no test run, but those a mutant
+    // took from a twin that compiles to the same code, which a run decided.
     let reached = |run: &str| {
         let saved = serde_json::from_str::<serde_json::Value>(
             &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
@@ -22745,7 +22746,10 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
             .iter()
             .filter(|(_, verdict)| {
                 ["killed", "survived", "timeout"].contains(&verdict["status"].as_str().unwrap())
-                    && verdict["tests"] != 0
+                    && (verdict["tests"] != 0
+                        || verdict["reason"]
+                            .as_str()
+                            .is_some_and(|reason| reason.starts_with("same-code-as:")))
             })
             .map(|(id, verdict)| (id.clone(), verdict.clone()))
             .collect::<std::collections::BTreeMap<_, _>>()

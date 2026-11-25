@@ -932,6 +932,19 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     plan.cheapest_first();
     if options.plan {
         let mut planned = plan_json(run, &plan);
+        // The duplicates are out of the plan's mutants, not out of the
+        // mutants it is about: each counts where its twin runs.
+        let planned_ids = plan
+            .mutants
+            .iter()
+            .map(|mutant| mutant.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let duplicates = same_code
+            .duplicates
+            .values()
+            .filter(|kept| planned_ids.contains(kept.as_str()))
+            .count();
+        planned["summary"]["mutants"] = json!(plan.mutants.len() + duplicates);
         planned["sameCode"] = same_code_json(&same_code);
         return Ok(planned);
     }
