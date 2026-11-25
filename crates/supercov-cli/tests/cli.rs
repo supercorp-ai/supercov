@@ -25272,7 +25272,7 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
     project.write(
         "harness.mjs",
         &format!(
-            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\nconst codes = await Promise.all(slots.map(([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{ for (const line of String(chunk).split(\"\\n\")) if (line.trim()) console.log(`[slot ${{at + 1}}] ${{line}}`); }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => done(code ?? 1));\n  }});\n}}));\nprocess.exit(Math.max(...codes));\n",
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\n// The second slot starts first, and the first (the one given the serial file)\n// once the second has run a mutant: what the second takes of the serial file\n// is then the same however fast either starts.\nlet release;\nconst secondRan = new Promise((resolve) => {{\n  release = resolve;\n  setTimeout(resolve, 60_000);\n  // Measuring, nothing waits.\n  if (!process.env.SUPERCOV_STRONG_PLAN) resolve();\n}});\nconst run = ([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{\n      for (const line of String(chunk).split(\"\\n\")) {{\n        if (!line.trim()) continue;\n        console.log(`[slot ${{at + 1}}] ${{line}}`);\n        if (at === 1 && line.includes('\" lives (')) release();\n      }}\n    }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => {{\n      release();\n      done(code ?? 1);\n    }});\n  }});\n}};\nconst codes = await Promise.all([secondRan.then(() => run(slots[0], 0)), run(slots[1], 1)]);\nprocess.exit(Math.max(...codes));\n",
             ports[0], ports[1]
         ),
     );
@@ -25317,9 +25317,8 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
         .filter(|line| line.contains(": \"serial "))
         .count();
     assert!(serial_in_second >= 1, "{context}");
-    // Its own file's mutants had lived through no candidate yet, so there
-    // it took only such mutants of the serial file: each at most once (the
-    // file sorts first, so it ran there first).
+    // Its own file's mutants had run against no candidate yet, so there it
+    // took only mutants no copy had taken yet, anywhere: each at most once.
     for at in 1..=3 {
         let taken = said
             .lines()

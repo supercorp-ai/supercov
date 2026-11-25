@@ -1025,6 +1025,11 @@ function warm(pass, test) {
     return ready(pass, test) || existsSync(`${pass.round}/warm/${invocation()}/${key(test)}`);
 }
 
+/** Whether no copy of any test took a mutant yet in this round, and no earlier pass ran it. */
+function untried(pass, id, entry) {
+    return !entry.passedBefore && entries(`${pass.round}/claims/${key(id)}`).length === 0;
+}
+
 /** Whether no candidate let a mutant live yet, in this pass or an earlier one. */
 function fresh(pass, id, entry) {
     return !entry.passedBefore && passedWith(pass, id).size === 0;
@@ -1138,10 +1143,13 @@ function takeJob(pass, shape, test, only, limitMs, copiesLeft, freshOnly = false
                 continue;
             }
             // A spread file in an invocation the harness did not give it to
-            // takes only mutants no candidate let live yet (likely to fail
-            // it, soon decided); the rest wait for the invocation that runs
-            // it as its own, so that this one reaches its own files.
-            if (freshOnly && !fresh(pass, id, mutantOf(pass, id)))
+            // takes only mutants no copy took yet, anywhere, with no
+            // progress from an earlier pass (likely to fail it, soon
+            // decided); the rest wait for the invocation that runs it as its
+            // own, so that this one reaches its own files. Its first claim is
+            // what it looks at, not a candidate passing, which a run without
+            // the mutant first (a cold test) would leave unseen for a while.
+            if (freshOnly && !untried(pass, id, mutantOf(pass, id)))
                 continue;
             waiting += 1;
             const since = inFlightSince(pass, id);
@@ -1170,7 +1178,7 @@ function takeJob(pass, shape, test, only, limitMs, copiesLeft, freshOnly = false
     // Every mutant left runs elsewhere now: one of them here too, rather
     // than leave this test's copies unused while its attempt runs.
     for (const id of busy) {
-        if (only === undefined && !settled(pass, id) && (!freshOnly || fresh(pass, id, mutantOf(pass, id))) && mark(claimPath(pass, id, test)))
+        if (only === undefined && !settled(pass, id) && (!freshOnly || untried(pass, id, mutantOf(pass, id))) && mark(claimPath(pass, id, test)))
             return id;
     }
     return undefined;

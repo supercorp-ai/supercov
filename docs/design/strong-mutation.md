@@ -1170,8 +1170,15 @@ files' mutants, most of them killed by their first candidate, waited for a
 later round: the round decided 263 mutants by running them where the round
 before spreading decided about 460. So where an invocation's own files (those
 its command names) have a mutant no candidate let live yet, a spread file it
-was not given takes only such mutants there; the rest wait for the
-invocation that runs the file as its own, which takes every mutant of it.
+was not given takes there only mutants no copy of any test has taken yet in
+the round (and no earlier pass ran): each at most once, likely its kill. The
+rest wait for the invocation that runs the file as its own, which takes every
+mutant of it. A first version took any mutant no candidate had let live yet;
+but a cold test runs without its mutant first, so a mutant taken by one test
+stayed "not yet lived" while that ran, and the next test of the spread file
+took it too: on a slower CI machine the same invocation ran one mutant on
+several tests of a file it was not given. A claim is made as a copy takes the
+mutant, so no later copy misses it.
 Once no fresh mutant waits for an invocation's own files (a later round's
 survivors-to-be), every invocation takes every mutant of every spread file,
 as spreading intends. Which mutants a test may take changes, never what an
