@@ -2225,7 +2225,9 @@ mod tests {
     fn script(path: &Path, body: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+        // A nextest profile the outer run names (CI's `affected`) is no
+        // profile of the fixture's: the commands a test runs go without it.
+        std::fs::write(path, format!("#!/bin/sh\nunset NEXTEST_PROFILE\n{body}")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.display().to_string()
     }
@@ -2817,7 +2819,7 @@ mod tests {
         request.command = command;
         // A test that cannot be found when its mutant runs (after its
         // baseline) is passed over.
-        request.command[0] = "cargo".into();
+        request.command[0] = script(&root.join("bin/plain/cargo"), "exec cargo \"$@\"\n");
         request.results = root.join("passed-over.jsonl");
         let mut one = plan.clone();
         one["mutants"] = json!([plan["mutants"]
