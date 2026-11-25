@@ -11662,6 +11662,18 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
         .supercov(&["runs", "latest", "tests", "affected"])
         .exits(2);
     assert!(gone.contains("which is no longer stored"), "{gone}");
+    // With none of its runs kept or stored, the merge is judged against the
+    // checkout by its own command, and its coverage still answers.
+    std::fs::remove_dir_all(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&merged)
+            .join("parts"),
+    )
+    .unwrap();
+    let files = project.supercov(&["runs", "latest", "files"]).succeeds();
+    assert!(files.contains("src/cart.js"), "{files}");
 }
 
 /// Output sent to one file for both streams (`> log 2>&1`) arrives through
@@ -18634,6 +18646,10 @@ fn a_merge_whose_step_fails_says_so() {
         "fs.rename@2",
         "fs.rename@3",
         "fs.rename@4",
+        "fs.rename@5",
+        "fs.rename@6",
+        "fs.rename@7",
+        "fs.rename@8",
     ] {
         let project = Project::cart("merge-steps");
         project.supercov(&["--", "node", "--test"]).succeeds();
