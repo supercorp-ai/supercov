@@ -291,6 +291,10 @@ export function watchStall(testInfo, claimed, look) {
         return undefined;
     const watch = { stalled: undefined, waiting: undefined, timer: undefined };
     const check = () => {
+        // A test that has ended (its timeout, a failure) waits on nothing
+        // of its own: what its teardown closes is not what it waited on.
+        if (testInfo.status !== "passed")
+            return;
         const { stalled, waiting } = look(claimed.limitAt);
         watch.waiting = waiting;
         if (stalled) {

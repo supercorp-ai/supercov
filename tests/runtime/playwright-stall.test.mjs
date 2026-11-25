@@ -76,6 +76,11 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   const claim = (extra) => ({ kind: "mutant", startedAt: now, claimedAt: now - 5, baselineMs: 1, timeoutFactor: 1, limitAt: now + 60_000, ...extra });
   // A control, and an attempt whose own timeout ends it before its window, are not watched.
   assert.equal(watchStall({}, { kind: "control" }, () => ({})), undefined);
+  // A test that has already ended is looked at no more.
+  const ended = watchStall({ status: "timedOut" }, claim(), () => assert.fail("looked at"));
+  await new Promise((done) => setTimeout(done, 1_100));
+  ended.stop();
+  assert.deepEqual(stallDetails(ended), {});
   assert.equal(watchStall({}, undefined, () => ({})), undefined);
   assert.equal(watchStall({}, claim({ limitAt: now + 500 }), () => ({})), undefined);
   // Waiting, then stalled: its test's timeout is set to the time it has run.
@@ -83,7 +88,7 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   const asked = [];
   let set;
   const stalled = await new Promise((done) => {
-    const watch = watchStall({ setTimeout: (ms) => { set = ms; done(watch); } }, claim(), (limitAt) => {
+    const watch = watchStall({ status: "passed", setTimeout: (ms) => { set = ms; done(watch); } }, claim(), (limitAt) => {
       asked.push(limitAt);
       return looks.shift();
     });
@@ -94,7 +99,7 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   assert.ok(stalled.stalled.atMs >= 1_000, `${stalled.stalled.atMs}`);
   assert.deepEqual(stallDetails(stalled), { stalledAtMs: stalled.stalled.atMs, waitingOn: "Locator.click (#a)" });
   // Never stalled: what it last waited on, until stopped.
-  const waiting = watchStall({ setTimeout: () => assert.fail("not stalled") }, claim(), () => ({ waiting: "Page.waitForURL" }));
+  const waiting = watchStall({ status: "passed", setTimeout: () => assert.fail("not stalled") }, claim(), () => ({ waiting: "Page.waitForURL" }));
   await new Promise((done) => setTimeout(done, 1_150));
   waiting.stop();
   assert.deepEqual(stallDetails(waiting), { waitingOn: "Page.waitForURL" });
