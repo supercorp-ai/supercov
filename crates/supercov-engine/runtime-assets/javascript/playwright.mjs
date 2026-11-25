@@ -189,6 +189,10 @@ const ACTION_METHODS = new Set([
     "type",
     "uncheck",
 ]);
+// The calls that open and close a test's browser contexts and pages, as
+// Playwright's own fixtures make them while setting a test up and tearing
+// it down: no wait of the test's, and not where its own time starts.
+const LIFECYCLE = new Set(["Browser.newContext", "Browser.newPage", "BrowserContext.newPage", "BrowserContext.close", "Page.close"]);
 const REQUEST_METHODS = new Set([
     "delete",
     "fetch",
@@ -203,6 +207,26 @@ function isApiRequestContext(value) {
     return (typeof candidate["fetch"] === "function" &&
         typeof candidate["get"] === "function" &&
         typeof candidate["post"] === "function");
+}
+/**
+ * Where in the test's own code a call was made, for a timeout's reason: the
+ * stack through these proxies runs past V8's usual ten frames.
+ */
+function testSite() {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 50;
+    const stack = new Error().stack?.split("\n").slice(2) ?? [];
+    Error.stackTraceLimit = limit;
+    // A strong pass runs the suite in its isolated copy of the project, under
+    // `.supercov/`: the test's frame is any outside `node_modules`, said
+    // relative to where the suite runs.
+    const frame = stack.find((line) => /[/\\]tests?[/\\]|\.(spec|test)\.[cm]?[jt]sx?:/.test(line) && !line.includes("node_modules"));
+    if (!frame)
+        return undefined;
+    const root = process.cwd().replaceAll("\\", "/");
+    const place = frame.trim().replace(/^at\s+/, "").replaceAll("\\", "/").replace(`${pathToFileURL(root).href}/`, "").replace(`${root}/`, "");
+    // `name (file:line:column)`: the place alone.
+    return /\(([^()]+)\)$/.exec(place)?.[1] ?? place;
 }
 function callerSource() {
     const stack = new Error().stack?.split("\n").slice(2) ?? [];
@@ -285,6 +309,8 @@ class CoveragePhaseController {
     waitTimeouts;
     waits = new Set();
     newestWait;
+    testCalledAt;
+    matcherSite;
     quietSince = Date.now();
     disposed = false;
     // Parameter properties are stateful despite the base ESLint rule treating
@@ -782,10 +808,12 @@ class CoveragePhaseController {
         this.waitTimeouts = timeouts;
     }
     /** A call the test made on one of Playwright's objects, until it settles. */
-    trackWait(object, method, args, pending) {
+    trackWait(object, method, args, pending, site) {
         if (!this.waitTimeouts || !(pending instanceof Promise))
             return;
-        this.keepWait(describeCall(object, method, args), ownDeadline({ method, args, startedAt: Date.now(), request: isApiRequestContext(object), timeouts: this.waitTimeouts }), pending);
+        // A locator assertion's `_expect` comes from Playwright's matcher:
+        // where the test called the matcher.
+        this.keepWait(describeCall(object, method, args), ownDeadline({ method, args, startedAt: Date.now(), request: isApiRequestContext(object), timeouts: this.waitTimeouts }), pending, site ?? this.matcherSite);
     }
     /**
      * An `expect.poll` or a `toPass`, until it settles: it ends by its own
@@ -795,10 +823,16 @@ class CoveragePhaseController {
         if (!this.waitTimeouts || !(pending instanceof Promise))
             return;
         const ms = timeout ?? (polls ? this.waitTimeouts.expect : this.waitTimeouts.toPass);
-        this.keepWait(operation, ms > 0 ? Date.now() + ms : Infinity, pending);
+        this.keepWait(operation, ms > 0 ? Date.now() + ms : Infinity, pending, this.matcherSite);
     }
-    keepWait(operation, deadline, pending) {
-        const wait = { operation, deadline };
+    keepWait(operation, deadline, pending, at) {
+        // Whether it is the test's own (not opening or closing a context or
+        // a page, as Playwright's fixtures do); the first such call is where
+        // the test's own time starts.
+        // Where in the test it was called (`at`), for a timeout's reason.
+        const wait = { operation: at ? `${operation} at ${at}` : operation, deadline, fromTest: !LIFECYCLE.has(operation.split(" ")[0]) };
+        if (wait.fromTest)
+            this.testCalledAt ??= Date.now();
         this.waits.add(wait);
         this.newestWait = wait;
         const settled = () => this.waits.delete(wait);
@@ -817,7 +851,7 @@ class CoveragePhaseController {
     stall(limitAt) {
         const newest = this.newestWait;
         const stalled = stalledOn({ waits: this.waits, newest, limitAt, quietSince: this.quietSince, now: Date.now() });
-        return { stalled: stalled?.operation, waiting: this.waits.has(newest) ? newest.operation : undefined };
+        return { stalled: stalled?.operation, waiting: this.waits.has(newest) ? newest.operation : undefined, since: this.testCalledAt };
     }
     async dispose() {
         this.disposed = true;
@@ -873,6 +907,9 @@ class CoveragePhaseController {
                 const method = String(property);
                 return (...args) => {
                     this.promotePendingAssertion();
+                    // Where the test made the call, while its frame is
+                    // still on the stack.
+                    const site = this.waitTimeouts ? testSite() : undefined;
                     const isRequest = REQUEST_METHODS.has(method) &&
                         isApiRequestContext(object);
                     if (ACTION_METHODS.has(method) || isRequest) {
@@ -881,7 +918,7 @@ class CoveragePhaseController {
                             const phase = await this.beginAction(operation);
                             try {
                                 const pending = Reflect.apply(value, object, isRequest ? this.scopeApiRequest(args) : args);
-                                this.trackWait(object, method, args, pending);
+                                this.trackWait(object, method, args, pending, site);
                                 const result = await pending;
                                 this.finish(phase);
                                 return this.prepareResult(result);
@@ -898,7 +935,7 @@ class CoveragePhaseController {
                     const result = Reflect.apply(value, object, invokedArgs);
                     if (method === "setDefaultTimeout" || method === "setDefaultNavigationTimeout")
                         this.lowerTimeout(method, invokedArgs);
-                    this.trackWait(object, method, invokedArgs, result);
+                    this.trackWait(object, method, invokedArgs, result, site);
                     return this.wrapResult(result, method === "newContext" ? invokedArgs : undefined);
                 };
             },
@@ -1748,6 +1785,10 @@ function wrapMatchers(matchers, path = "expect", settles = false, retries = { po
                 return value;
             return (...args) => {
                 const controller = activeController;
+                // Where the test called the matcher: the calls it makes of
+                // Playwright's objects are named by it.
+                if (controller?.waitTimeouts)
+                    controller.matcherSite = testSite();
                 const settled = settles && SETTLED_MATCHERS.has(name);
                 const phase = bridgedAssertionDepth === 0
                     ? controller?.beginAssertion(`${path}.${name}`, undefined, !settled)

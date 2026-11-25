@@ -31,14 +31,17 @@ test("a call ends by the timeout it was given, else by the test's default for it
 });
 
 test("an attempt is stalled only on its newest call, with nothing able to end before the limit, its pages quiet", () => {
-  const click = { operation: "Locator.click (#save)", deadline: Infinity };
-  const expectation = { operation: "expect(#done) to.have.text", deadline: 20_000 };
-  const poll = { operation: "expect.toBe", deadline: 8_000 };
+  const click = { operation: "Locator.click (#save)", deadline: Infinity, fromTest: true };
+  const expectation = { operation: "expect(#done) to.have.text", deadline: 20_000, fromTest: true };
+  const poll = { operation: "expect.toBe", deadline: 8_000, fromTest: true };
+  // A fixture's own call, such as the new page of a new worker.
+  const page = { operation: "BrowserContext.newPage", deadline: Infinity, fromTest: false };
   const at = { limitAt: 10_000, quietSince: 0, now: 5_000 };
   assert.equal(stalledOn({ waits: new Set([click]), newest: click, ...at }), click);
   assert.equal(stalledOn({ waits: new Set([click, expectation]), newest: expectation, ...at }), expectation);
   // Nothing called, or the newest call returned: the test is doing something else.
   assert.equal(stalledOn({ waits: new Set(), newest: undefined, ...at }), undefined);
+  assert.equal(stalledOn({ waits: new Set([page]), newest: page, ...at }), undefined);
   assert.equal(stalledOn({ waits: new Set([click]), newest: expectation, ...at }), undefined);
   // A poll that fails by itself before the limit: a kill to come.
   assert.equal(stalledOn({ waits: new Set([poll, click]), newest: click, ...at }), undefined);
@@ -74,21 +77,37 @@ test("an attempt's stall window is past every passing run, inside its limit", ()
 test("a stall watch ends a stalled mutant attempt as a timeout, and says what it waited on", async () => {
   const now = Date.now();
   const claim = (extra) => ({ kind: "mutant", startedAt: now, claimedAt: now - 5, baselineMs: 1, timeoutFactor: 1, limitAt: now + 60_000, ...extra });
+  const running = (extra = {}) => ({ status: "passed", duration: 0, ...extra });
   // A control, and an attempt whose own timeout ends it before its window, are not watched.
   assert.equal(watchStall({}, { kind: "control" }, () => ({})), undefined);
   // A test that has already ended is looked at no more.
-  const ended = watchStall({ status: "timedOut" }, claim(), () => assert.fail("looked at"));
-  await new Promise((done) => setTimeout(done, 1_100));
-  ended.stop();
-  assert.deepEqual(stallDetails(ended), {});
+  // A test that has already ended, or whose body has (its fixtures being
+  // torn down), is looked at no more.
+  for (const info of [running({ status: "timedOut" }), running({ duration: 900 })]) {
+    const ended = watchStall(info, claim(), () => assert.fail("looked at"));
+    await new Promise((done) => setTimeout(done, 1_100));
+    ended.stop();
+    assert.deepEqual(stallDetails(ended), {});
+  }
+  // Stalled, but the test's own first call was too recent: the window
+  // counts from it, so it goes on, waiting.
+  const recent = watchStall(running({ setTimeout: () => assert.fail("not past its window") }), claim(), () => ({ stalled: "Locator.click (#a)", waiting: "Locator.click (#a)", since: Date.now() }));
+  await new Promise((done) => setTimeout(done, 1_150));
+  recent.stop();
+  assert.deepEqual(stallDetails(recent), { waitingOn: "Locator.click (#a)" });
+  // No call of its own yet: never stalled.
+  const unstarted = watchStall(running({ setTimeout: () => assert.fail("no call of its own") }), claim(), () => ({ stalled: "x", waiting: "x" }));
+  await new Promise((done) => setTimeout(done, 1_150));
+  unstarted.stop();
   assert.equal(watchStall({}, undefined, () => ({})), undefined);
   assert.equal(watchStall({}, claim({ limitAt: now + 500 }), () => ({})), undefined);
   // Waiting, then stalled: its test's timeout is set to the time it has run.
-  const looks = [{ waiting: "Locator.click (#a)" }, { stalled: "Locator.click (#a)", waiting: "Locator.click (#a)" }];
+  const since = now - 5_000;
+  const looks = [{ waiting: "Locator.click (#a)", since }, { stalled: "Locator.click (#a)", waiting: "Locator.click (#a)", since }];
   const asked = [];
   let set;
   const stalled = await new Promise((done) => {
-    const watch = watchStall({ status: "passed", setTimeout: (ms) => { set = ms; done(watch); } }, claim(), (limitAt) => {
+    const watch = watchStall({ ...running(), setTimeout: (ms) => { set = ms; done(watch); } }, claim(), (limitAt) => {
       asked.push(limitAt);
       return looks.shift();
     });
@@ -99,7 +118,7 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   assert.ok(stalled.stalled.atMs >= 1_000, `${stalled.stalled.atMs}`);
   assert.deepEqual(stallDetails(stalled), { stalledAtMs: stalled.stalled.atMs, waitingOn: "Locator.click (#a)" });
   // Never stalled: what it last waited on, until stopped.
-  const waiting = watchStall({ status: "passed", setTimeout: () => assert.fail("not stalled") }, claim(), () => ({ waiting: "Page.waitForURL" }));
+  const waiting = watchStall({ ...running(), setTimeout: () => assert.fail("not stalled") }, claim(), () => ({ waiting: "Page.waitForURL" }));
   await new Promise((done) => setTimeout(done, 1_150));
   waiting.stop();
   assert.deepEqual(stallDetails(waiting), { waitingOn: "Page.waitForURL" });

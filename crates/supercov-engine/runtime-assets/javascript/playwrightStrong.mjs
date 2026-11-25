@@ -255,12 +255,14 @@ export function describeCall(object, method, args) {
 
 /**
  * The call a stalled attempt waits on, or `undefined`: the newest Playwright
- * call the test made has not returned, no call still running can end by its
+ * call, one the test's own code made, has not returned, no call still running can end by its
  * own timeout before `limitAt`, and its pages have been quiet since
  * `quietSince` for a second.
  */
 export function stalledOn({ waits, newest, limitAt, quietSince, now }) {
-    if (!newest || !waits.has(newest))
+    // The newest call is the test's own (a fixture's setup, such as a new
+    // page, is no wait of the test's).
+    if (!newest || !waits.has(newest) || !newest.fromTest)
         return undefined;
     if (now - quietSince < QUIET_MS)
         return undefined;
@@ -278,7 +280,8 @@ export function stallWindowOf(baselineMs, factor) {
 
 /**
  * Ends a mutant attempt as a timeout once it has stalled (`stalledOn`, asked
- * of `look(limitAt)` every tenth of a second from the end of its window):
+ * of `look(limitAt)` every tenth of a second from the end of its window, which
+ * counts from the first call the test's own code made, `since`):
  * its test's timeout is set to what it has already run. The watch says when
  * it did so and on what (`stalled`), and, where it went on to its limit, what
  * it last waited on (`waiting`). `stop()` ends the watch.
@@ -289,15 +292,21 @@ export function watchStall(testInfo, claimed, look) {
     const from = claimed.startedAt + stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
     if (from >= claimed.limitAt)
         return undefined;
+    const windowMs = stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
     const watch = { stalled: undefined, waiting: undefined, timer: undefined };
     const check = () => {
-        // A test that has ended (its timeout, a failure) waits on nothing
-        // of its own: what its teardown closes is not what it waited on.
-        if (testInfo.status !== "passed")
+        // A test whose body has ended (it failed, ran out of time, or its
+        // fixtures are being torn down: Playwright sets its duration then)
+        // waits on nothing of its own: what its teardown closes is not what
+        // it waited on.
+        if (testInfo.status !== "passed" || testInfo.duration > 0)
             return;
-        const { stalled, waiting } = look(claimed.limitAt);
+        const { stalled, waiting, since } = look(claimed.limitAt);
         watch.waiting = waiting;
-        if (stalled) {
+        // The window counts from the test's first call of its own, not from
+        // its claim: setting up its page in a new worker on a loaded machine
+        // took seconds, which no baseline holds.
+        if (stalled && Date.now() >= since + windowMs) {
             watch.stalled = { atMs: Date.now() - claimed.startedAt, waitingOn: stalled };
             testInfo.setTimeout(Math.max(1, Date.now() - claimed.claimedAt));
             return;

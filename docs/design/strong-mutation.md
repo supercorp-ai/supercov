@@ -1352,19 +1352,25 @@ attempt's limit and when it is near it.
 **An attempt that stalls ends there.** Most of a timeout's limit is the 5 s
 constant: a 1 s test's limit is 6.5 s, though no run of it that passed took
 much over 1 s. A mutant attempt is watched from its *window*,
-`timeoutFactor × baseline + 1 s`, and ends at once, a `timeout`, at the first
-moment (looked at every 100 ms) that it has stalled:
+`timeoutFactor × baseline + 1 s`, counted from the first call the test's own
+code makes (a spec or its helpers, not a Playwright fixture setting up a
+page), and ends at once, a `timeout`, at the first moment (looked at every
+100 ms) that it has stalled:
 
 - the newest call the test made on Playwright's objects (an action, a
   navigation, a wait, a request, the `_expect` a locator assertion sends, an
-  `expect.poll` or a `toPass`) has not returned;
+  `expect.poll` or a `toPass`) has not returned, and the test's own code made
+  it;
 - no call still running can end by its own timeout before the limit: a click
   with no timeout (Playwright's default) or an `expect` given 15 s, not one
   whose 5 s run out first. A call's own timeout is the one it was given, else
   the test's default for its kind (`actionTimeout`, `navigationTimeout`, the
   expect and `toPass` timeouts, and any `setDefaultTimeout` the test called);
   an API request's is 30 s;
-- the test's pages have sent and answered no request for a second.
+- the test's pages have sent and answered no request for a second;
+- the test's body is still running: once it has failed, run out of time or
+  ended (Playwright then sets its duration), what its fixtures' teardown
+  closes is nothing the test waited on.
 
 Each rule keeps a verdict the limit would give. A test that passes is past
 its window only if the mutant slowed it by half its baseline and a second:
@@ -1380,8 +1386,17 @@ the data say is rare; the limit itself already judges a slowdown beyond it a
 `timeout`. The verdict says so: `stopped at 2.6 s of its 6.5 s time limit,
 past every run of the test that passed (1.5 × its 1.0 s baseline + 1 s), its
 pages quiet, waiting on Locator.click (#save), which cannot end before the
-limit`. A timeout at the limit says what it last waited on too, and the
-summary counts the two apart.
+limit`, and where the test made that call (`at tests/save.spec.ts:12:20`). A
+timeout at the limit says what it last waited on too; the summary counts the
+two apart and says what ending them early saved (`32 timeout(s) ended early
+once they stalled, saving about 6m05s`).
+
+Counting the window from the attempt's claim cut a kill short on a loaded CI
+machine: a new worker took 2.6 s to open the test's page, past the 2.5 s
+window of a 1 s test, and the attempt ended as a timeout waiting on the page
+fixture's `newPage` where the test would have failed a moment later. A
+fixture's call is no wait of the test's, and the test's own time starts with
+its first call.
 
 Measured on 8 shards of a large application's e2e suite (4.29.14, 9,137 s of
 mutant attempts, 1,456 mutants): attempts that passed took 81% of the time

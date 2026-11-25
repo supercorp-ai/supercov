@@ -497,12 +497,15 @@ no mutants shows none of this.
   waits for an element the mutant broke ends there, not at its own 30 s. A
   test that runs out of its limit makes its mutant a `timeout`, which counts
   as detected; the summary says how many, and against what limit. An attempt
-  ends sooner, a `timeout` too, once it has stalled: past its baseline × 1.5
-  + 1 s (longer than any run of the test that passed), waiting on a
-  Playwright call that cannot end by its own timeout before the limit, its
-  pages quiet for a second. An `expect` that gives up before the limit still
-  fails the test, a kill, and a page still sending requests runs on. Each
-  timeout's verdict says what it waited on.
+  ends sooner, a `timeout` too, once it has stalled: its test's own code has
+  run for longer than any run of the test that passed (baseline × 1.5 + 1 s)
+  and waits on a Playwright call that cannot end by its own timeout before the
+  limit, its pages quiet for a second. An `expect` that gives up before the
+  limit still fails the test, a kill, and a page still sending requests runs
+  on. Nothing needs setting. Each timeout's verdict says what it waited on and
+  where, for example `stopped at 2.5 s of its 6.5 s time limit, ..., waiting
+  on Locator.click (#save) at tests/save.spec.ts:12:20`, and the summary says
+  how much time ending them early saved.
   `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) changes the
   1.5: a suite whose tests' times vary widely between runs may want 2 or 3.
   A mutant tries its candidates cheapest to a kill first (a test's time over

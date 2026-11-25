@@ -25006,7 +25006,7 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
     assert!(said.contains(", near its time limit: "), "{context}");
     assert!(
         said.contains("stalled before its ")
-            && said.contains(", waiting on Locator.click (#ready) ("),
+            && said.contains(", waiting on Locator.click (#ready) at tests/ready.spec.js:"),
         "{context}"
     );
     // The factor is the pass's to set: a factor no number is refused.
