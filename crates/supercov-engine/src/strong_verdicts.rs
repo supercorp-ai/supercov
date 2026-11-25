@@ -118,6 +118,8 @@ pub struct Lent<'a> {
     /// Its partial progress: the candidates each mutant it left without a
     /// verdict passed with.
     pub progress: &'a Progress,
+    /// The mutants it marked as having lived through a whole first tier.
+    pub lived: &'a BTreeSet<String>,
     /// The ids of the tests it measured.
     pub tests: &'a BTreeSet<String>,
     /// The files it recorded with other bytes than the run whose mutants of
@@ -240,6 +242,17 @@ pub fn merged_progress(
         }
     }
     progress
+}
+
+/// The merged run's mutants that lived through a whole first tier: each a
+/// run marked so, that the merged progress keeps open. A tier a run passed
+/// is passed whichever run passed it.
+pub fn merged_lived(lent: &[Lent<'_>], progress: &Progress) -> BTreeSet<String> {
+    lent.iter()
+        .flat_map(|run| run.lived.iter())
+        .filter(|id| progress.contains_key(*id))
+        .cloned()
+        .collect()
 }
 
 /// What a merge says of the progress it kept, after its verdicts: nothing
@@ -494,12 +507,14 @@ mod tests {
             Lent {
                 verdicts: &first,
                 progress: &first_progress,
+                lived: &BTreeSet::new(),
                 tests: &first_tests,
                 other_bytes: &first_changed,
             },
             Lent {
                 verdicts: &second,
                 progress: &second_progress,
+                lived: &BTreeSet::new(),
                 tests: &second_tests,
                 other_bytes: &changed,
             },
@@ -555,6 +570,7 @@ mod tests {
             &[Lent {
                 verdicts: &killed,
                 progress: &Progress::new(),
+                lived: &BTreeSet::new(),
                 tests: &tests,
                 other_bytes: &none,
             }],
@@ -622,12 +638,14 @@ mod tests {
                 Lent {
                     verdicts: &first,
                     progress: &Progress::new(),
+                    lived: &BTreeSet::new(),
                     tests: &tests,
                     other_bytes: &none,
                 },
                 Lent {
                     verdicts: &second,
                     progress: &Progress::new(),
+                    lived: &BTreeSet::new(),
                     tests: &tests,
                     other_bytes: &none,
                 },
@@ -701,12 +719,14 @@ mod tests {
                     Lent {
                         verdicts: &unit,
                         progress: &Progress::new(),
+                        lived: &BTreeSet::new(),
                         tests: &unit_tests,
                         other_bytes: &changed,
                     },
                     Lent {
                         verdicts: &e2e,
                         progress: &Progress::new(),
+                        lived: &BTreeSet::new(),
                         tests: &e2e_tests,
                         other_bytes: &same,
                     },
@@ -722,6 +742,34 @@ mod tests {
             );
             assert_eq!(taken, [2, 1]);
         }
+    }
+
+    /// A mutant a run marked as having lived through its first tier stays
+    /// marked where the merged progress keeps it open, whichever run marked
+    /// it; one the merge settled or kept no progress for is not.
+    #[test]
+    fn a_lived_tier_merges_while_its_progress_stays_open() {
+        let (verdicts, tests, other_bytes) = (BTreeMap::new(), ids(&[]), ids(&[]));
+        let (first, second) = (progress(&[]), progress(&[]));
+        let (one, two) = (ids(&["open", "settled"]), ids(&["also-open"]));
+        let lent = [
+            Lent {
+                verdicts: &verdicts,
+                progress: &first,
+                lived: &one,
+                tests: &tests,
+                other_bytes: &other_bytes,
+            },
+            Lent {
+                verdicts: &verdicts,
+                progress: &second,
+                lived: &two,
+                tests: &tests,
+                other_bytes: &other_bytes,
+            },
+        ];
+        let merged = progress(&[("open", &["t1"]), ("also-open", &["t2"])]);
+        assert_eq!(merged_lived(&lent, &merged), ids(&["also-open", "open"]));
     }
 
     /// Verdicts are written whole and renamed into place; a path that
@@ -740,6 +788,7 @@ mod tests {
             mutant_set: "set".into(),
             mutants: verdicts(&[("a", "killed")]),
             progress: Progress::new(),
+            lived: BTreeSet::new(),
         };
         save(&path, &document).unwrap();
         let read = serde_json::from_slice::<StrongVerdicts>(&std::fs::read(&path).unwrap());

@@ -26,6 +26,35 @@ const KILLS_HELD: f64 = 0.95;
 /// How many kills a run must have before they size its first tier.
 const KILLS_TO_SIZE: usize = 20;
 
+/// How much of its tests' measured time a first tier holds at least, in
+/// milliseconds: it ends at `FIRST_TIER` candidates or once its candidates
+/// take this long, whichever comes first. Of 3,972 kills on a large
+/// application's e2e suite, each placed in its mutant's order with the time
+/// of the candidates up to its killer, 90% came within 26 s and 95% within
+/// 61 s; a tier of 32 candidates or 60 s holds 93.4% of them where 32
+/// candidates alone hold 93.7%, and takes 34 s of a mutant's tests on
+/// average where 32 candidates take 40 s. Where a test takes 10 s, it is 6
+/// candidates, not 32.
+pub const FIRST_TIER_MS: u64 = 60_000;
+
+/// How many candidates a first tier holds at least, however long they take:
+/// a slow test does not leave a mutant with one candidate tried.
+pub const FIRST_TIER_LEAST: usize = 4;
+
+/// A run's first tier: it ends at `candidates`, or once its candidates'
+/// measured time reaches `ms` (and it holds `FIRST_TIER_LEAST`), whichever
+/// comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sizing {
+    pub candidates: usize,
+    pub ms: u64,
+}
+
+/// A test's measured time, as a first tier counts it.
+fn time_of(test: &PlannedTest) -> u64 {
+    test.duration_ms.unwrap_or(UNTIMED_TEST_MS)
+}
+
 /// How much likelier to kill a mutant a test whose own evidence infected it
 /// is taken to be than one that only reached it: what orders a mutant's
 /// candidates with their times, as the Playwright driver orders them
@@ -98,7 +127,7 @@ pub fn ordered(
 ) -> Vec<Candidate> {
     let mut ordered = mutant.candidates.clone();
     ordered.sort_by_key(|candidate| {
-        let time = tests[candidate.test].duration_ms.unwrap_or(UNTIMED_TEST_MS);
+        let time = time_of(&tests[candidate.test]);
         let likelier = if candidate.reason == CandidateReason::Infected {
             1
         } else {
@@ -134,14 +163,16 @@ pub fn resumes_alone(mutant: &PlannedMutant, tests: &[PlannedTest]) -> bool {
     mutant.server_wide.is_some() && tiered(mutant, tests)
 }
 
-/// How many candidates a run's first tier holds: `FIRST_TIER`, or more where
-/// the run's kills say so. Each kill's place in its mutant's order is
-/// counted, and the tier holds `KILLS_HELD` of them. A first tier's kills
-/// are never past its end, so it only grows, from kills its rest made. The
-/// places are read without the run's killers first, whose order puts a kill
-/// at the front by its own count.
-pub fn size(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> usize {
+/// A run's first tier: `FIRST_TIER` candidates and `FIRST_TIER_MS`, or more
+/// where the run's kills say so. Each kill's place in its mutant's order is
+/// counted, with its candidates' time up to and with the killer, and the
+/// tier holds `KILLS_HELD` of them by each. A first tier's kills are never
+/// past its end, so it only grows, from kills its rest made. The places are
+/// read without the run's killers first, whose order puts a kill at the
+/// front by its own count.
+pub fn sizing(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> Sizing {
     let mut places = Vec::new();
+    let mut times = Vec::new();
     for mutant in plan
         .mutants
         .iter()
@@ -154,46 +185,72 @@ pub fn size(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> usize {
         else {
             continue;
         };
-        if let Some(place) = ordered(mutant, &plan.tests, &BTreeMap::new())
+        let order = ordered(mutant, &plan.tests, &BTreeMap::new());
+        if let Some(place) = order
             .iter()
             .position(|candidate| plan.tests[candidate.test].id == killer)
         {
             places.push(place + 1);
+            times.push(
+                order[..=place]
+                    .iter()
+                    .map(|candidate| time_of(&plan.tests[candidate.test]))
+                    .sum::<u64>(),
+            );
         }
     }
     if places.len() < KILLS_TO_SIZE {
-        return FIRST_TIER;
+        return Sizing {
+            candidates: FIRST_TIER,
+            ms: FIRST_TIER_MS,
+        };
     }
     places.sort_unstable();
-    let held = (places.len() as f64 * KILLS_HELD).ceil() as usize;
-    places[held - 1].max(FIRST_TIER)
+    times.sort_unstable();
+    let held = (places.len() as f64 * KILLS_HELD).ceil() as usize - 1;
+    Sizing {
+        candidates: places[held].max(FIRST_TIER),
+        ms: times[held].max(FIRST_TIER_MS),
+    }
 }
 
-/// The first tier of each mutant with more candidates than `size`: its
-/// first `size` candidates in `ordered`'s order, with the tests that killed
-/// its file's other mutants (`killers`) first, kept in the plan's, by mutant
-/// id.
+/// The first tier of each mutant whose candidates outlast it: its
+/// candidates in `ordered`'s order, with the tests that killed its file's
+/// other mutants (`killers`) first, up to `sizing`'s count or time, kept in
+/// the plan's order, by mutant id.
 pub fn first_tiers(
     mutants: &[PlannedMutant],
     tests: &[PlannedTest],
-    size: usize,
+    sizing: Sizing,
     killers: &Killers,
 ) -> BTreeMap<String, Vec<Candidate>> {
     let none = BTreeMap::new();
     mutants
         .iter()
-        .filter(|mutant| mutant.candidates.len() > size && tiered(mutant, tests))
-        .map(|mutant| {
+        .filter(|mutant| tiered(mutant, tests))
+        .filter_map(|mutant| {
             let kills = killers.get(&mutant.file).unwrap_or(&none);
-            let mut tier = ordered(mutant, tests, kills);
-            tier.truncate(size);
+            let mut tier = Vec::new();
+            let mut ms = 0;
+            for candidate in ordered(mutant, tests, kills) {
+                let full = tier.len() >= sizing.candidates
+                    || (tier.len() >= FIRST_TIER_LEAST && ms >= sizing.ms);
+                if full {
+                    break;
+                }
+                ms += time_of(&tests[candidate.test]);
+                tier.push(candidate);
+            }
+            if tier.len() == mutant.candidates.len() {
+                return None;
+            }
             tier.sort_by_key(|candidate| {
                 mutant
                     .candidates
                     .iter()
                     .position(|planned| planned == candidate)
             });
-            (mutant.id.clone(), tier)
+            Some((mutant.id.clone(), tier))
         })
         .collect()
 }
@@ -202,11 +259,12 @@ pub fn first_tiers(
 /// with the mutant, which is its progress, not a verdict. Each such verdict
 /// is taken off `verdicts`, and where it counts every test of the tier (a
 /// candidate the driver could not run leaves it fewer), the tier goes into
-/// `passed`, by test id. Any other verdict stands: a kill is any
-/// candidate's.
+/// `passed`, by test id, and the mutant into `lived`: its progress holds a
+/// whole first tier. Any other verdict stands: a kill is any candidate's.
 pub fn lived_through(
     verdicts: &mut BTreeMap<String, Verdict>,
     passed: &mut Progress,
+    lived: &mut std::collections::BTreeSet<String>,
     tiers: &BTreeMap<String, Vec<String>>,
 ) {
     for (id, tier) in tiers {
@@ -218,31 +276,35 @@ pub fn lived_through(
                 .entry(id.clone())
                 .or_default()
                 .extend(tier.iter().cloned());
+            lived.insert(id.clone());
         }
         verdicts.remove(id);
     }
 }
 
-/// Whether a mutant with no verdict that passed `passed` candidates lived
-/// through a first tier: as many as the smallest tier holds. A pass its
-/// budget stopped partway through a tier records the few candidates it
-/// passed too (on a large application's settings page, 1 to 4 of 135): such
-/// a mutant has not met its likeliest killers, and is no more than open.
-pub fn lived_a_tier(passed: usize) -> bool {
-    passed >= FIRST_TIER
+/// Whether an open mutant lived through a first tier: the run marked it so
+/// (`lived`, as `lived_through` found it), or it passed as many candidates
+/// as the smallest tier by count holds (what 4.29.12 and 4.29.13 kept, with
+/// no mark). A pass its budget stopped partway through a tier records the
+/// few candidates it passed too (on a large application's settings page, 1
+/// to 4 of 135): such a mutant has not met its likeliest killers, and is no
+/// more than open.
+pub fn lived_a_tier(id: &str, passed: usize, lived: &std::collections::BTreeSet<String>) -> bool {
+    passed > 0 && (lived.contains(id) || passed >= FIRST_TIER)
 }
 
 /// The mutants a run left with `survived so far`: no verdict, and a first
-/// tier's worth of candidates that passed with them (`lived_a_tier`). Each
-/// is said as a strong status of its own, `survived-so-far`, with how many
-/// candidates it passed: never a survivor, never in the score.
+/// tier passed (`lived_a_tier`). Each is said as a strong status of its own,
+/// `survived-so-far`, with how many candidates it passed: never a survivor,
+/// never in the score.
 pub fn survived_so_far(
     verdicts: &BTreeMap<String, Verdict>,
     progress: &Progress,
+    lived: &std::collections::BTreeSet<String>,
 ) -> BTreeMap<String, serde_json::Value> {
     progress
         .iter()
-        .filter(|(id, passed)| lived_a_tier(passed.len()) && !verdicts.contains_key(*id))
+        .filter(|(id, passed)| lived_a_tier(id, passed.len(), lived) && !verdicts.contains_key(*id))
         .map(|(id, passed)| {
             (
                 id.clone(),
@@ -314,6 +376,19 @@ mod tests {
             reason: None,
         }
     }
+
+    /// A tier sized by its count alone.
+    fn count(candidates: usize) -> Sizing {
+        Sizing {
+            candidates,
+            ms: u64::MAX,
+        }
+    }
+
+    const DEFAULT: Sizing = Sizing {
+        candidates: FIRST_TIER,
+        ms: FIRST_TIER_MS,
+    };
 
     fn ids(tests: &[PlannedTest], order: &[Candidate]) -> Vec<String> {
         order
@@ -389,7 +464,7 @@ mod tests {
             decided,
             server.clone(),
         ];
-        let tiers = first_tiers(&mutants, &tests, 2, &Killers::new());
+        let tiers = first_tiers(&mutants, &tests, count(2), &Killers::new());
         assert_eq!(
             tiers
                 .iter()
@@ -454,12 +529,12 @@ mod tests {
                 ("src/b.js".to_owned(), BTreeMap::from([(0, 1)])),
             ])
         );
-        let tiers = first_tiers(&plan.mutants[5..6], &tests, 2, &killers);
+        let tiers = first_tiers(&plan.mutants[5..6], &tests, count(2), &killers);
         assert_eq!(ids(&tests, &tiers["open"]), ["page", "page-again"]);
         // Another file's killers change nothing of it.
         let mut other = plan.mutants[5].clone();
         other.file = "src/c.js".into();
-        let tiers = first_tiers(&[other], &tests, 2, &killers);
+        let tiers = first_tiers(&[other], &tests, count(2), &killers);
         assert_eq!(ids(&tests, &tiers["open"]), ["render", "layout"]);
         assert_eq!(
             ids(
@@ -467,6 +542,68 @@ mod tests {
                 &ordered(&plan.mutants[5], &tests, &killers["src/a.js"])
             ),
             ["page", "page-again", "render", "layout"]
+        );
+    }
+
+    /// A first tier ends at its count or once its candidates' time reaches
+    /// its time, whichever comes first, but holds four candidates however
+    /// slow they are; a mutant its tier would hold whole has none. The time
+    /// grows to hold 95% of the run's kills by their candidates' time, never
+    /// below 60 s.
+    #[test]
+    fn a_first_tier_ends_at_its_count_or_its_time() {
+        let tests = (0..10)
+            .map(|at| test(&format!("t{at}"), "playwright", Some(20_000 + at)))
+            .chain([test("quick", "playwright", Some(10))])
+            .collect::<Vec<_>>();
+        let slow = (0..10).map(|at| (at, Infected)).collect::<Vec<_>>();
+        let mutants = [
+            mutant("slow", &slow),
+            mutant("four", &slow[..4]),
+            mutant("quick", &[(10, Infected), (0, Infected), (1, Infected)]),
+            mutant("none", &[]),
+        ];
+        let tiers = first_tiers(&mutants, &tests, DEFAULT, &Killers::new());
+        // 20 s a test: four, the least a tier holds, pass 60 s.
+        assert_eq!(ids(&tests, &tiers["slow"]), ["t0", "t1", "t2", "t3"]);
+        for whole in ["four", "quick", "none"] {
+            assert!(!tiers.contains_key(whole), "{whole}");
+        }
+        let tiers = first_tiers(
+            &mutants,
+            &tests,
+            Sizing {
+                candidates: 32,
+                ms: 70_000,
+            },
+            &Killers::new(),
+        );
+        assert_eq!(tiers["slow"].len(), 4);
+        let tiers = first_tiers(
+            &mutants,
+            &tests,
+            Sizing {
+                candidates: 32,
+                ms: 90_000,
+            },
+            &Killers::new(),
+        );
+        assert_eq!(tiers["slow"].len(), 5);
+        // Twenty kills, each at its mutant's tenth candidate, 200 s in.
+        let plan = StrongPlan {
+            mutant_set: "set".into(),
+            tests,
+            mutants: (0..20).map(|at| mutant(&format!("m{at}"), &slow)).collect(),
+        };
+        let verdicts = (0..20)
+            .map(|at| (format!("m{at}"), verdict("killed", Some("t9"), 1)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            sizing(&plan, &verdicts),
+            Sizing {
+                candidates: FIRST_TIER,
+                ms: 200_045
+            }
         );
     }
 
@@ -494,18 +631,24 @@ mod tests {
         verdicts.insert("m19".into(), verdict("killed", Some("elsewhere"), 1));
         verdicts.insert("m20".into(), verdict("survived", None, 60));
         verdicts.insert("other".into(), verdict("killed", Some("t59"), 1));
-        assert_eq!(size(&plan, &verdicts), FIRST_TIER);
+        assert_eq!(sizing(&plan, &verdicts), DEFAULT);
         // A twentieth, at the 50th: 95% of them are still at the first.
         verdicts.insert("m19".into(), verdict("killed", Some("t49"), 1));
-        assert_eq!(size(&plan, &verdicts), FIRST_TIER);
+        assert_eq!(sizing(&plan, &verdicts), DEFAULT);
         // A twenty-first there too: 95% now needs the 50th.
         verdicts.insert("m20".into(), verdict("killed", Some("t49"), 1));
-        assert_eq!(size(&plan, &verdicts), 50);
+        assert_eq!(
+            sizing(&plan, &verdicts),
+            Sizing {
+                candidates: 50,
+                ms: FIRST_TIER_MS
+            }
+        );
         // A tier that would be smaller stays 32.
         for at in 0..21 {
             verdicts.insert(format!("m{at}"), verdict("killed", Some("t3"), 1));
         }
-        assert_eq!(size(&plan, &verdicts), FIRST_TIER);
+        assert_eq!(sizing(&plan, &verdicts), DEFAULT);
     }
 
     /// A first tier's survivor is progress: every test of the tier where
@@ -526,7 +669,12 @@ mod tests {
             ("untiered".to_owned(), verdict("survived", None, 5)),
         ]);
         let mut passed = Progress::from([("all".to_owned(), BTreeSet::from(["z".to_owned()]))]);
-        lived_through(&mut verdicts, &mut passed, &tiers);
+        let mut lived = BTreeSet::from(["before".to_owned()]);
+        lived_through(&mut verdicts, &mut passed, &mut lived, &tiers);
+        assert_eq!(
+            lived,
+            BTreeSet::from(["all".to_owned(), "before".to_owned()])
+        );
         assert_eq!(verdicts.keys().collect::<Vec<_>>(), ["killed", "untiered"]);
         assert_eq!(
             passed,
@@ -541,21 +689,29 @@ mod tests {
         let tier = (0..FIRST_TIER)
             .map(|at| format!("t{at}"))
             .collect::<BTreeSet<_>>();
+        let two = BTreeSet::from(["a".to_owned(), "b".to_owned()]);
         let progress = Progress::from([
             ("all".to_owned(), tier.clone()),
             ("killed".to_owned(), tier),
-            (
-                "few".to_owned(),
-                BTreeSet::from(["a".to_owned(), "b".to_owned()]),
-            ),
+            ("few".to_owned(), two.clone()),
+            ("timed".to_owned(), two),
             ("empty".to_owned(), BTreeSet::new()),
         ]);
+        // A tier ended by its time is marked; 32 candidates with no mark
+        // (4.29.12 and 4.29.13 kept none) is one too.
+        let marked = BTreeSet::from(["timed".to_owned(), "empty".to_owned()]);
         assert_eq!(
-            survived_so_far(&verdicts, &progress),
-            BTreeMap::from([(
-                "all".to_owned(),
-                serde_json::json!({"status": "survived-so-far", "tests": 32})
-            )])
+            survived_so_far(&verdicts, &progress, &marked),
+            BTreeMap::from([
+                (
+                    "all".to_owned(),
+                    serde_json::json!({"status": "survived-so-far", "tests": 32})
+                ),
+                (
+                    "timed".to_owned(),
+                    serde_json::json!({"status": "survived-so-far", "tests": 2})
+                ),
+            ])
         );
     }
 }

@@ -157,8 +157,9 @@ mutants the tests let survive.
   merge and in a later round: a candidate a change could reach runs again.
   The Playwright driver records them.
 - **A first tier.** A Playwright mutant with more candidates than its first
-  tier holds (32, or more where the run's kills come later) runs against
-  that tier first, every such mutant before any runs the rest. One the tier
+  tier holds (32, or more where the run's kills come later, or as many as
+  take 60 s of their tests' time, at least four, whichever comes first)
+  runs against that tier first, every such mutant before any runs the rest. One the tier
   lets live is `survived-so-far` until the rest runs, in the same pass where
   it has the time: listed with the survivors as such, never in the score
   (`docs/design/strong-mutation.md`, A first tier, then the rest).
