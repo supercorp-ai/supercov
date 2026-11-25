@@ -128,6 +128,7 @@ gates! {
     merge_across => "scripts/merge-across.mjs",
     mock_reach => "scripts/mock-reach.mjs",
     generated_inputs => "scripts/generated-inputs.mjs",
+    baseline_continuation => "scripts/baseline-continuation.mjs",
     next_playwright => "scripts/next-playwright-integration.mjs",
     react_hydration => "scripts/react-hydration-compatibility.mjs",
     // A sample of every sixteenth test, across the whole corpus and so across

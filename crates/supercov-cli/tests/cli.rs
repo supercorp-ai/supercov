@@ -22643,8 +22643,17 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one): npx vitest run --reporter=dot"),
         "{said}"
     );
-    // After an edit: measured.
+    // Edited back as the shards measured it: no run of the command is of
+    // this checkout, and the merge of the shards' runs, each of this
+    // command, holds every test it runs: the shard is made from it.
     project.edit("src/tax.js", "sum / 5", "sum * 0.2");
+    let (_, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains("holds the tests the command runs (4 test(s) in 2 of its 2 test file(s))"),
+        "{said}"
+    );
+    // Edited again: no run is of this checkout, and it is measured.
+    project.edit("src/tax.js", "sum * 0.2", "sum * 0.3");
     let (_, said) = shard(&["npx", "vitest", "run"]);
     assert!(
         said.contains("measuring first (the checkout changed since the latest run)"),

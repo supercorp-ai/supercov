@@ -23,6 +23,7 @@ failure_output_node	23
 go_servers	19
 mock_reach	19
 generated_inputs	20
+baseline_continuation	25
 rust_vitest_projects	17
 java_syntax_zoo	17
 python	16

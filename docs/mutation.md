@@ -118,6 +118,26 @@ mutants the tests let survive.
   verdict a pass reached, whatever the two measurements recorded: a test
   whose path depends on the time, or that failed in one of them, moves no
   verdict.
+- **A baseline of the checkout.** Where no run of the command can be read or
+  continued, a run of the checkout as it is that holds the tests the command
+  runs is: a merge of a suite measured in parts on several machines (a
+  weekly baseline restored into `.supercov/runs`), or a run of the whole
+  suite. The pass's run is made from it with those tests' records alone, as
+  measuring them would record, and nothing is measured (`not measuring: run
+  r4 of this checkout holds the tests the command runs (18 test(s) in 6 of
+  its 61 test file(s)); this pass saves its verdicts into run r9, made from
+  it with those tests alone`). The command's tests are every test of a merge
+  whose runs were each measured with the command itself, and otherwise those
+  of the test files the command names, by path or by the end of one
+  (`tests/e2e/billing.spec.ts`, `billing.spec.ts`), anywhere in its words,
+  where the run holds every one of them that any run holds; a command that
+  names none is measured. The baseline must be of the checkout
+  as it is, by its fingerprint: on a pull request, whose checkout differs, the
+  command is measured, so narrow it to the specs `tests affected --files`
+  names; the change's own mutants are run only by tests that ran changed
+  code, which those are. A test that failed in the baseline is no candidate.
+  It needs a merged run made by this release, which keeps what its runs
+  answer with.
 - **After an edit.** It measures the checkout again and keeps an earlier
   verdict for each mutant whose file is as it was and whose candidate tests,
   and their test files, nothing changed could reach, as `runs latest tests

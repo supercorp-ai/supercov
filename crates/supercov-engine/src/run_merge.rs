@@ -1364,6 +1364,131 @@ pub fn merge_runs(
     }
 }
 
+/// The file each test of a run's records is written in, by test id.
+fn test_files_by_id(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> {
+    let filed = crate::threads::parallel_map(archive, |entry| {
+        std::str::from_utf8(&entry.contents)
+            .map(|text| {
+                text.lines()
+                    .filter(|line| line.contains("\"testFile\""))
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter_map(|value| {
+                        value["testId"]
+                            .as_str()
+                            .zip(value["testFile"].as_str())
+                            .map(|(id, file)| (id.to_owned(), file.to_owned()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    filed.into_iter().flatten().collect()
+}
+
+/// A run made from `source` without measuring, holding the records of the
+/// tests written in `files` alone, under `id`: what measuring only those
+/// tests would have recorded of them, as a pass whose command runs only
+/// them needs. Every other record -- a server's work no test named, the
+/// files and the mutants the run listed -- is kept as it is, and so is what
+/// a merged run keeps of its runs. Returns how many of its tests it holds.
+pub fn derive_run_of_files(
+    root: &Path,
+    source: &StoredRun,
+    files: &BTreeSet<String>,
+    id: &str,
+    started_at: &str,
+) -> Result<usize, String> {
+    let archive = read_archive(&source.evidence_path)
+        .map_err(|error| format!("run {}'s evidence could not be read: {error}", source.id))?;
+    let filed = test_files_by_id(&archive);
+    let left_out = filed
+        .iter()
+        .filter(|(_, file)| !files.contains(*file))
+        .map(|(test, _)| test.clone())
+        .collect::<BTreeSet<_>>();
+    let kept = filed.len() - left_out.len();
+    let evidence = source.evidence_run_id();
+    let entries = archive
+        .into_iter()
+        .map(|entry| {
+            if matches!(
+                entry.path.as_str(),
+                "coverage-model.json" | "frontend.json" | "manifest.json" | "mutants.json"
+            ) {
+                return Ok(Some(entry));
+            }
+            rewritten_contents(&entry.contents, evidence, Some(&left_out)).map(|contents| {
+                contents.map(|contents| EvidenceArchiveEntry {
+                    path: entry.path,
+                    contents,
+                })
+            })
+        })
+        .filter_map(Result::transpose)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("run {}'s evidence could not be read: {error}", source.id))?;
+    let mut lock = ProjectLock::acquire(root, id, started_at)
+        .map_err(|error| format!("Cannot lock coverage store: {error}"))?;
+    let work = root.join(".supercov/work").join(id);
+    let result = (|| {
+        let archive_path = work.join("evidence.raw.gz");
+        let raw = write_archive(entries, &archive_path)
+            .map_err(|error| format!("Could not write the run's evidence: {error}"))?;
+        let mut metadata = source.metadata.clone();
+        metadata.id = id.to_owned();
+        metadata.started_at = started_at.to_owned();
+        metadata.measured_as = Some(evidence.to_owned());
+        metadata.supersedes = None;
+        metadata.raw_evidence = RawEvidenceMetadata {
+            schema_version: raw.schema_version,
+            format: raw.format.into(),
+            file: raw.file.into(),
+            files: raw.files,
+            uncompressed_bytes: raw.uncompressed_bytes,
+            compressed_bytes: raw.compressed_bytes,
+        };
+        // What a merged run keeps of its runs answers for it here too.
+        let parts = (metadata.merged == Some(true)).then(|| {
+            let parts = work.join(crate::run_store::PARTS_DIRECTORY);
+            let inventory = RunInventory {
+                runs: Vec::new(),
+                rejected: Vec::new(),
+            };
+            metadata
+                .parents
+                .iter()
+                .flatten()
+                .filter_map(|parent| crate::run_store::merged_part(&inventory, source, parent))
+                .try_for_each(|part| keep_part(&inventory, &part, &parts))
+                .map(|()| parts)
+        });
+        let parts = parts
+            .transpose()
+            .map_err(|error| format!("Could not keep the run's records: {error}"))?;
+        publish_archived_run(
+            root,
+            &metadata,
+            &archive_path,
+            Archived {
+                parts,
+                ..Archived::default()
+            },
+        )
+        .map_err(|error| format!("Could not publish the run: {error}"))?;
+        // Published: what is left of its work is removed below either way.
+        let _ = finalize_published_run(root, id);
+        Ok(kept)
+    })();
+    let _ = remove_stored_tree_deferred(root, &work);
+    let release = lock
+        .release()
+        .map_err(|error| format!("Could not release the lock: {error}"));
+    match (result, release) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(kept), Ok(())) => Ok(kept),
+    }
+}
+
 /// The entries of a run's archive that say what its tests are and what they
 /// reached beside the code it measured: what `tests affected` and a check of
 /// the run against the checkout read (`source_manifest::affected_tests`,
@@ -1701,6 +1826,102 @@ mod tests {
         assert_eq!(
             workers,
             ["shards/0/worker/mcdc.json", "shards/2/worker/mcdc.json"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run made from another holds the records of the tests of the files
+    /// named alone, and what a merged run keeps of its runs; each step that
+    /// fails says so, and leaves no run.
+    #[test]
+    fn a_run_made_from_another_holds_the_tests_of_the_files_named() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        let stored = |id: &str| {
+            discover_runs(&root)
+                .unwrap()
+                .runs
+                .into_iter()
+                .find(|run| run.id == id)
+                .unwrap()
+        };
+        let named = BTreeSet::from(["tests/app.test.js".to_owned()]);
+        let at = "2026-01-02T00:00:00.000Z";
+        assert_eq!(
+            derive_run_of_files(&root, &stored("run-a"), &named, "kept", at),
+            Ok(1)
+        );
+        assert_eq!(
+            derive_run_of_files(&root, &stored("run-a"), &BTreeSet::new(), "none", at),
+            Ok(0)
+        );
+        let tests = |id: &str| measured_tests(&read_archive(&stored(id).evidence_path).unwrap());
+        assert_eq!(tests("kept").len(), 1);
+        assert!(tests("none").is_empty());
+        assert_eq!(
+            stored("kept").metadata.measured_as.as_deref(),
+            Some("run-a")
+        );
+        merge_runs(
+            &root,
+            &["run-a".into(), "run-b".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            derive_run_of_files(&root, &stored("merged"), &named, "from-merge", at),
+            Ok(1)
+        );
+        let derived = stored("from-merge");
+        assert_eq!(derived.metadata.merged, Some(true));
+        assert!(derived.directory.join("parts/run-a/run.json").is_file());
+        let merged = stored("merged");
+        for (fault, said) in [
+            (
+                "fs.read_from#evidence-archive.read.read-from",
+                "run merged's evidence could not be read",
+            ),
+            (
+                "fs.create_dir_all#evidence-archive.write-entries.create-dir-all",
+                "Could not write the run's evidence",
+            ),
+            (
+                "fs.create_dir_all#run-merge.keep-part.create-dir-all",
+                "Could not keep the run's records",
+            ),
+            (
+                "fs.rename#lifecycle.publish-run-with-fault.rename",
+                "Could not publish the run",
+            ),
+            ("copy-release", "Could not release the lock"),
+        ] {
+            let failed = crate::fault::during(fault, || {
+                derive_run_of_files(&root, &merged, &named, "failed", at)
+            });
+            assert!(
+                failed.as_ref().is_err_and(|error| error.starts_with(said)),
+                "{fault}: {failed:?}"
+            );
+            let _ = fs::remove_dir_all(root.join(".supercov/runs/failed"));
+        }
+        assert!(
+            derive_run_of_files(&root, &merged, &named, "../escape", at)
+                .is_err_and(|error| error.starts_with("Cannot lock coverage store"))
+        );
+        // A record that cannot be read again.
+        rewrite_entry(
+            &root,
+            "run-b",
+            "worker/torn.json",
+            Some(b"{\"scope\":{}}\nnot json".to_vec()),
+        );
+        assert!(
+            derive_run_of_files(&root, &stored("run-b"), &named, "torn", at)
+                .is_err_and(|error| error
+                    .starts_with("run run-b's evidence could not be read: cannot merge malformed"))
         );
         fs::remove_dir_all(root).unwrap();
     }
