@@ -1522,6 +1522,23 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
     }
 }
 
+/// `program` with `mutant` applied in place, as StrykerJS's mutated program
+/// is: its node replaced, with no switch. Whether the node was found and
+/// replaced.
+pub(crate) fn apply_in_place<'a>(
+    allocator: &'a Allocator,
+    program: &mut oxc_ast::ast::Program<'a>,
+    mutant: &LedgerMutant,
+) -> bool {
+    let mut apply = Apply {
+        ast: AstBuilder::new(allocator),
+        mutant,
+        applied: false,
+    };
+    apply.visit_program(program);
+    apply.applied
+}
+
 /// `({ "name": value })["name"]`: `value`, named as its place names it.
 fn named<'a>(ast: AstBuilder<'a>, value: Expression<'a>, name: &str) -> Expression<'a> {
     let span = value.span();

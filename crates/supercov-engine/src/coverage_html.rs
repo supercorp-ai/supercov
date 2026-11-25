@@ -321,6 +321,22 @@ fn mutation_card(section: &Section) -> String {
             rest.len()
         );
     }
+    // Those proven equivalent, folded apart from the survivors: nothing to
+    // triage.
+    let equivalent = section
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.outcome == crate::mutation_report::Outcome::Equivalent)
+        .map(survivor)
+        .collect::<Vec<_>>();
+    if !equivalent.is_empty() {
+        let _ = write!(
+            card,
+            "<details><summary>{} proven equivalent: not run, not survivors, and not in the score</summary><ul>{}</ul></details>",
+            equivalent.len(),
+            equivalent.concat()
+        );
+    }
     card.push_str("</section>");
     card
 }
@@ -910,6 +926,13 @@ mod tests {
         ] {
             assert!(page.contains(expected), "{expected} in {page}");
         }
+        // Mutants proven equivalent, folded apart from the survivors.
+        let proven = section(vec![mutant("src/a.js", 7, false, Equivalent)], true);
+        let page = html(&view(), &BTreeMap::new(), "", Some(&proven));
+        assert!(
+            page.contains("<details><summary>1 proven equivalent: not run, not survivors, and not in the score</summary><ul><li><a href=\"#src/a.js:7\">src/a.js:7</a>"),
+            "{page}"
+        );
         // A pass with no verdict a score counts; a change with no mutants.
         let mut unscored = section(vec![mutant("src/a.js", 1, false, Error)], true);
         unscored.tally.mutation_score = None;

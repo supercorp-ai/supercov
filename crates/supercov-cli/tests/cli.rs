@@ -22572,7 +22572,9 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         .json();
     assert!(take_asked().is_empty(), "{pass}");
     assert_eq!(pass["summary"]["ran"], 0, "{pass}");
-    assert_eq!(pass["summary"]["killed"], killed.len(), "{pass}");
+    // And a mutant that compiles to the same code as one it ran is killed
+    // with it: `if (sum >= 50)` made `false` is its block emptied.
+    assert_eq!(pass["summary"]["killed"], killed.len() + 1, "{pass}");
     assert!(
         pass["summary"]["survived"].as_u64().unwrap() >= survived.len() as u64,
         "{pass}"
@@ -22608,7 +22610,8 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         .chain(&survived)
         .filter(|id| id.starts_with("src/cart.js:"))
         .count();
-    assert_eq!(kept["carried"]["mutants"], carried, "{kept}");
+    // With the mutant that took a verdict as it compiles alike.
+    assert_eq!(kept["carried"]["mutants"], carried + 1, "{kept}");
     assert_eq!(kept["summary"]["ran"], to_run, "{kept}");
     // Measured again as it is: the latest run lends every verdict, and the
     // shards' runs are not read.
@@ -23164,6 +23167,131 @@ fn vitest_mutants_project(label: &str) -> Project {
     project.git(&["init", "-q"]);
     project.commit("mutants");
     project
+}
+
+/// A strong pass compiles each JavaScript mutant's file and the original:
+/// a mutant that compiles to the original's code is equivalent and is not
+/// run, and mutants that compile to the same code as one another run once,
+/// each taking that run's verdict. The pass, its summary, the listing and
+/// the markdown report say so in plain words.
+#[cfg(unix)]
+#[test]
+fn mutants_that_compile_to_the_same_code_are_decided_once_or_not_run() {
+    let project = vitest_mutants_project("strong-same-code");
+    project.write(
+        "src/notify.js",
+        "export function size(empty) {\n  if (empty) {\n    return \"none\";\n  }\n  return \"none\";\n}\n\nexport function notify(log) {\n  if (log) {\n    log(\"sent\");\n  }\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/notify.test.js",
+        "import { expect, it, vi } from \"vitest\";\nimport { size, notify } from \"../src/notify.js\";\nit(\"sizes\", () => {\n  expect(size(true)).toBe(\"none\");\n  expect(size(false)).toBe(\"none\");\n});\nit(\"notifies\", () => {\n  const log = vi.fn();\n  notify(log);\n  expect(log).toHaveBeenCalledWith(\"sent\");\n  expect(notify(undefined)).toBe(1);\n});\n",
+    );
+    project.commit("notify");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--json",
+        "--file",
+        "src/notify.js",
+    ]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    // `if (empty)` made `true` or `false`, or its block emptied: each
+    // returns "none" as the original does.
+    assert_eq!(
+        reply["sameCode"],
+        serde_json::json!({"equivalent": 3, "equivalentToRun": 3, "duplicates": 1,
+            "savedMs": reply["sameCode"]["savedMs"], "notCompiled": []}),
+        "{reply}\n{said}"
+    );
+    assert!(
+        said.contains("[supercov] 3 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 3 of them would have run and did not\n")
+            && said.contains("[supercov] 1 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict\n"),
+        "{said}"
+    );
+    assert_eq!(reply["summary"]["equivalent"], 3, "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    // A pass over what has its verdicts compares nothing again, and says
+    // nothing of it; the summary still counts them.
+    let human = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--file",
+            "src/notify.js",
+        ])
+        .succeeds();
+    assert!(human.contains("  equivalent    3\n"), "{human}");
+    assert!(!human.contains("compiles to the same code"), "{human}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let strong = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {listed}"))["strong"]
+            .clone()
+    };
+    for id in [
+        "src/notify.js:2:7-2:12:ConditionalExpression:true",
+        "src/notify.js:2:7-2:12:ConditionalExpression:false",
+        "src/notify.js:2:14-4:4:BlockStatement:{}",
+    ] {
+        let verdict = strong(id);
+        assert_eq!(
+            (&verdict["status"], &verdict["reason"]),
+            (
+                &serde_json::json!("equivalent"),
+                &serde_json::json!("compiles-to-original")
+            ),
+            "{id}: {verdict}"
+        );
+    }
+    // The `if (log)` block emptied and its test made `false` are one
+    // program: the first runs, and the other takes its kill.
+    let kept = strong("src/notify.js:9:7-9:10:ConditionalExpression:false");
+    assert_eq!(kept["status"], "killed", "{kept}");
+    {
+        let id = "src/notify.js:9:12-11:4:BlockStatement:{}";
+        let verdict = strong(id);
+        assert_eq!(verdict["status"], "killed", "{id}: {verdict}");
+        assert_eq!(verdict["tests"], 0, "{id}: {verdict}");
+        assert_eq!(
+            verdict["reason"], "same-code-as:src/notify.js:9:7-9:10:ConditionalExpression:false",
+            "{id}: {verdict}"
+        );
+    }
+    // One line's mutants say why in plain words.
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/notify.js:2"])
+        .succeeds();
+    assert!(
+        line.contains("  strong: equivalent: compiles to the same code as the original: no test can tell it apart, so it was not run\n"),
+        "{line}"
+    );
+    // The comment folds them apart from the survivors.
+    let markdown = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/notify.js",
+            "--format",
+            "markdown",
+        ])
+        .succeeds();
+    assert!(
+        markdown.contains("<details><summary>3 mutants proven equivalent: no test can tell them from the original, so they are not run, not counted as survivors, and not in the score</summary>"),
+        "{markdown}"
+    );
 }
 
 /// `mutants test` over a Vitest run: each mutant the tests infected runs

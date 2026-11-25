@@ -1617,6 +1617,9 @@ fn mutants_text(
             if let Some(reason) = &mutant.weak.untestable_reason {
                 lines.push(format!("  untestable in practice: {reason}"));
             }
+            if let Some(reason) = supercov_engine::mutation_report::compiled_reason(mutant) {
+                lines.push(format!("  strong: {}: {reason}", strong_verdict(mutant)));
+            }
             lines.push(format!("  id:  {}", mutant.id));
         });
     } else {
@@ -1662,7 +1665,10 @@ fn mutants_text(
                 mutant.mutator,
                 change(mutant),
                 mutant.status.name(),
-                mutant.weak.reason,
+                // Decided by its compiled code: that says more than how
+                // far the tests got.
+                supercov_engine::mutation_report::compiled_reason(mutant)
+                    .unwrap_or_else(|| mutant.weak.reason.clone()),
                 untestable_suffix(mutant),
                 stryker(&mutant.stryker)
             )
