@@ -234,8 +234,7 @@ jobs:
         run: |
           cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
           node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "NEXTEST_PROFILE=affected" >> "$GITHUB_ENV"
-      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass --partition hash:${{ matrix.partition }}/${{ env.AFFECTED == 'true' && 1 || 3 }}
+      - run: cargo nextest run --workspace ${{ env.AFFECTED == 'true' && '--profile affected' || '' }} --no-fail-fast --no-tests=pass --partition hash:${{ matrix.partition }}/${{ env.AFFECTED == 'true' && 1 || 3 }}
         timeout-minutes: 30
       - if: matrix.partition == 1
         run: cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs

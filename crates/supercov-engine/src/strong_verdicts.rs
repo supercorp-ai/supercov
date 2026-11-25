@@ -76,11 +76,15 @@ pub struct Resumed {
 /// how many of how many. A mutant every candidate of which passed is left
 /// with none: it survived. A kill needs one failing candidate, which a
 /// candidate that passed is not; a survivor needs every candidate to pass,
-/// which the ones taken off did.
+/// which the ones taken off did. A Playwright mutant a server must start
+/// with resumes too: in the run whose rounds alone recorded its progress
+/// (`strong_tiers::resumes_alone`).
 pub fn resume(plan: &mut StrongPlan, progress: &Progress) -> Vec<Resumed> {
     let StrongPlan { tests, mutants, .. } = plan;
     let mut resumed = Vec::new();
-    for mutant in mutants.iter_mut().filter(|mutant| resumes(mutant, tests)) {
+    for mutant in mutants.iter_mut().filter(|mutant| {
+        resumes(mutant, tests) || crate::strong_tiers::resumes_alone(mutant, tests)
+    }) {
         let Some(passed) = progress.get(&mutant.id) else {
             continue;
         };
@@ -360,7 +364,13 @@ mod tests {
         });
         plan.mutants
             .push(mutant("page", "src/a.js", &[3, 4], &["e2e/a.spec.js"]));
+        // A Playwright mutant a server starts with: its rounds alone
+        // recorded what it passed.
+        let mut alone = mutant("alone", "src/a.js", &[3, 4], &[]);
+        alone.server_wide = Some(ServerWide::ByTime);
+        plan.mutants.push(alone);
         let passed = progress(&[
+            ("alone", &["p2"]),
             ("partway", &["t1", "t3"]),
             ("done", &["t1", "t2"]),
             ("whole", &["t1"]),
@@ -389,6 +399,11 @@ mod tests {
                     passed: 1,
                     candidates: 2
                 },
+                Resumed {
+                    id: "alone".into(),
+                    passed: 1,
+                    candidates: 2
+                },
             ]
         );
         let left = |id: &str| {
@@ -410,6 +425,7 @@ mod tests {
         assert!(settles(&verdict("killed")) && settles(&verdict("survived")));
         assert!(!settles(&verdict("error")));
         assert_eq!(left("page"), [4]);
+        assert_eq!(left("alone"), [3]);
         // The plan says how many each passed before: the driver takes a
         // mutant that lived through a candidate as unlikely to fail.
         let before = |id: &str| {

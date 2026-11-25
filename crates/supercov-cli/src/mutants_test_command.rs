@@ -560,6 +560,8 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         )));
     }
     let total = plan.mutants.len();
+    // How many candidates a first tier holds: the run's own kills say.
+    let first_tier = supercov_engine::strong_tiers::size(&plan, &read_saved(run));
     narrow(&mut plan, &root, run, options)?;
     let narrowed = plan.clone();
     let mut saved = read_saved(run);
@@ -628,6 +630,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         &mut progress,
         options,
         factor,
+        first_tier,
     )?;
     let verdicts = read_saved(run);
     let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
@@ -649,6 +652,17 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     }
     if !resumed.is_empty() {
         data["resumed"] = resumed_json(&resumed);
+    }
+    // The mutants asked about that some candidates let live and the rest
+    // have not run with yet: not survivors, and not in the score.
+    let so_far = asked
+        .iter()
+        .filter(|(id, _)| !verdicts.contains_key(id))
+        .filter_map(|(id, _)| progress.get(id))
+        .filter(|passed| !passed.is_empty())
+        .count();
+    if so_far > 0 {
+        data["survivedSoFar"] = json!({"mutants": so_far, "firstTier": first_tier});
     }
     let limited = asked
         .iter()
@@ -1021,6 +1035,13 @@ fn plan_text(data: &Value) -> String {
                 data["budget"]["seconds"]
             ));
         }
+        if let Some(so_far) = data["survivedSoFar"]["mutants"].as_u64() {
+            extra.push_str(&format!(
+                "  survived so far {so_far}: lived through some candidates (a first tier holds {}), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs {} mutants --status survived-so-far)\n",
+                data["survivedSoFar"]["firstTier"],
+                data["run"].as_str().unwrap_or("")
+            ));
+        }
         if let Some(resumed) = data["resumed"]["mutants"].as_u64() {
             extra.push_str(&format!(
                 "  {resumed} mutant(s) resumed where earlier passes left them: {} candidate run(s) they had passed were not run again\n",
@@ -1259,6 +1280,24 @@ pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, 
     saved_document(run)
         .map(|saved| saved.mutants)
         .unwrap_or_default()
+}
+
+/// What the run's listings show of its strong pass, by mutant id: each
+/// verdict, and each mutant some candidates let live with the rest not run
+/// with yet, as `survived-so-far` (`strong_tiers::survived_so_far`).
+pub(crate) fn read_shown(run: &StoredRun) -> std::collections::BTreeMap<String, Value> {
+    let Some(document) = saved_document(run) else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut shown =
+        supercov_engine::strong_tiers::survived_so_far(&document.mutants, &document.progress);
+    shown.extend(
+        document
+            .mutants
+            .into_iter()
+            .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data"))),
+    );
+    shown
 }
 
 /// The run's saved verdicts as written, where it has any that read.
@@ -1540,12 +1579,26 @@ struct Saving {
     before: std::collections::BTreeMap<String, Verdict>,
     /// The candidates each open mutant had passed before.
     progress: Passed,
+    /// The first tier each mutant runs in this pass, by test id: its
+    /// `survived` is progress (`strong_tiers::lived_through`).
+    tiers: Tiers,
 }
 
+/// Each mutant's first tier in a pass, by mutant id: its candidates' ids.
+type Tiers = std::collections::BTreeMap<String, Vec<String>>;
+
 impl Saving {
+    /// The driver's verdicts so far, and the candidates the mutants it left
+    /// open passed: a first tier's survivor among the latter.
+    fn results(&self, results: &Path) -> (std::collections::BTreeMap<String, Verdict>, Passed) {
+        let (mut verdicts, _, mut passed) = read_results(results);
+        supercov_engine::strong_tiers::lived_through(&mut verdicts, &mut passed, &self.tiers);
+        (verdicts, passed)
+    }
+
     /// Saves what was decided before with what the driver wrote so far.
     fn save(&self, results: &Path) -> Result<(), String> {
-        let (verdicts, _, passed) = read_results(results);
+        let (verdicts, passed) = self.results(results);
         let mut all = self.before.clone();
         all.extend(verdicts);
         let mut progress = self.progress.clone();
@@ -1592,7 +1645,7 @@ impl Progress {
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(SAVE_INTERVAL.min(interval))
             {
-                let verdicts = read_results(&results).0;
+                let verdicts = saving.results(&results).0;
                 if verdicts.len() > seen {
                     seen = verdicts.len();
                     // A save that fails here is made again when the pass ends.
@@ -1871,7 +1924,10 @@ fn interrupted(exit: i32) -> bool {
 }
 
 /// Runs the plan's mutants and saves every verdict into the run, as it
-/// comes.
+/// comes. A mutant with more than `first_tier` candidates runs its first
+/// tier (`strong_tiers`) in the first round, every such mutant before any
+/// runs the rest.
+#[allow(clippy::too_many_arguments)]
 fn execute(
     root: &Path,
     run: &StoredRun,
@@ -1880,13 +1936,8 @@ fn execute(
     progress: &mut Passed,
     options: &Options,
     factor: f64,
+    first_tier: usize,
 ) -> Result<Executed, Stop> {
-    // How many candidates each resumed mutant passed before this pass: a
-    // survivor's verdict counts them with the ones it passes now.
-    let passed_before = progress
-        .iter()
-        .map(|(id, tests)| (id.clone(), tests.len() as u64))
-        .collect::<std::collections::BTreeMap<_, _>>();
     // Decided without running.
     for mutant in &plan.mutants {
         saved.extend(
@@ -1969,17 +2020,55 @@ fn execute(
         // The first process said to have run out of heap: what ended the
         // command before the verdicts of the mutants left.
         let mut ran_out = None;
+        // A first tier for each mutant with many candidates: every mutant
+        // runs its likeliest killers before any runs the rest.
+        let tiers = supercov_engine::strong_tiers::first_tiers(&remaining, &plan.tests, first_tier);
+        // The first round runs them: each with its first tier, the cheapest
+        // first. The rounds after run what is left.
+        let mut tiered = (!tiers.is_empty()).then(|| {
+            let mut round = StrongPlan {
+                mutant_set: plan.mutant_set.clone(),
+                tests: plan.tests.clone(),
+                mutants: remaining
+                    .iter()
+                    .map(|mutant| PlannedMutant {
+                        candidates: tiers.get(&mutant.id).unwrap_or(&mutant.candidates).clone(),
+                        ..mutant.clone()
+                    })
+                    .collect(),
+            };
+            round.cheapest_first();
+            let by_id = tiers
+                .iter()
+                .map(|(id, tier)| {
+                    let tier = tier
+                        .iter()
+                        .map(|candidate| plan.tests[candidate.test].id.clone())
+                        .collect();
+                    (id.clone(), tier)
+                })
+                .collect::<Tiers>();
+            (round.mutants, by_id)
+        });
+        // How many candidates each resumed mutant passed before this pass: a
+        // survivor's verdict counts them with the ones it passes now.
+        let mut passed_before = passed_counts(progress);
+        let no_tiers = Tiers::new();
         for _ in 0..PASSES {
             if remaining.is_empty() || budget_spent() {
                 break;
             }
             let before = remaining.len();
+            let (round, round_tiers) = match &tiered {
+                Some((round, tiers)) => (round.as_slice(), tiers),
+                None => (remaining.as_slice(), &no_tiers),
+            };
             // Each language's mutants go to its own driver, one after another
             // (Rust compiled to wasm under JavaScript tests to JavaScript's).
             let driver_of = |mutant: &supercov_engine::strong_plan::PlannedMutant| {
                 supercov_engine::strong_driver::driver_of(mutant, &plan.tests).to_owned()
             };
-            let languages = remaining.iter().map(driver_of).collect::<BTreeSet<_>>();
+            let languages = round.iter().map(driver_of).collect::<BTreeSet<_>>();
             // A pass with mutants left has a language of them at least.
             languages
                 .into_iter()
@@ -1992,10 +2081,25 @@ fn execute(
                         .map_err(|e| format!("{}: {e}", work.display()))?;
                     let results = work.join("results.jsonl");
                     let ran = run_language(
-                        root, run, &plan, &remaining, &language, &command, &work, saved, progress,
-                        budget_at, factor,
+                        root,
+                        run,
+                        &plan,
+                        round,
+                        &language,
+                        &command,
+                        &work,
+                        saved,
+                        progress,
+                        budget_at,
+                        factor,
+                        round_tiers,
                     );
-                    let (mut verdicts, passes, passed) = read_results(&results);
+                    let (mut verdicts, passes, mut passed) = read_results(&results);
+                    supercov_engine::strong_tiers::lived_through(
+                        &mut verdicts,
+                        &mut passed,
+                        round_tiers,
+                    );
                     for (id, verdict) in &mut verdicts {
                         if verdict.status == "survived" {
                             verdict.tests += passed_before.get(id).copied().unwrap_or(0);
@@ -2015,7 +2119,6 @@ fn execute(
                     add_progress(progress, passed);
                     settle_progress(progress, saved);
                     executed.passes.extend(passes);
-                    remaining.retain(|mutant| !saved.contains_key(&mutant.id));
                     save(run, &plan.mutant_set, saved, progress)?;
                     exit = ran?;
                     executed.command_exit = Some(exit);
@@ -2026,6 +2129,22 @@ fn execute(
                     }
                     Ok(())
                 })?;
+            remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+            // The rest of each first tier's survivor, from where it is.
+            if tiered.take().is_some() {
+                let mut rest = StrongPlan {
+                    mutant_set: plan.mutant_set.clone(),
+                    tests: plan.tests.clone(),
+                    mutants: std::mem::take(&mut remaining),
+                };
+                let resumed = supercov_engine::strong_verdicts::resume(&mut rest, progress);
+                saved.extend(passed_every_candidate(&resumed));
+                settle_progress(progress, saved);
+                remaining = rest.mutants;
+                remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+                passed_before = passed_counts(progress);
+                continue;
+            }
             if budget_spent() || remaining.len() == before {
                 break;
             }
@@ -2055,6 +2174,14 @@ fn execute(
     Ok(executed)
 }
 
+/// How many candidates each mutant passed, by id.
+fn passed_counts(progress: &Passed) -> std::collections::BTreeMap<String, u64> {
+    progress
+        .iter()
+        .map(|(id, tests)| (id.clone(), tests.len() as u64))
+        .collect()
+}
+
 /// One driver's share of the plan, run in `work`, its verdicts saved into
 /// the run as they come.
 #[allow(clippy::too_many_arguments)]
@@ -2070,6 +2197,7 @@ fn run_language(
     progress: &Passed,
     budget_at: Option<std::time::Instant>,
     factor: f64,
+    tiers: &Tiers,
 ) -> Result<i32, String> {
     let plan_path = work.join("plan.json");
     let results = work.join("results.jsonl");
@@ -2119,6 +2247,7 @@ fn run_language(
             mutant_set: plan.mutant_set.clone(),
             before: saved.clone(),
             progress: progress.clone(),
+            tiers: tiers.clone(),
         },
         budget_at,
     );

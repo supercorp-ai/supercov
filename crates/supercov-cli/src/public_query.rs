@@ -507,6 +507,7 @@ fn parse_options(
                                 name.as_str(),
                                 "killed"
                                     | "survived"
+                                    | "survived-so-far"
                                     | "timeout"
                                     | "no-coverage"
                                     | "error"
@@ -528,7 +529,7 @@ fn parse_options(
                                     )
                                 } else {
                                     format!(
-                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent, or a strong verdict: killed, survived, timeout, no-coverage, error or unviable"
+                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent, or a strong verdict: killed, survived, survived-so-far, timeout, no-coverage, error or unviable"
                                     )
                                 };
                                 return Err(PublicQueryError::invalid(
