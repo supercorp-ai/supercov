@@ -25607,6 +25607,125 @@ fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
     assert_eq!(logged["strong"]["tests"], 34, "{reply}");
 }
 
+/// A Playwright pass whose harness runs two slots, one given a spec file
+/// with a serial describe that the pass spreads to the other, stops at its
+/// budget, run as a later round's shard is: the harness starts each slot's
+/// `playwright test` in a process group of its own and, told to stop, only
+/// waits for them, yet the stop reaches both slots and their servers, and
+/// the command ends within seconds of its budget (about 1 s here).
+#[cfg(unix)]
+#[test]
+fn a_playwright_pass_with_serial_files_stops_at_its_budget() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let ports = [0, 1].map(|_| {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    });
+    let project = Project::empty("strong-playwright-budget");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-budget", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"static/index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/public/log.js\"></script><script>setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 1500);</script></body>\n",
+    );
+    // What the page logs: no test reads it, so every mutant survives every
+    // candidate.
+    project.write(
+        "public/log.js",
+        &(1..=20)
+            .map(|at| format!("console.log(\"line {at}\");\n"))
+            .collect::<String>(),
+    );
+    project.write(
+        "playwright.config.js",
+        "const port = Number(process.env.SLOT_PORT);\nexport default {\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: { baseURL: `http://127.0.0.1:${port}` },\n  webServer: { command: \"node support/server.js\", url: `http://127.0.0.1:${port}/health`, reuseExistingServer: false, timeout: 20000, env: { PORT: String(port) } },\n};\n",
+    );
+    project.write(
+        "tests/serial.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest.describe.configure({ mode: \"serial\" });\nfor (const step of [1, 2, 3, 4, 5, 6]) {\n  test(`serial ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\n",
+    );
+    project.write(
+        "tests/zz-other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"other\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n});\n",
+    );
+    // Two slots, each a `playwright test` of its own share with its own
+    // server; each lists its share first, as a harness that shares tests out
+    // does.
+    project.write(
+        "harness.mjs",
+        &format!(
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\n// Like a harness that tears its slots down itself: a termination does not\n// end it, and each slot is in a process group of its own.\nprocess.on(\"SIGTERM\", () => console.log(\"[harness] told to stop; waiting for the slots\"));\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\n// The second slot starts first, and the first (the one given the serial file)\n// once the second has run a mutant: what the second takes of the serial file\n// is then the same however fast either starts.\nlet release;\nconst secondRan = new Promise((resolve) => {{\n  release = resolve;\n  setTimeout(resolve, 60_000);\n  // Measuring, nothing waits.\n  if (!process.env.SUPERCOV_STRONG_PLAN) resolve();\n}});\nconst run = ([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env, detached: true }});\n    const say = (chunk) => {{\n      for (const line of String(chunk).split(\"\\n\")) {{\n        if (!line.trim()) continue;\n        console.log(`[slot ${{at + 1}}] ${{line}}`);\n        if (at === 1 && line.includes('\" lives (')) release();\n      }}\n    }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => {{\n      release();\n      done(code ?? 1);\n    }});\n  }});\n}};\nconst codes = await Promise.all([secondRan.then(() => run(slots[0], 0)), run(slots[1], 1)]);\nprocess.exit(Math.max(...codes));\n",
+            ports[0], ports[1]
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright spread");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "node", "harness.mjs"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    // A budget far shorter than the pass: it stops within the budget and a
+    // short grace, and keeps what it decided and what its open mutants
+    // passed.
+    let budget = 25;
+    let started = std::time::Instant::now();
+    let out = project.supercov_with(
+        &[
+            "mutants",
+            "--shard",
+            "1/1",
+            "--budget",
+            &budget.to_string(),
+            "--",
+            "node",
+            "harness.mjs",
+        ],
+        &[roots, ("SUPERCOV_VERBOSE", "1")],
+    );
+    let took = started.elapsed();
+    let said = format!("{}\n{}", out.stdout(), out.stderr());
+    eprintln!("budget {budget} s; the command took {took:?}");
+    assert!(
+        took < std::time::Duration::from_secs(budget + 15),
+        "took {took:?}\n{said}"
+    );
+    assert!(
+        said.contains(&format!("budget of {budget} s spent")),
+        "{said}"
+    );
+}
+
 /// A harness that runs two `playwright test` slots, each with its own
 /// server, and keeps a spec file with a serial describe in the first: in a
 /// strong pass that file runs in the second slot too, with the harness and
@@ -29269,6 +29388,36 @@ fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
     );
 }
 
+/// A command still running past its budget is ended by the budget's own
+/// deadline, whatever holds it up: here the progress loop that stops a pass
+/// at its budget never gets to (it stalls), and the pass would never end on
+/// its own. It ends about 45 s after the budget, and says why.
+#[cfg(unix)]
+#[test]
+fn a_command_held_up_past_its_budget_is_ended_by_the_budget_s_deadline() {
+    let project = vitest_slow_project_waiting("strong-budget-deadline", 10_000);
+    let started = std::time::Instant::now();
+    let held = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--budget", "3"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "strong-progress-stalls,strong-pass-lingers",
+        )],
+    );
+    let took = started.elapsed();
+    let said = held.stderr();
+    assert_eq!(held.code(), 143, "{said}");
+    assert!(
+        took >= std::time::Duration::from_secs(3 + 45)
+            && took < std::time::Duration::from_secs(3 + 45 + 15),
+        "{took:?}\n{said}"
+    );
+    assert!(
+        said.contains("[supercov] still running 45 s after its budget was spent, so it is ended"),
+        "{said}"
+    );
+}
+
 /// `--budget <seconds>`: once it is spent the pass stops and ends as one
 /// that finished, the verdicts it reached saved, the mutants left without
 /// one for the next pass -- not errors, and not a pass that ran nothing.
@@ -29354,7 +29503,7 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
     assert!(
         said.contains(
             "did not end within 8 s of being told to stop (its budget spent), so it is ended"
-        ),
+        ) && said.contains("[supercov] budget spent, "),
         "{said}"
     );
     // Measured first, as the latest run recorded no values for its

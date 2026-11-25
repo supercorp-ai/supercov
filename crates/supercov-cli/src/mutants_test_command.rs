@@ -1645,6 +1645,11 @@ impl Progress {
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(SAVE_INTERVAL.min(interval))
             {
+                // A loop held up here (a test makes one): the budget's own
+                // deadline still ends the process (`hold_to_budget`).
+                while supercov_engine::fault::injected("strong-progress-stalls") {
+                    std::thread::sleep(SAVE_INTERVAL);
+                }
                 let verdicts = saving.results(&results).0;
                 if verdicts.len() > seen {
                     seen = verdicts.len();
@@ -1685,6 +1690,12 @@ impl Progress {
                     continue;
                 };
                 if stopping.is_none() {
+                    if budget_spent() {
+                        eprintln!(
+                            "[supercov] budget spent, {} s into the pass: stopping it; what it decided is saved into the run",
+                            started.elapsed().as_secs()
+                        );
+                    }
                     // From here the command's servers go down under the
                     // tests still running: the driver trusts no test that
                     // ends after it (a poll earlier, for a signal the
@@ -1734,6 +1745,32 @@ fn now_ms() -> u64 {
 /// The supervisor stops the command's processes within its own grace of
 /// the signal (5 s); what a pass waits on after that does not hold it.
 const STOP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How long past its budget a command may still be running, whatever holds
+/// it up -- the progress loop itself, the work after the pass -- before the
+/// budget's own deadline ends it (`hold_to_budget`): well past the progress
+/// loop's patience, and the summary a large run's pass prints after its
+/// stop (its listing reads the run's index, 15 s on a 65,000-mutant run).
+const BUDGET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Ends the process once `budget_at` and [`BUDGET_DEADLINE`] have passed,
+/// from a thread that does nothing else: the progress loop stops a pass at
+/// its budget and ends it [`STOP_PATIENCE`] later, but only while that loop
+/// runs, and a job's time limit counts everything. The verdicts were saved
+/// into the run as they came.
+fn hold_to_budget(budget_at: std::time::Instant) {
+    std::thread::spawn(move || {
+        let deadline = budget_at + BUDGET_DEADLINE;
+        std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+        eprintln!(
+            "[supercov] still running {} s after its budget was spent, so it is ended: the verdicts it reached were saved into the run as they came, and the next pass runs the rest",
+            BUDGET_DEADLINE.as_secs()
+        );
+        std::process::exit(
+            supercov_engine::process_supervision::ForwardedSignal::Sigterm.exit_code(),
+        )
+    });
+}
 
 /// Set once the pass's budget is spent: the termination that stops the
 /// pass is the budget's, and the pass ends as one that finished.
@@ -2012,6 +2049,10 @@ fn execute(
         });
         if budget_at.is_some_and(|at| std::time::Instant::now() >= at) {
             BUDGET_SPENT.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // One measuring spent already runs nothing, and says so.
+        if let Some(at) = budget_at.filter(|at| std::time::Instant::now() < *at) {
+            hold_to_budget(at);
         }
         // A pass that stops before its end (a test worker that would not
         // stop even when forced) leaves its verdicts; the next pass runs
