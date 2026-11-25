@@ -457,6 +457,7 @@ mod tests {
             duration_ms: None,
             span: None,
             runnable: true,
+            failed: false,
         })
         .to_vec();
         let mutant = |language: &str, candidates: &[usize]| PlannedMutant {

@@ -210,6 +210,7 @@ mod tests {
             duration_ms,
             span: None,
             runnable: true,
+            failed: false,
         }
     }
 

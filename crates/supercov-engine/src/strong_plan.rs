@@ -55,6 +55,12 @@ pub struct PlannedTest {
     /// Whether every attempt passed in the measured run: only such a test
     /// can be a candidate.
     pub runnable: bool,
+    /// Whether an attempt failed or timed out in the measured run (an
+    /// expected failure that failed passed): a reason its command exited
+    /// non-zero that leaves the other tests' evidence whole. A skipped,
+    /// interrupted or unfinished test is none.
+    #[serde(skip)]
+    pub failed: bool,
 }
 
 /// Why a test is one of a mutant's candidates.
@@ -380,6 +386,18 @@ fn role_of(raw: &RawTestResult) -> &str {
 
 fn passed(raw: &RawTestResult) -> bool {
     raw.status.as_deref() == Some("passed") && !raw.flaky
+}
+
+/// An attempt that failed as its runner reports a test failing: it failed,
+/// timed out, or passed where it was expected to fail.
+fn failed(raw: &RawTestResult) -> bool {
+    let expected_failure = raw.expected_status.as_deref() == Some("failed");
+    match raw.status.as_deref() {
+        Some("failed") => !expected_failure,
+        Some("passed") => expected_failure,
+        Some("timedOut") => true,
+        _ => false,
+    }
 }
 
 /// A Python test the measured run skipped: it still runs in a strong pass,
@@ -735,6 +753,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 duration_ms: None,
                 span: raw.span,
                 runnable: true,
+                failed: false,
             });
             runnable.push(true);
             stated.push(false);
@@ -752,6 +771,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             runnable[index] &= passed(raw) || skipped_python(raw);
             stated[index] = true;
         }
+        tests[index].failed |= failed(raw);
         // An attempt has two records under Playwright, the reporter's (its
         // status, no span) and the fixture's (its evidence, its span), in
         // either order: the span is the first attempt's, whichever record
@@ -1874,6 +1894,61 @@ mod tests {
         );
     }
 
+    /// A test failed where an attempt failed or timed out, or passed where
+    /// it was expected to fail: what explains a command that exited
+    /// non-zero. A skipped, interrupted or unfinished test, a flaky one that
+    /// passed in the end, and an expected failure that failed did not.
+    #[test]
+    fn a_test_failed_where_an_attempt_failed_as_its_runner_reports_it() {
+        let with = |id: &str, status: &str, expected: Option<&str>, flaky: bool| {
+            let mut raw = record(id, "test", None, &[]);
+            raw.status = Some(status.into());
+            raw.expected_status = expected.map(str::to_owned);
+            raw.flaky = flaky;
+            raw
+        };
+        let raw_results = [
+            with("failed", "failed", None, false),
+            with("timed-out", "timedOut", None, false),
+            with("passed-expected-to-fail", "passed", Some("failed"), false),
+            with("failed-as-expected", "failed", Some("failed"), false),
+            with("passed", "passed", Some("passed"), false),
+            with("flaky", "passed", None, true),
+            with("skipped", "skipped", None, false),
+            with("interrupted", "interrupted", None, false),
+            with("unfinished", "unknown", None, false),
+            // A retry that failed, of a test whose first attempt passed.
+            with("retried", "passed", None, false),
+            with("retried", "failed", None, false),
+        ];
+        let plan = plan(&raw_results, listed(Vec::new(), &[])).unwrap();
+        assert_eq!(
+            plan.tests
+                .iter()
+                .map(|test| (test.id.as_str(), test.failed))
+                .collect::<Vec<_>>(),
+            [
+                ("failed", true),
+                ("timed-out", true),
+                ("passed-expected-to-fail", true),
+                ("failed-as-expected", false),
+                ("passed", false),
+                ("flaky", false),
+                ("skipped", false),
+                ("interrupted", false),
+                ("unfinished", false),
+                ("retried", true),
+            ]
+        );
+        // Not part of the plan's JSON.
+        assert!(
+            serde_json::to_value(&plan.tests[0])
+                .unwrap()
+                .get("failed")
+                .is_none()
+        );
+    }
+
     /// Each mutant's candidates are the tests whose own evidence, with what
     /// their file's modules did as they loaded, may infect it: module-level
     /// code takes every test of the file it ran in, a setup no file owns
@@ -2453,6 +2528,7 @@ mod tests {
                     duration_ms: *duration,
                     span: None,
                     runnable: true,
+                    failed: false,
                 })
                 .collect(),
             mutants: mutants
