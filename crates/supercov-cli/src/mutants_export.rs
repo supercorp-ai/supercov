@@ -265,6 +265,7 @@ pub(crate) fn markdown(
             (tally.strong.unviable, "unviable"),
             (tally.strong.error, "error"),
             (tally.strong.not_run, "not run (no driver)"),
+            (tally.strong.survived_so_far, "survived so far"),
             (tally.strong.pending, "no strong verdict"),
         ]
         .into_iter()
@@ -302,6 +303,7 @@ pub(crate) fn markdown(
                 diff.merge_base.chars().take(12).collect::<String>(),
                 if counts.is_empty() { "" } else { " · " },
             ));
+            text.push_str(&unrun_lines(&diff.unrun_lines));
         }
         None => {
             text.push_str("### Mutants\n\n");
@@ -327,16 +329,15 @@ pub(crate) fn markdown(
             .collect::<Vec<_>>()
             .join(" or ")
     };
-    if rows.is_empty() {
-        // Nothing the tests leave alive, in the words a comment's reader uses.
-        let said = if asked_statuses || strong {
-            format!("No mutant is {names}.")
-        } else {
-            "No mutant is left alive: none is not infected or not reached.".to_owned()
-        };
-        text.push_str(&format!("\n{said}\n"));
-        return text;
-    }
+    // What only changes a log line is set aside, folded: a reader triages
+    // the rest first.
+    let (logged, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|mutant| mutant.log_only);
+    // Those a first tier of candidates let live, apart: no verdict yet.
+    let so_far = data
+        .mutants
+        .iter()
+        .filter(|mutant| report::outcome(mutant) == Outcome::SurvivedSoFar)
+        .collect::<Vec<_>>();
     let weak_status = |mutant: &supercov_engine::mutants_query::MutantEntry| {
         format!(
             "{}{}",
@@ -353,45 +354,148 @@ pub(crate) fn markdown(
             mutant.file, mutant.span.start[0], mutant.span.start[1]
         ))
     };
-    if strong {
-        text.push_str(
-            "\n| Where | Mutant | Weak | Strong | Why |\n| --- | --- | --- | --- | --- |\n",
-        );
-        text.extend(rows.iter().take(MARKDOWN_ROWS).map(|mutant| {
-            let outcome = report::outcome(mutant);
-            format!(
-                "| {} | {} | {} | {} | {} |\n",
-                place(mutant),
-                code(&report::change(mutant)),
-                cell(&weak_status(mutant)),
-                cell(match outcome {
-                    Outcome::Pending => "—",
-                    other => other.name(),
-                }),
-                cell(&report::why(mutant, true)),
-            )
-        }));
-    } else {
-        text.push_str("\n| Where | Mutant | Status | Why |\n| --- | --- | --- | --- |\n");
-        text.extend(rows.iter().take(MARKDOWN_ROWS).map(|mutant| {
-            format!(
-                "| {} | {} | {} | {} |\n",
-                place(mutant),
-                code(&report::change(mutant)),
-                cell(&weak_status(mutant)),
-                cell(&mutant.weak.reason),
-            )
-        }));
-    }
-    if rows.len() > MARKDOWN_ROWS {
-        let mut asked = request.clone();
-        if !strong {
-            asked.mutants.statuses = wanted.clone();
+    // How many of the run's tests ran its line: none is code no test runs.
+    let ran = |mutant: &supercov_engine::mutants_query::MutantEntry| {
+        mutant
+            .line_tests
+            .map_or_else(|| "—".to_owned(), |tests| tests.to_string())
+    };
+    let table = |rows: &[&supercov_engine::mutants_query::MutantEntry]| {
+        let mut table = String::new();
+        if strong {
+            table.push_str(
+                "\n| Where | Mutant | Weak | Strong | Tests on its line | Why |\n| --- | --- | --- | --- | --- | --- |\n",
+            );
+            table.extend(rows.iter().take(MARKDOWN_ROWS).map(|mutant| {
+                let outcome = report::outcome(mutant);
+                format!(
+                    "| {} | {} | {} | {} | {} | {} |\n",
+                    place(mutant),
+                    code(&report::change(mutant)),
+                    cell(&weak_status(mutant)),
+                    cell(match outcome {
+                        Outcome::Pending => "—",
+                        other => other.name(),
+                    }),
+                    ran(mutant),
+                    cell(&report::why(mutant, true)),
+                )
+            }));
+        } else {
+            table.push_str(
+                "\n| Where | Mutant | Status | Tests on its line | Why |\n| --- | --- | --- | --- | --- |\n",
+            );
+            table.extend(rows.iter().take(MARKDOWN_ROWS).map(|mutant| {
+                format!(
+                    "| {} | {} | {} | {} | {} |\n",
+                    place(mutant),
+                    code(&report::change(mutant)),
+                    cell(&weak_status(mutant)),
+                    ran(mutant),
+                    cell(&mutant.weak.reason),
+                )
+            }));
         }
+        table
+    };
+    // A folded table, with how many it leaves out.
+    let folded = |summary: String, rows: &[&supercov_engine::mutants_query::MutantEntry]| {
+        let mut folded = format!("\n<details><summary>{summary}</summary>\n{}", table(rows));
+        if rows.len() > MARKDOWN_ROWS {
+            folded.push_str(&format!("\n_…and {} more_\n", rows.len() - MARKDOWN_ROWS));
+        }
+        folded.push_str("\n</details>\n");
+        folded
+    };
+    if rows.is_empty() {
+        // Nothing the tests leave alive, in the words a comment's reader uses.
+        let said = if asked_statuses || strong {
+            format!("No mutant is {names}.")
+        } else {
+            "No mutant is left alive: none is not infected or not reached.".to_owned()
+        };
         text.push_str(&format!(
-            "\n_…and {} more: `{}`_\n",
-            rows.len() - MARKDOWN_ROWS,
-            crate::human_query::mutants_command(&asked, data, data.file.as_deref())
+            "\n{said}{}\n",
+            if logged.is_empty() {
+                ""
+            } else {
+                " Those below change only what is logged."
+            }
+        ));
+    } else {
+        text.push_str(&table(&rows));
+        if rows.len() > MARKDOWN_ROWS {
+            let mut asked = request.clone();
+            if !strong {
+                asked.mutants.statuses = wanted.clone();
+            }
+            text.push_str(&format!(
+                "\n_…and {} more: `{}`_\n",
+                rows.len() - MARKDOWN_ROWS,
+                crate::human_query::mutants_command(&asked, data, data.file.as_deref())
+            ));
+        }
+    }
+    if !logged.is_empty() {
+        text.push_str(&folded(
+            format!(
+                "{} more that {} only what is logged: wholly in a logging call's arguments, or in what makes a logger",
+                logged.len(),
+                if logged.len() == 1 { "changes" } else { "change" },
+            ),
+            &logged,
+        ));
+    }
+    if !so_far.is_empty() {
+        text.push_str(&folded(
+            format!(
+                "{} survived so far: each lived through a first tier of the tests that ran it, and the rest have not run with it yet; not survivors, and not in the score",
+                plural(so_far.len(), "mutant"),
+            ),
+            &so_far,
+        ));
+    }
+    text
+}
+
+/// The changed lines of code no test of the run ran, file by file, as runs
+/// of lines; nothing where every one ran.
+fn unrun_lines(unrun: &std::collections::BTreeMap<String, Vec<u32>>) -> String {
+    if unrun.is_empty() {
+        return String::new();
+    }
+    let total = unrun.values().map(Vec::len).sum::<usize>();
+    let mut text = format!(
+        "\n**{} no test ran**, which no mutant on them can tell apart:\n\n",
+        plural(total, "changed line")
+    );
+    unrun.iter().take(MARKDOWN_ROWS).for_each(|(file, lines)| {
+        // Each run of consecutive lines as `a–b`.
+        let runs = lines
+            .iter()
+            .fold(Vec::<(u32, u32)>::new(), |mut runs, line| {
+                match runs.last_mut() {
+                    Some((_, end)) if *end + 1 == *line => *end = *line,
+                    _ => runs.push((*line, *line)),
+                }
+                runs
+            })
+            .into_iter()
+            .map(|(start, end)| {
+                if start == end {
+                    start.to_string()
+                } else {
+                    format!("{start}–{end}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!("- {}: {runs}\n", code(file)));
+    });
+    if unrun.len() > MARKDOWN_ROWS {
+        text.push_str(&format!(
+            "- _…and {}_\n",
+            plural(unrun.len() - MARKDOWN_ROWS, "more file")
         ));
     }
     text
@@ -495,6 +599,7 @@ mod tests {
         use supercov_engine::mutants_query::{MutantEntry, MutantSpan, WeakResult};
         MutantEntry {
             log_only: false,
+            line_tests: None,
             id: format!("src/a.py:{line}:3-{line}:9:ArithmeticOperator:-"),
             file: "src/a.py".into(),
             span: MutantSpan {
@@ -562,11 +667,11 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("| Where | Mutant | Weak | Strong | Why |"),
+            text.contains("| Where | Mutant | Weak | Strong | Tests on its line | Why |"),
             "{text}"
         );
         assert!(
-            text.contains("| `src/a.py:1:3` | `a + b → a - b` | infected | survived | every test that reached it passed with it in place (2 tests ran) |"),
+            text.contains("| `src/a.py:1:3` | `a + b → a - b` | infected | survived | — | every test that reached it passed with it in place (2 tests ran) |"),
             "{text}"
         );
         assert_eq!(text.matches("| `src/a.py:").count(), 25, "{text}");
@@ -580,7 +685,9 @@ mod tests {
         asked.mutants.statuses = vec![NotInfected];
         let text = markdown(&asked, &data(mutants.clone()));
         assert!(
-            text.contains("| `src/a.py:30:3` | `a + b → a - b` | not infected | — | weak reason |"),
+            text.contains(
+                "| `src/a.py:30:3` | `a + b → a - b` | not infected | — | — | weak reason |"
+            ),
             "{text}"
         );
         assert_eq!(text.matches("| `src/a.py:").count(), 1, "{text}");
@@ -623,6 +730,99 @@ mod tests {
             &data(vec![mutant(1, Infected, Some(json!({"status": "error"})))]),
         );
         assert!(text.contains("No mutation score: no mutant was killed, timed out, survived or left uncovered · 1 error\n"), "{text}");
+    }
+
+    /// What a pull request's comment needs: the survivors with how many
+    /// tests ran each one's line, those that change only a log line folded
+    /// apart, those a first tier let live apart, and the changed lines no
+    /// test ran.
+    #[test]
+    fn a_comment_folds_log_lines_and_open_mutants_and_names_unrun_lines() {
+        use serde_json::json;
+        use supercov_engine::coverage_index::MutantStatus::*;
+        let survivor = |line: u32| {
+            mutant(
+                line,
+                Infected,
+                Some(json!({"status": "survived", "tests": 3})),
+            )
+        };
+        let mut ran = survivor(1);
+        ran.line_tests = Some(7);
+        let mut mutants = vec![ran];
+        for line in 2..=28 {
+            let mut logged = survivor(line);
+            logged.log_only = true;
+            mutants.push(logged);
+        }
+        mutants.push(mutant(
+            40,
+            Infected,
+            Some(json!({"status": "survived-so-far", "tests": 32})),
+        ));
+        let mut changed = data(mutants);
+        let unrun = (0..27)
+            .map(|file| (format!("src/f{file:02}.ts"), vec![3, 4, 5, 9]))
+            .collect();
+        changed.diff = Some(supercov_engine::mutants_query::DiffSummary {
+            base: "origin/main".into(),
+            merge_base: "0123456789abcdef".into(),
+            commit: None,
+            changed_lines: 120,
+            lines_with_mutants: 29,
+            unrun_lines: unrun,
+        });
+        let text = markdown(&request(), &changed);
+        for expected in [
+            " · 28 survived · 1 survived so far\n",
+            "\n**108 changed lines no test ran**, which no mutant on them can tell apart:\n\n- `src/f00.ts`: 3–5, 9\n",
+            "- `src/f24.ts`: 3–5, 9\n- _…and 2 more files_\n",
+            "| `src/a.py:1:3` | `a + b → a - b` | infected | survived | 7 | every test that reached it passed with it in place (3 tests ran) |\n",
+            "\n<details><summary>27 more that change only what is logged: wholly in a logging call's arguments, or in what makes a logger</summary>\n",
+            "\n_…and 2 more_\n\n</details>\n",
+            "<details><summary>1 mutant survived so far: each lived through a first tier of the tests that ran it, and the rest have not run with it yet; not survivors, and not in the score</summary>\n",
+            "| `src/a.py:40:3` | `a + b → a - b` | infected | survived-so-far | — | survived so far: 32 tests passed with it in place, and the rest of its candidates have not run with it yet |\n\n</details>\n",
+        ] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
+        assert!(!text.contains("src/f25.ts"), "{text}");
+        // Every survivor only logs: the sentence says so, and the fold holds them.
+        let mut logged = survivor(1);
+        logged.log_only = true;
+        let text = markdown(&request(), &data(vec![logged]));
+        assert!(
+            text.contains("\nNo mutant is left alive by the tests. Those below change only what is logged.\n\n<details><summary>1 more that changes only what is logged"),
+            "{text}"
+        );
+        // A weak table counts the tests too.
+        let mut weak = mutant(2, NotInfected, None);
+        weak.line_tests = Some(0);
+        let text = markdown(&request(), &data(vec![weak]));
+        assert!(
+            text.contains("| Where | Mutant | Status | Tests on its line | Why |\n| --- | --- | --- | --- | --- |\n| `src/a.py:2:3` | `a + b → a - b` | not infected | 0 | weak reason |"),
+            "{text}"
+        );
+        // Every changed line ran: nothing said of them; a few files are all
+        // named.
+        assert_eq!(unrun_lines(&Default::default()), "");
+        assert_eq!(
+            unrun_lines(&std::collections::BTreeMap::from([(
+                "src/a.ts".to_owned(),
+                vec![7]
+            )])),
+            "\n**1 changed line no test ran**, which no mutant on them can tell apart:\n\n- `src/a.ts`: 7\n"
+        );
+        // No pass and nothing left alive; asked by status and none has it.
+        let killed = data(vec![mutant(3, Infected, None)]);
+        let text = markdown(&request(), &killed);
+        assert!(
+            text.ends_with("\nNo mutant is left alive: none is not infected or not reached.\n"),
+            "{text}"
+        );
+        let mut asked = request();
+        asked.mutants.statuses = vec![NotReached];
+        let text = markdown(&asked, &killed);
+        assert!(text.ends_with("\nNo mutant is not reached.\n"), "{text}");
     }
 
     #[test]

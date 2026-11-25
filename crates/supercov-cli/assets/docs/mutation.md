@@ -118,6 +118,26 @@ mutants the tests let survive.
   verdict a pass reached, whatever the two measurements recorded: a test
   whose path depends on the time, or that failed in one of them, moves no
   verdict.
+- **A baseline of the checkout.** Where no run of the command can be read or
+  continued, a run of the checkout as it is that holds the tests the command
+  runs is: a merge of a suite measured in parts on several machines (a
+  weekly baseline restored into `.supercov/runs`), or a run of the whole
+  suite. The pass's run is made from it with those tests' records alone, as
+  measuring them would record, and nothing is measured (`not measuring: run
+  r4 of this checkout holds the tests the command runs (18 test(s) in 6 of
+  its 61 test file(s)); this pass saves its verdicts into run r9, made from
+  it with those tests alone`). The command's tests are every test of a merge
+  whose runs were each measured with the command itself, and otherwise those
+  of the test files the command names, by path or by the end of one
+  (`tests/e2e/billing.spec.ts`, `billing.spec.ts`), anywhere in its words,
+  where the run holds every one of them that any run holds; a command that
+  names none is measured. The baseline must be of the checkout
+  as it is, by its fingerprint: on a pull request, whose checkout differs, the
+  command is measured, so narrow it to the specs `tests affected --files`
+  names; the change's own mutants are run only by tests that ran changed
+  code, which those are. A test that failed in the baseline is no candidate.
+  It needs a merged run made by this release, which keeps what its runs
+  answer with.
 - **After an edit.** It measures the checkout again and keeps an earlier
   verdict for each mutant whose file is as it was and whose candidate tests,
   and their test files, nothing changed could reach, as `runs latest tests
@@ -215,17 +235,22 @@ npx supercov mutants --diff origin/main --fail-on survived
 npx supercov mutants --diff origin/main --format markdown --output mutants.md
 ```
 
-- `--format markdown` writes a table for a pull request's comment: the counts,
-  then up to 25 mutants left alive with where they are, what they change and
-  why, and the command that lists the rest. Once a strong pass gave verdicts,
-  it has the mutation score and lists the survivors. `supercov mutants` takes
-  `--format markdown` and `--output <file>` too, and writes its own answer
-  that way.
+- `--format markdown` writes a pull request's comment, ready to post as it
+  is: the counts, the change's lines of code no test ran, then up to 25
+  mutants left alive with where they are, what they change, how many of the
+  run's tests ran their line and why, and the command that lists the rest.
+  Once a strong pass gave verdicts, it has the mutation score and lists the
+  survivors. Those that only change a log line are folded in a `<details>` of
+  their own, and so are those `survived so far` (counted apart, never with
+  the survivors). `supercov mutants` takes `--format markdown` and
+  `--output <file>` too, and writes its own answer that way.
 - A survivor that only changes a log line (its change lies wholly inside the
-  arguments of `console.*`, or of a method named `info`, `warn`, `error`,
-  `debug`, `trace` or `log`) is still `survived`, but marked `(only changes a
-  log line)` (`logOnly` in JSON) and counted on its own: `survived 185 (109
-  only change a log line)`. Triage can set those aside.
+  arguments of `console.*`, of a method named `info`, `warn`, `error`,
+  `debug`, `trace` or `log`, or of what makes a logger: `createLogger(...)`,
+  `getLogger(...)`, `pino(...)`, and `.child(...)` of a logger) is still
+  `survived`, but marked `(only changes a log line)` (`logOnly` in JSON) and
+  counted on its own: `survived 185 (109 only change a log line)`. Triage can
+  set those aside.
 - `--fail-on` exits `1` when a mutant asked about has one of the statuses
   given. On `runs latest mutants` they are weak statuses, from the run alone;
   on `supercov mutants` and `mutants test` they are verdicts: `survived`,

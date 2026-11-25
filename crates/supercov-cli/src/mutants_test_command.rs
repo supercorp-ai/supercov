@@ -260,6 +260,11 @@ reads that run again. With --shard, its verdicts go into a run of its own,
 never one restored from another job: on an unchanged checkout it is made
 from the newest run of it whose command passed, or failed only in tests that
 failed (they are no candidates), without measuring again.
+Where none can be read or continued, a run of this checkout that holds the
+tests the command runs (a merge of the suite's parts, a run of the whole
+suite) is made into the pass's run with those tests alone, without measuring:
+the tests of the files the command names, or all of a merge whose runs each
+measured the command.
 A run of the same files keeps every verdict it holds. After an edit, a
 mutant keeps its verdict where neither its file nor any test that could kill
 it changed, and could reach nothing that changed. --budget counts from the
@@ -345,7 +350,44 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         started: Some(started),
         ..Before::default()
     };
-    if let Ok(Continued {
+    // Where no run of this command can be continued, a run of this checkout
+    // that holds the tests the command runs is: a merge of the suite's
+    // parts, measured weekly, or a run of another command. The pass's run
+    // is made from it with those tests alone, as measuring them would make.
+    let baseline = match (&continued, &inventory, &given) {
+        (Err(_), Some(inventory), Some(given)) if own_run || stale || !valued => {
+            baseline_source(&root, inventory, given)
+        }
+        _ => None,
+    };
+    if let Some(baseline) = &baseline {
+        let (run_id, started_at) = crate::public_run_identity();
+        match supercov_engine::run_merge::derive_run_of_files(
+            &root,
+            baseline.run,
+            &baseline.files,
+            &run_id,
+            &started_at,
+        ) {
+            Ok(tests) => {
+                eprintln!(
+                    "[supercov] not measuring: run {} of this checkout holds the tests the command runs ({tests} test(s) in {} of its {} test file(s)); this pass saves its verdicts into run {run_id}, made from it with those tests alone",
+                    baseline.run.id,
+                    baseline.files.len(),
+                    baseline.of,
+                );
+                before.derived_from = Some(baseline.run.id.clone());
+                before.failed_tests.clone_from(&baseline.failed);
+            }
+            Err(error) => {
+                eprintln!(
+                    "[supercov] could not make this pass's run from {}: {error}",
+                    baseline.run.id
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else if let Ok(Continued {
         run: source,
         failed,
     }) = &continued
@@ -434,6 +476,125 @@ struct Before {
     /// The tests that failed in that run, where its command failed: none is
     /// a candidate.
     failed_tests: Vec<String>,
+}
+
+/// A run of this checkout a pass can be made from without measuring, the
+/// test files of it the command runs, and how many it has.
+struct Baseline<'a> {
+    run: &'a StoredRun,
+    files: std::collections::BTreeSet<String>,
+    of: usize,
+    /// The tests that failed in it, where its command failed: none is a
+    /// candidate.
+    failed: Vec<String>,
+}
+
+/// The test files a run's tests are written in: a merged run's, those of
+/// the runs it was merged from (as it keeps them).
+fn run_test_files(
+    inventory: &supercov_engine::run_store::RunInventory,
+    run: &StoredRun,
+) -> std::collections::BTreeSet<String> {
+    if run.metadata.merged != Some(true) {
+        return supercov_engine::source_manifest::test_files(run).unwrap_or_default();
+    }
+    run.metadata
+        .parents
+        .iter()
+        .flatten()
+        .filter_map(|id| supercov_engine::run_store::merged_part(inventory, run, id))
+        .flat_map(|part| run_test_files(inventory, &part))
+        .collect()
+}
+
+/// The test files of `files` a command names, by path or by the end of
+/// one (`tests/e2e/a.spec.ts`, `e2e/a.spec.ts`, `a.spec.ts`), anywhere in
+/// its words: a script's arguments, `bash -c '...'`.
+fn named_test_files(
+    command: &[String],
+    files: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    let words = command
+        .iter()
+        .flat_map(|argument| {
+            argument
+                .replace(|c: char| "'\";&|()<>=,".contains(c), " ")
+                .split_whitespace()
+                .map(|word| word.trim_start_matches("./").to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    files
+        .iter()
+        .filter(|file| {
+            words
+                .iter()
+                .any(|word| file == &word || file.ends_with(&format!("/{word}")))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The newest run of this checkout whose tests hold those `command` runs,
+/// where no run of `command` itself can be continued: a merge whose runs
+/// were each measured with `command` (a suite split across machines), all
+/// of its tests; any other run (a merge of a suite's parts, a run of the
+/// whole suite), the tests of the files `command` names, of those any run
+/// holds, where it holds every one of them. The run must be of
+/// the checkout as it is, by its fingerprint, and its command must have
+/// passed or failed only in tests that failed (`failed_tests_only`). None
+/// where no run holds them: the pass measures.
+fn baseline_source<'a>(
+    root: &Path,
+    inventory: &'a supercov_engine::run_store::RunInventory,
+    command: &[String],
+) -> Option<Baseline<'a>> {
+    let mut current = std::collections::BTreeMap::<String, bool>::new();
+    // The test files the command names, of those any run holds: a run
+    // that lacks one of them lacks tests the command runs.
+    let every = inventory
+        .runs
+        .iter()
+        .flat_map(|run| run_test_files(inventory, run))
+        .collect::<std::collections::BTreeSet<_>>();
+    let wanted = named_test_files(command, &every);
+    inventory.runs.iter().find_map(|run| {
+        let merged = run.metadata.merged == Some(true);
+        // A run of this command itself is continued, or measured, as before.
+        if !merged && run.metadata.command == command {
+            return None;
+        }
+        let files = run_test_files(inventory, run);
+        let of_command = merged
+            && run.metadata.parents.iter().flatten().all(|id| {
+                supercov_engine::run_store::merged_part(inventory, run, id)
+                    .is_some_and(|part| part.metadata.command == command)
+            });
+        let named = if of_command {
+            files.clone()
+        } else {
+            wanted.clone()
+        };
+        if named.is_empty() || !named.is_subset(&files) {
+            return None;
+        }
+        let fresh = *current
+            .entry(run.metadata.integrity.fingerprint.combined.clone())
+            .or_insert_with(|| !crate::checkout_comparison(root, run).stale);
+        if !fresh {
+            return None;
+        }
+        let failed = match run.metadata.test_exit_code {
+            Some(0) => Vec::new(),
+            code => failed_tests_only(&run.id, code, plan_for_run(run, root)).ok()?,
+        };
+        Some(Baseline {
+            run,
+            of: files.len(),
+            files: named,
+            failed,
+        })
+    })
 }
 
 /// Why a shard measures where no run of this checkout can be continued.

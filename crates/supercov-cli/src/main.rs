@@ -2988,15 +2988,16 @@ fn integrity_command(root: &Path, run: &StoredRun) -> (Vec<String>, Option<Vec<S
         return own();
     };
     let combined = &run.metadata.integrity.fingerprint.combined;
-    let mut current = run;
-    // A merge of merges: follow the fingerprint down to a run of a command.
+    let mut current = run.clone();
+    // A merge of merges: follow the fingerprint down to a run of a command,
+    // as the merge kept it or the store holds it.
     for _ in 0..16 {
         let Some(parent) = current
             .metadata
             .parents
             .iter()
             .flatten()
-            .filter_map(|id| inventory.runs.iter().find(|stored| stored.id == *id))
+            .filter_map(|id| supercov_engine::run_store::merged_part(&inventory, &current, id))
             .find(|parent| parent.metadata.integrity.fingerprint.combined == *combined)
         else {
             break;

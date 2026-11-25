@@ -48,6 +48,7 @@ fn main() {
                 Archived {
                     report: Some(report),
                     inputs: None,
+                    parts: None,
                 },
             ),
             None => publish_run(&root, &metadata, &evidence),

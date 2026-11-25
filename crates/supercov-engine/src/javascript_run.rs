@@ -1299,6 +1299,8 @@ fn run_javascript(
         // Its verdicts are in its results: it publishes no run.
         return Ok(Finished::strong(execution.exit_code));
     }
+    // What the command created or changed in the copy, synced back or not.
+    let written_by_command;
     // Leave the real working tree as the command alone would have: updated
     // snapshots, generated fixtures, and reports belong in the repository,
     // not in the cache. Deletions and instrumented-source rewrites are
@@ -1315,6 +1317,12 @@ fn run_javascript(
             .collect::<std::collections::BTreeSet<_>>();
         let outputs = sync_command_outputs(&root, &workspace, baseline, &protected)
             .map_err(|error| error.to_string())?;
+        written_by_command = outputs
+            .synced_paths
+            .iter()
+            .chain(&outputs.skipped_instrumented)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
         if outputs.synced > 0 {
             let _ = writeln!(
                 diagnostics,
@@ -1421,7 +1429,19 @@ fn run_javascript(
     } else {
         crate::served_tests::read(&evidence_directory)
     };
-    let support = crate::support_reach::read(&support_directory, &workspace, &served);
+    let mut support = crate::support_reach::read(&support_directory, &workspace, &served);
+    // What the servers read that the command wrote itself is no input.
+    if let Some(support) = &mut support {
+        let generated = support.leave_out_generated(&root, &written_by_command);
+        if !generated.is_empty() {
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] {} file(s) the servers read were written by the command and are not tracked, so they are not inputs of the run: {}",
+                generated.len(),
+                crate::run_merge::listed(&generated)
+            );
+        }
+    }
     if project.source_files.is_empty() {
         // Only the servers were measured: the first published is the run,
         // any other beside it.
@@ -1784,6 +1804,7 @@ fn run_javascript(
         crate::lifecycle::Archived {
             report: analysed,
             inputs: None,
+            parts: None,
         },
     )
     .map_err(|error| error.to_string())?;

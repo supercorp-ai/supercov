@@ -791,6 +791,7 @@ mod tests {
                 .into_iter()
                 .collect(),
                 names: BTreeMap::new(),
+                loaded: None,
             }),
             ..Ran::default()
         };
@@ -808,6 +809,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 names: BTreeMap::new(),
+                loaded: None,
             }),
             ..Ran::default()
         };

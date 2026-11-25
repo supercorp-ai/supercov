@@ -11636,12 +11636,44 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
     assert!(fired_at(&said, "run-store.discover-runs"), "{said}");
-    // A run it was merged from that is no longer stored cannot answer.
+    // The merge keeps what its runs answer with: with them gone from the
+    // store, it answers as before.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
+    std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&second)).unwrap();
+    let alone = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        alone.contains("1 of 3 tests affected by changes since the run"),
+        "{alone}"
+    );
+    // A merge that kept nothing of a run no longer stored cannot answer.
+    let merged = project.latest();
+    std::fs::remove_dir_all(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&merged)
+            .join("parts")
+            .join(&first),
+    )
+    .unwrap();
     let gone = project
         .supercov(&["runs", "latest", "tests", "affected"])
         .exits(2);
     assert!(gone.contains("which is no longer stored"), "{gone}");
+    // With none of its runs kept or stored, the merge is judged against the
+    // checkout by its own command, and its coverage still answers.
+    std::fs::remove_dir_all(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&merged)
+            .join("parts"),
+    )
+    .unwrap();
+    let files = project.supercov(&["runs", "latest", "files"]).succeeds();
+    assert!(files.contains("src/cart.js"), "{files}");
 }
 
 /// Output sent to one file for both streams (`> log 2>&1`) arrives through
@@ -17496,6 +17528,8 @@ fn tests_affected_names_the_record_it_cannot_read() {
         project
             .root
             .join(".supercov/runs")
+            .join(&run)
+            .join("parts")
             .join(&first)
             .join("test-executions.json"),
     )
@@ -18612,6 +18646,10 @@ fn a_merge_whose_step_fails_says_so() {
         "fs.rename@2",
         "fs.rename@3",
         "fs.rename@4",
+        "fs.rename@5",
+        "fs.rename@6",
+        "fs.rename@7",
+        "fs.rename@8",
     ] {
         let project = Project::cart("merge-steps");
         project.supercov(&["--", "node", "--test"]).succeeds();
@@ -21427,8 +21465,8 @@ fn mutants_on_a_change_are_those_on_its_lines() {
         &[
             "### Mutants on this change",
             "on 4 of 4 changed lines since `base`",
-            "| Where | Mutant | Status | Why |",
-            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | `sum` never equal to `10` |",
+            "| Where | Mutant | Status | Tests on its line | Why |",
+            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | 1 | `sum` never equal to `10` |",
         ],
     );
 
@@ -21587,6 +21625,8 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
             },
             "strong": null,
             "stryker": null,
+            // How many of the run's tests ran its line.
+            "lineTests": 2,
         })
     );
 
@@ -22619,8 +22659,17 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one): npx vitest run --reporter=dot"),
         "{said}"
     );
-    // After an edit: measured.
+    // Edited back as the shards measured it: no run of the command is of
+    // this checkout, and the merge of the shards' runs, each of this
+    // command, holds every test it runs: the shard is made from it.
     project.edit("src/tax.js", "sum / 5", "sum * 0.2");
+    let (_, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains("holds the tests the command runs (4 test(s) in 2 of its 2 test file(s))"),
+        "{said}"
+    );
+    // Edited again: no run is of this checkout, and it is measured.
+    project.edit("src/tax.js", "sum * 0.2", "sum * 0.3");
     let (_, said) = shard(&["npx", "vitest", "run"]);
     assert!(
         said.contains("measuring first (the checkout changed since the latest run)"),
@@ -28840,8 +28889,8 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
         &[
             "Mutation score **66.7%** (of 3 of ",
             " mutants) · 1 killed · 1 timed out · 1 survived · 1 not run (no driver)",
-            "| Where | Mutant | Weak | Strong | Why |",
-            " | survived | every test that reached it passed with it in place (2 tests ran) |",
+            "| Where | Mutant | Weak | Strong | Tests on its line | Why |",
+            " | survived | 2 | every test that reached it passed with it in place (2 tests ran) |",
         ],
     );
     let stryker: serde_json::Value =
