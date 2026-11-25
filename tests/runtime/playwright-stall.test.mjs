@@ -126,3 +126,14 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   assert.deepEqual(stallDetails(undefined), {});
   assert.deepEqual(stallDetails({ stalled: undefined, waiting: undefined }), {});
 });
+
+test("a mutant's own failure keeps its worker; a control's, or a mutant that ran in the worker, does not", async () => {
+  const { keepsWorker } = await import("../../runtime/javascript/playwrightStrong.mjs");
+  const mutant = { kind: "mutant" };
+  assert.equal(keepsWorker(mutant, false, "failed"), true);
+  assert.equal(keepsWorker(mutant, false, "timedOut"), true);
+  assert.equal(keepsWorker(mutant, false, "passed"), false);
+  assert.equal(keepsWorker(mutant, true, "failed"), false);
+  assert.equal(keepsWorker({ kind: "control" }, false, "failed"), false);
+  assert.equal(keepsWorker(undefined, false, "failed"), false);
+});
