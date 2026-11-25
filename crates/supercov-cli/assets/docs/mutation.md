@@ -496,7 +496,13 @@ no mutants shows none of this.
   test may shorten it but not lengthen it, so a click or an `expect` that
   waits for an element the mutant broke ends there, not at its own 30 s. A
   test that runs out of its limit makes its mutant a `timeout`, which counts
-  as detected; the summary says how many, and against what limit.
+  as detected; the summary says how many, and against what limit. An attempt
+  ends sooner, a `timeout` too, once it has stalled: past its baseline × 1.5
+  + 1 s (longer than any run of the test that passed), waiting on a
+  Playwright call that cannot end by its own timeout before the limit, its
+  pages quiet for a second. An `expect` that gives up before the limit still
+  fails the test, a kill, and a page still sending requests runs on. Each
+  timeout's verdict says what it waited on.
   `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) changes the
   1.5: a suite whose tests' times vary widely between runs may want 2 or 3.
   A mutant tries its candidates cheapest to a kill first (a test's time over

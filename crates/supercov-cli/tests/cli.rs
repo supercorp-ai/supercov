@@ -24119,15 +24119,17 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     assert_eq!(route["status"], "killed", "{context}");
     assert_eq!(route["tests"], 1, "{context}");
     // A page-side mutant the page shows: its assertion would wait 12 s, its
-    // own timeout, but the attempt's limit (1.5 x its baseline + 5 s) ends
-    // it first, a timeout.
+    // own timeout, longer than the attempt's limit (1.5 x its baseline +
+    // 5 s): once past every passing run of the test, with its page quiet,
+    // the attempt has stalled and ends there, a timeout.
     let lower = strong("public/page.js", 2, ":MethodExpression:toLowerCase");
     assert_eq!(lower["status"], "timeout", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
     assert!(
         lower["reason"]
             .as_str()
-            .is_some_and(|reason| reason.starts_with("ran past its time limit of ")),
+            .is_some_and(|reason| reason.starts_with("stopped at ")
+                && reason.contains("waiting on expect(#out) to.have.text")),
         "{context}"
     );
     assert!(lower["durationMs"].as_u64() < Some(12_000), "{context}");
@@ -24767,11 +24769,15 @@ fn mutants_test_kills_server_mutants_work_after_a_response_reaches() {
 }
 
 /// A Playwright mutant attempt is stopped at its time limit, its test's
-/// baseline x 1.5 + 5 s: a mutant that keeps an element from appearing ends
-/// there as a `timeout`, though its test clicks with no timeout of its own
-/// and asks for 90 s; a slow test's limit grows with its baseline, so its
-/// survivor lives and its timeout waits longer; and the summary and the
-/// progress lines say so.
+/// baseline x 1.5 + 5 s, or sooner where it stalls: a mutant that keeps an
+/// element from appearing ends as a `timeout` once the attempt is past every
+/// passing run of its test (baseline x 1.5 + 1 s) and waits, its page quiet,
+/// on a click with no timeout of its own (the test asks for 90 s) or an
+/// `expect` given 60 s; a slow test's window grows with its baseline, so its
+/// survivor, woken by a timer in the page, lives; an `expect` whose own
+/// timeout ends it before the limit still kills, though after the window; a
+/// page that keeps sending requests is not stalled, and its timeout runs to
+/// the limit; and the summary and the progress lines say so.
 #[cfg(unix)]
 #[test]
 fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
@@ -24826,6 +24832,22 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         "const box = document.getElementById(\"slow\");\nsetTimeout(() => {\n  box.textContent = \"Done\";\n  console.log(\"shown\");\n}, 3000);\n",
     );
     project.write(
+        "public/note.html",
+        "<!doctype html><body><script src=\"/note.js\"></script></body>\n",
+    );
+    project.write(
+        "public/note.js",
+        "function shown(state) {\n  return state === \"saved\";\n}\nif (shown(\"saved\")) {\n  const note = document.createElement(\"p\");\n  note.id = \"note\";\n  note.textContent = \"Saved\";\n  document.body.append(note);\n}\n",
+    );
+    project.write(
+        "public/poll.html",
+        "<!doctype html><body><p id=\"poll\"></p><script src=\"/poll.js\"></script></body>\n",
+    );
+    project.write(
+        "public/poll.js",
+        "const status = document.getElementById(\"poll\");\nlet count = 0;\nasync function tick() {\n  await fetch(\"/health\");\n  count += 1;\n  if (count === 3) status.textContent = \"Done\";\n  else setTimeout(tick, 150);\n}\ntick();\n",
+    );
+    project.write(
         "playwright.config.js",
         &format!(
             "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
@@ -24839,6 +24861,16 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         "tests/slow.spec.js",
         "import { test, expect } from \"@playwright/test\";\ntest(\"waits for the slow text\", async ({ page }) => {\n  await page.goto(\"/slow.html\");\n  await expect(page.locator(\"#slow\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
     );
+    // An `expect` that gives up after 4 s, sooner than the limit (6.5 s at
+    // least) and later than the window (2.5 s at least) of a quick test.
+    project.write(
+        "tests/note.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"shows the note\", async ({ page }) => {\n  await page.goto(\"/note.html\");\n  await expect(page.locator(\"#note\")).toBeVisible({ timeout: 4_000 });\n});\n",
+    );
+    project.write(
+        "tests/poll.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits for the polled status\", async ({ page }) => {\n  await page.goto(\"/poll.html\");\n  await expect(page.locator(\"#poll\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
+    );
     project.git(&["init", "-q"]);
     project.commit("strong playwright limit");
     let roots = [("SUPERCOV_SOURCE_ROOTS", "public")];
@@ -24850,7 +24882,12 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         .succeeds();
     let ran = project.supercov_with(
         &["runs", "latest", "mutants", "test", "--json"],
-        &[roots[0], ("SUPERCOV_PROGRESS_INTERVAL_MS", "300")],
+        // The command's output too, with each attempt's line.
+        &[
+            roots[0],
+            ("SUPERCOV_PROGRESS_INTERVAL_MS", "300"),
+            ("SUPERCOV_VERBOSE", "1"),
+        ],
     );
     let said = ran.stderr();
     let reply = ran.json();
@@ -24878,41 +24915,100 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         found[0]["strong"].clone()
     };
     let duration = |verdict: &serde_json::Value| verdict["durationMs"].as_u64().unwrap_or(0);
-    // The button never appears: the click waits until the limit, about
-    // 1.5 x a baseline of a second or two + 5 s, not the 90 s the test asked
-    // for nor Playwright's 30 s.
+    let reason = |verdict: &serde_json::Value| verdict["reason"].as_str().unwrap_or("").to_owned();
+    // The limit a verdict's reason states, in ms: `... of its 6.9 s time
+    // limit` or `... time limit of 6.9 s`.
+    let limit_ms = |verdict: &serde_json::Value| {
+        let said = reason(verdict);
+        let seconds = said
+            .split_once("of its ")
+            .or_else(|| said.split_once("time limit of "))
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .and_then(|number| number.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("no limit in {said}\n{context}"));
+        (seconds * 1000.0) as u64
+    };
+    // The button never appears: the click, with no timeout of its own, waits
+    // on a quiet page past every passing run of its test, and the attempt
+    // ends there, 4 s before its limit (1.5 x a baseline of a second or two
+    // + 5 s), not at the 90 s the test asked for nor Playwright's 30 s.
     let never = strong("public/ready.js", 2, ":EqualityOperator:!==");
     assert_eq!(never["status"], "timeout", "{context}");
     assert!(
-        never["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.starts_with("ran past its time limit of ")
-                && reason.contains("1.5 × its ")),
+        reason(&never).starts_with("stopped at ")
+            && reason(&never).contains("1.5 × its ")
+            && reason(&never).contains("waiting on Locator.click (#ready)"),
         "{context}"
     );
     assert!(
-        (6_000..20_000).contains(&duration(&never)),
+        (2_000..limit_ms(&never) - 3_000).contains(&duration(&never)),
         "{never}\n{context}"
     );
-    // The slow test's baseline is over 3 s: its limit is longer, and the
-    // mutant that keeps its text from showing waits that long.
+    // The slow test's baseline is over 3 s, so is its window: the mutant
+    // that keeps its text from showing waits that long on an `expect` given
+    // 60 s, and ends there, before its limit.
     let blank = strong("public/slow.js", 3, ":StringLiteral:empty");
     assert_eq!(blank["status"], "timeout", "{context}");
     assert!(
-        (9_000..25_000).contains(&duration(&blank)),
-        "{blank}\n{context}"
-    );
-    // Slow but passing: no timeout.
-    let logged = strong("public/slow.js", 4, ":StringLiteral:empty");
-    assert_eq!(logged["status"], "survived", "{context}");
-    // The answer counts the timeouts at the limit and says the limit.
-    assert_eq!(reply["timeLimit"]["factor"], 1.5, "{context}");
-    assert!(
-        reply["timeLimit"]["timedOut"].as_u64() >= Some(2),
+        reason(&blank).starts_with("stopped at ")
+            && reason(&blank).contains("waiting on expect(#slow) to.have.text"),
         "{context}"
     );
-    // While an attempt waits near its limit, the progress lines say so.
+    assert!(
+        (6_000..limit_ms(&blank) - 3_000).contains(&duration(&blank)),
+        "{blank}\n{context}"
+    );
+    // Slow but passing, woken by a timer in a quiet page: no timeout.
+    let logged = strong("public/slow.js", 4, ":StringLiteral:empty");
+    assert_eq!(logged["status"], "survived", "{context}");
+    // The note never shows: its `expect` gives up after 4 s, past the
+    // test's window but before its limit, and the test fails: a kill, as
+    // without the window.
+    let hidden = strong("public/note.js", 2, ":EqualityOperator:!==");
+    assert_eq!(hidden["status"], "killed", "{context}");
+    assert!(
+        reason(&hidden).contains("toBeVisible"),
+        "{hidden}\n{context}"
+    );
+    assert!(duration(&hidden) >= 4_000, "{hidden}\n{context}");
+    // A page that keeps asking its server is busy, not stalled: the mutant
+    // that keeps it from ever being done runs to its limit.
+    let busy = strong("public/poll.js", 6, ":ConditionalExpression:false");
+    assert_eq!(busy["status"], "timeout", "{context}");
+    assert!(
+        reason(&busy).starts_with("ran past its time limit of ")
+            && reason(&busy).contains("waiting on expect(#poll) to.have.text"),
+        "{busy}\n{context}"
+    );
+    assert!(
+        duration(&busy) + 1_000 >= limit_ms(&busy),
+        "{busy}\n{context}"
+    );
+    eprintln!(
+        "stalled: {} ms of {} ms, {} ms of {} ms; at the limit: {} ms of {} ms",
+        duration(&never),
+        limit_ms(&never),
+        duration(&blank),
+        limit_ms(&blank),
+        duration(&busy),
+        limit_ms(&busy)
+    );
+    // The answer counts the timeouts at the limit and those that stalled,
+    // and says the limit.
+    assert_eq!(reply["timeLimit"]["factor"], 1.5, "{context}");
+    assert!(
+        reply["timeLimit"]["timedOut"].as_u64() >= Some(1)
+            && reply["timeLimit"]["stalled"].as_u64() >= Some(2),
+        "{context}"
+    );
+    // While an attempt waits near its limit, the progress lines say so;
+    // each attempt's line says what a timeout waited on.
     assert!(said.contains(", near its time limit: "), "{context}");
+    assert!(
+        said.contains("stalled before its ")
+            && said.contains(", waiting on Locator.click (#ready) ("),
+        "{context}"
+    );
     // The factor is the pass's to set: a factor no number is refused.
     let refused = project.supercov_with(
         &["runs", "latest", "mutants", "test"],

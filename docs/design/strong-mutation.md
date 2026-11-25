@@ -1349,18 +1349,48 @@ its time limit of 9.5 s (1.5 × its 3.0 s baseline + 5 s)`; the summary counts
 such timeouts and states the factor, and the progress lines show each running
 attempt's limit and when it is near it.
 
-**No early end for an attempt that looks hung.** An attempt that has gone
-quiet (no request, no page activity) is not ended before its limit. It may
-still end otherwise: an `expect` with a timeout of its own fails it (a kill,
-not a timeout), and a timer in the page, the server or the test wakes it and
-it passes (a survivor). Nothing the pass can see tells those apart from a
-hang, so ending it early would change verdicts. Measured on a large
-application's e2e areas, timeouts are cheap already: each mutant timed out on
-its first candidate (one in about 300 ran out of its limit on two tests at
-once), 9.8 s on average, 1-25% of a job's mutant attempts' time. Most of a timeout's limit is the 5 s constant (a 1 s test's
-limit is 6.5 s); a tighter one where a test's runs vary little would likewise
-turn a mutant that slows its test by a few seconds from `survived` into
-`timeout`.
+**An attempt that stalls ends there.** Most of a timeout's limit is the 5 s
+constant: a 1 s test's limit is 6.5 s, though no run of it that passed took
+much over 1 s. A mutant attempt is watched from its *window*,
+`timeoutFactor × baseline + 1 s`, and ends at once, a `timeout`, at the first
+moment (looked at every 100 ms) that it has stalled:
+
+- the newest call the test made on Playwright's objects (an action, a
+  navigation, a wait, a request, the `_expect` a locator assertion sends, an
+  `expect.poll` or a `toPass`) has not returned;
+- no call still running can end by its own timeout before the limit: a click
+  with no timeout (Playwright's default) or an `expect` given 15 s, not one
+  whose 5 s run out first. A call's own timeout is the one it was given, else
+  the test's default for its kind (`actionTimeout`, `navigationTimeout`, the
+  expect and `toPass` timeouts, and any `setDefaultTimeout` the test called);
+  an API request's is 30 s;
+- the test's pages have sent and answered no request for a second.
+
+Each rule keeps a verdict the limit would give. A test that passes is past
+its window only if the mutant slowed it by half its baseline and a second:
+5,831 attempts that passed on a large application's e2e suite took at most
+0.5 s past their baseline (the slowest of the test's runs without a mutant),
+the median 0.8 of it. A test whose waits can end before the limit (an
+`expect` that gives up after 5 s, a poll, a sleep) is left to fail by itself:
+a kill stays a kill. One that is still asking its server (a page that polls)
+is not stalled, and runs to its limit as before. What remains is a page woken
+only by a timer past the window that then passes before the limit: a mutant
+that delays its test by seconds and no more, which the window's margin and
+the data say is rare; the limit itself already judges a slowdown beyond it a
+`timeout`. The verdict says so: `stopped at 2.6 s of its 6.5 s time limit,
+past every run of the test that passed (1.5 × its 1.0 s baseline + 1 s), its
+pages quiet, waiting on Locator.click (#save), which cannot end before the
+limit`. A timeout at the limit says what it last waited on too, and the
+summary counts the two apart.
+
+Measured on 8 shards of a large application's e2e suite (4.29.14, 9,137 s of
+mutant attempts, 1,456 mutants): attempts that passed took 81% of the time
+(5,831, 1.3 s each), timeouts 16% (176, 8.3 s each, against a 2.2 s
+baseline), kills 3% (189, 1.6 s each). Ending each timeout at its window
+instead of its limit saves up to 709 s of the 1,465 s timeouts cost, 8% of
+the attempts' time; 15 kills (8%) came from an `expect`'s own 5 s timeout
+after the window, which the rules above leave to fail. Before this, an
+attempt that went quiet waited for its limit, for those two reasons.
 
 This replaces a limit that was never shorter than the test's own timeout,
 plus the expect and action timeouts, with a second attempt, one test at a
