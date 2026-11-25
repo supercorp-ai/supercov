@@ -1001,6 +1001,32 @@ pub fn merge_runs(
         Ok(())
     })?;
 
+    // The runs a sharded pass's jobs made from one baseline without
+    // measuring each hold its archive byte for byte: their evidence is read,
+    // merged and kept once, from the first of them, and each still lends its
+    // strong verdicts. Eight such runs of a large e2e suite, each archive
+    // 1.3 GB uncompressed, were read whole side by side, and the merge was
+    // killed for its memory.
+    let named = inputs;
+    let copied = copies_of_one_archive(&named);
+    let inputs = named
+        .iter()
+        .zip(&copied)
+        .filter(|(_, copy)| copy.is_none())
+        .map(|(input, _)| *input)
+        .collect::<Vec<_>>();
+    // Each named run's place among those read.
+    let read_as = named
+        .iter()
+        .zip(&copied)
+        .map(|(input, copy)| {
+            let held = copy.map_or(input.id.as_str(), |of| named[of].id.as_str());
+            inputs
+                .iter()
+                .position(|read| read.id == held)
+                .expect("a copy's original is read")
+        })
+        .collect::<Vec<_>>();
     let archives = inputs
         .iter()
         .map(|input| {
@@ -1119,28 +1145,33 @@ pub fn merge_runs(
     // The strong verdicts each run saved, where they read. A run some of
     // whose tests another measured again, after a support file changed,
     // lends none: a kill there may be its old test's.
-    let held = inputs
+    let held = named
         .iter()
-        .enumerate()
-        .filter(|(index, _)| {
+        .zip(&read_as)
+        .filter(|(_, index)| {
             grown
                 .as_ref()
-                .is_none_or(|grown| !grown.superseded.contains_key(index))
+                .is_none_or(|grown| !grown.superseded.contains_key(*index))
         })
-        .filter_map(|(index, input)| {
+        .filter_map(|(input, index)| {
             let saved = std::fs::read(
                 input
                     .directory
                     .join(crate::strong_plan::STRONG_VERDICTS_FILE),
             );
             let document = serde_json::from_slice::<StrongVerdicts>(&saved.ok()?).ok()?;
-            Some((index, document))
+            Some((*index, input.id.clone(), document))
         })
         .collect::<Vec<_>>()
         .into_iter()
-        .map(|(index, document)| {
+        .map(|(index, id, document)| {
             let tests = measured_tests(&archives[index]).into_keys().collect();
-            (index, document, tests)
+            Lender {
+                index,
+                id,
+                document,
+                tests,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1281,7 +1312,7 @@ pub fn merge_runs(
                 .chain(run_ids.iter().cloned())
                 .collect(),
             test_exit_code: Some(
-                if inputs
+                if named
                     .iter()
                     .all(|input| input.metadata.test_exit_code == Some(0))
                 {
@@ -1308,7 +1339,8 @@ pub fn merge_runs(
             instrumented_build_cache: None,
             timings: None,
             merged: Some(true),
-            parents: Some(run_ids.to_vec()),
+            // The runs it holds the evidence of: a copy's is its original's.
+            parents: Some(inputs.iter().map(|input| input.id.clone()).collect()),
             source_roots: None,
             copy: None,
             recorded_by: None,
@@ -1339,7 +1371,23 @@ pub fn merge_runs(
         .map_err(|error| format!("Could not publish merged run: {error}"))?;
         finalize_published_run(root, merged_run_id)
             .map_err(|error| format!("Could not finalize merged run: {error}"))?;
-        let mut notes = kept_verdicts(root, merged_run_id, &inputs, held, &owners, &hashes);
+        let mut notes = kept_verdicts(root, merged_run_id, held, &owners, &hashes);
+        let copies = named
+            .iter()
+            .zip(&copied)
+            .filter_map(|(input, copy)| copy.map(|of| (input.id.as_str(), named[of].id.as_str())))
+            .collect::<Vec<_>>();
+        if let Some((_, of)) = copies.first() {
+            let ids = copies.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            notes.insert(
+                0,
+                format!(
+                    "{} run(s) hold run {of}'s evidence byte for byte, made from one run without measuring ({}): their evidence is kept once, from it, and their strong verdicts each",
+                    copies.len(),
+                    listed(&ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>())
+                ),
+            );
+        }
         if copies_left_out > 0 {
             notes.insert(
                 0,
@@ -1556,6 +1604,63 @@ fn keep_part(inventory: &RunInventory, run: &StoredRun, into: &Path) -> std::io:
         .try_for_each(|part| keep_part(inventory, &part, &parts))
 }
 
+/// A run merged that saved strong verdicts: where its evidence is among the
+/// archives read (a copy's is its original's), its id, its verdicts, and
+/// the ids of the tests its records name.
+struct Lender {
+    index: usize,
+    id: String,
+    document: StrongVerdicts,
+    tests: BTreeSet<String>,
+}
+
+/// Of each run, the first before it whose archive it holds byte for byte,
+/// both made from one run without measuring (`measured_as`): the jobs of a
+/// sharded pass, each continuing one baseline. Their records name that run
+/// alike, so the merge keeps one copy of each record anyway; read once, the
+/// copies cost it nothing. An archive that cannot be read is no copy, and
+/// fails the merge where it is read.
+fn copies_of_one_archive(inputs: &[&StoredRun]) -> Vec<Option<usize>> {
+    use sha2::Digest;
+    // Only runs that could share an archive are read here: made from one
+    // run, with archives of one length.
+    let mut alike = BTreeMap::<(&str, u64), usize>::new();
+    for input in inputs {
+        if input.metadata.measured_as.is_some() {
+            *alike
+                .entry((
+                    input.evidence_run_id(),
+                    input.metadata.raw_evidence.compressed_bytes,
+                ))
+                .or_default() += 1;
+        }
+    }
+    let mut first = BTreeMap::<(&str, [u8; 32]), usize>::new();
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let group = (
+                input.evidence_run_id(),
+                input.metadata.raw_evidence.compressed_bytes,
+            );
+            if alike.get(&group).is_none_or(|runs| *runs < 2) {
+                return None;
+            }
+            // fault-site: run-merge.copies-of-one-archive.read
+            let bytes = crate::fault_fs::read(&input.evidence_path).ok()?;
+            let digest = <[u8; 32]>::from(sha2::Sha256::digest(&bytes));
+            match first.entry((group.0, digest)) {
+                std::collections::btree_map::Entry::Occupied(original) => Some(*original.get()),
+                std::collections::btree_map::Entry::Vacant(place) => {
+                    place.insert(index);
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 /// The merged run's strong verdicts, from those the runs merged saved
 /// (`strong_verdicts::merged_verdicts`), saved into it; what was kept, and
 /// each run whose verdicts were not, and why. `held` is each run that saved
@@ -1564,8 +1669,7 @@ fn keep_part(inventory: &RunInventory, run: &StoredRun, into: &Path) -> std::io:
 fn kept_verdicts(
     root: &Path,
     merged_run_id: &str,
-    inputs: &[&StoredRun],
-    held: Vec<(usize, StrongVerdicts, BTreeSet<String>)>,
+    held: Vec<Lender>,
     owners: &BTreeMap<String, usize>,
     hashes: &[BTreeMap<String, String>],
 ) -> Vec<String> {
@@ -1601,8 +1705,13 @@ fn kept_verdicts(
     let mut notes = Vec::new();
     let mut lending = Vec::new();
     // Not empty, as said above: a loop over it never runs zero times.
-    held.into_iter().for_each(|(index, document, tests)| {
-        let id = &inputs[index].id;
+    held.into_iter().for_each(|lender| {
+        let Lender {
+            index,
+            id,
+            document,
+            tests,
+        } = lender;
         if plan.as_ref().map(|plan| &plan.mutant_set) != Some(&document.mutant_set) {
             notes.push(format!(
                 "run {id}'s strong verdicts are not kept: they are of the mutants of {}, which the merged run does not list",
@@ -1616,7 +1725,7 @@ fn kept_verdicts(
             .map(|(path, _)| path.clone())
             .collect::<BTreeSet<_>>();
         lending.push((
-            id.clone(),
+            id,
             document.mutants,
             document.progress,
             document.lived,
@@ -3193,6 +3302,91 @@ mod tests {
                 (TRUE.to_owned(), "killed".to_owned())
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The runs a sharded pass's jobs made from one run without measuring
+    /// hold its archive byte for byte: the merge reads and keeps it once,
+    /// from the first, says which runs were copies of it, and keeps each
+    /// one's strong verdicts. A run made from it alone in a merge, and a copy
+    /// whose archive cannot be read to compare, are merged as any other run.
+    #[test]
+    fn copies_of_one_run_are_merged_once_with_each_ones_verdicts() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        let stored = |id: &str| {
+            discover_runs(&root)
+                .unwrap()
+                .runs
+                .into_iter()
+                .find(|run| run.id == id)
+                .unwrap()
+        };
+        let source = stored("run-a");
+        for id in ["shard-1", "shard-2", "shard-3"] {
+            crate::lifecycle::derive_run(&root, &source, id, "2026-01-02T00:00:00.000Z").unwrap();
+        }
+        let set = "stryker-js@10.1.1";
+        save_verdicts(&root, "shard-1", set, &[(TRUE, "killed")]);
+        save_verdicts(&root, "shard-2", set, &[(FALSE, "killed")]);
+        let merged = merge_runs(
+            &root,
+            &["shard-1".into(), "shard-2".into(), "shard-3".into()],
+            "merged",
+            "2026-01-03T00:00:00.000Z",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            merged.notes,
+            [
+                "2 run(s) hold run shard-1's evidence byte for byte, made from one run without measuring (shard-2; shard-3): their evidence is kept once, from it, and their strong verdicts each",
+                "2 strong verdict(s) kept from runs shard-1, shard-2: 1 from shard-1, 1 from shard-2",
+            ]
+        );
+        assert_eq!(
+            kept_statuses(&root).unwrap(),
+            [
+                (FALSE.to_owned(), "killed".to_owned()),
+                (TRUE.to_owned(), "killed".to_owned())
+            ]
+        );
+        // The evidence of one of them, the first's records kept.
+        let run = stored("merged");
+        assert_eq!(run.metadata.parents, Some(vec!["shard-1".to_owned()]));
+        assert!(run.directory.join("parts/shard-1/run.json").is_file());
+        assert!(!run.directory.join("parts/shard-2").exists());
+        let tests = |run: &StoredRun| measured_tests(&read_archive(&run.evidence_path).unwrap());
+        assert_eq!(
+            tests(&run).into_keys().collect::<Vec<_>>(),
+            tests(&source).into_keys().collect::<Vec<_>>()
+        );
+        // With the run it was made from, a copy is merged as before: its
+        // records alike are kept once.
+        for ids in [["run-a", "shard-1"], ["shard-1", "shard-2"]] {
+            fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
+            let merged =
+                crate::fault::during("fs.read#run-merge.copies-of-one-archive.read", || {
+                    merge_runs(
+                        &root,
+                        &ids.map(str::to_owned),
+                        "merged",
+                        "2026-01-03T00:00:00.000Z",
+                        false,
+                    )
+                })
+                .unwrap();
+            assert!(
+                merged.notes[0].ends_with("byte for byte kept once, from that run"),
+                "{ids:?}: {:?}",
+                merged.notes
+            );
+            assert_eq!(
+                stored("merged").metadata.parents,
+                Some(ids.map(str::to_owned).to_vec())
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
