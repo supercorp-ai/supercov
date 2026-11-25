@@ -1,0 +1,35 @@
+run run_746dec7c460704c9
+command: node --test test/label.test.js
+
+Coverage
+  Lines      15.38% (2/13)
+  Branches   10.00% (1/10)
+  MC/DC      0.00% (0/5)
+Assertions   not assessed — npx supercov runs run_746dec7c460704c9 assertions assess
+
+By test kind
+  unit            1 test(s)  lines  15.38%  branches  10.00%  MC/DC   0.00%
+  1 test(s) use the runner's default kind; this is not inferred from their behavior.
+  Set SUPERCOV_TEST_KIND=integration (or unit/component/e2e) when running a suite to override it.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 1 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+  Command outputs  /work/project/.supercov/workspaces/workspace/project
+
+Tests
+  Total       1
+  Passed      1
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Commands
+  npx supercov runs 'run_746dec7c460704c9' files
+  npx supercov runs 'run_746dec7c460704c9' gaps
+  npx supercov runs 'run_746dec7c460704c9' kinds
+  npx supercov runs 'run_746dec7c460704c9' runners
+  npx supercov runs 'run_746dec7c460704c9' scope
+  npx supercov runs run_746dec7c460704c9 --help
