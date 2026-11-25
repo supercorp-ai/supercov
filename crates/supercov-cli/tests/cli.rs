@@ -25233,8 +25233,10 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
 
 /// A Playwright pass whose harness runs two slots, one given a spec file
 /// with a serial describe that the pass spreads to the other, stops at its
-/// budget: the stop reaches both slots' `playwright test` and their servers,
-/// and the pass says the budget was spent.
+/// budget, run as a later round's shard is: the harness starts each slot's
+/// `playwright test` in a process group of its own and, told to stop, only
+/// waits for them, yet the stop reaches both slots and their servers, and
+/// the command ends within seconds of its budget (about 1 s here).
 #[cfg(unix)]
 #[test]
 fn a_playwright_pass_with_serial_files_stops_at_its_budget() {
@@ -25304,7 +25306,7 @@ fn a_playwright_pass_with_serial_files_stops_at_its_budget() {
     project.write(
         "harness.mjs",
         &format!(
-            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\n// The second slot starts first, and the first (the one given the serial file)\n// once the second has run a mutant: what the second takes of the serial file\n// is then the same however fast either starts.\nlet release;\nconst secondRan = new Promise((resolve) => {{\n  release = resolve;\n  setTimeout(resolve, 60_000);\n  // Measuring, nothing waits.\n  if (!process.env.SUPERCOV_STRONG_PLAN) resolve();\n}});\nconst run = ([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{\n      for (const line of String(chunk).split(\"\\n\")) {{\n        if (!line.trim()) continue;\n        console.log(`[slot ${{at + 1}}] ${{line}}`);\n        if (at === 1 && line.includes('\" lives (')) release();\n      }}\n    }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => {{\n      release();\n      done(code ?? 1);\n    }});\n  }});\n}};\nconst codes = await Promise.all([secondRan.then(() => run(slots[0], 0)), run(slots[1], 1)]);\nprocess.exit(Math.max(...codes));\n",
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\n// Like a harness that tears its slots down itself: a termination does not\n// end it, and each slot is in a process group of its own.\nprocess.on(\"SIGTERM\", () => console.log(\"[harness] told to stop; waiting for the slots\"));\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\n// The second slot starts first, and the first (the one given the serial file)\n// once the second has run a mutant: what the second takes of the serial file\n// is then the same however fast either starts.\nlet release;\nconst secondRan = new Promise((resolve) => {{\n  release = resolve;\n  setTimeout(resolve, 60_000);\n  // Measuring, nothing waits.\n  if (!process.env.SUPERCOV_STRONG_PLAN) resolve();\n}});\nconst run = ([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env, detached: true }});\n    const say = (chunk) => {{\n      for (const line of String(chunk).split(\"\\n\")) {{\n        if (!line.trim()) continue;\n        console.log(`[slot ${{at + 1}}] ${{line}}`);\n        if (at === 1 && line.includes('\" lives (')) release();\n      }}\n    }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => {{\n      release();\n      done(code ?? 1);\n    }});\n  }});\n}};\nconst codes = await Promise.all([secondRan.then(() => run(slots[0], 0)), run(slots[1], 1)]);\nprocess.exit(Math.max(...codes));\n",
             ports[0], ports[1]
         ),
     );
@@ -25337,8 +25339,9 @@ fn a_playwright_pass_with_serial_files_stops_at_its_budget() {
     );
     let took = started.elapsed();
     let said = format!("{}\n{}", out.stdout(), out.stderr());
+    eprintln!("budget {budget} s; the command took {took:?}");
     assert!(
-        took < std::time::Duration::from_secs(budget + 20),
+        took < std::time::Duration::from_secs(budget + 15),
         "took {took:?}\n{said}"
     );
     assert!(
