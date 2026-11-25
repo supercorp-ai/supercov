@@ -214,17 +214,22 @@ npx supercov mutants --diff origin/main --fail-on survived
 npx supercov mutants --diff origin/main --format markdown --output mutants.md
 ```
 
-- `--format markdown` writes a table for a pull request's comment: the counts,
-  then up to 25 mutants left alive with where they are, what they change and
-  why, and the command that lists the rest. Once a strong pass gave verdicts,
-  it has the mutation score and lists the survivors. `supercov mutants` takes
-  `--format markdown` and `--output <file>` too, and writes its own answer
-  that way.
+- `--format markdown` writes a pull request's comment, ready to post as it
+  is: the counts, the change's lines of code no test ran, then up to 25
+  mutants left alive with where they are, what they change, how many of the
+  run's tests ran their line and why, and the command that lists the rest.
+  Once a strong pass gave verdicts, it has the mutation score and lists the
+  survivors. Those that only change a log line are folded in a `<details>` of
+  their own, and so are those `survived so far` (counted apart, never with
+  the survivors). `supercov mutants` takes `--format markdown` and
+  `--output <file>` too, and writes its own answer that way.
 - A survivor that only changes a log line (its change lies wholly inside the
-  arguments of `console.*`, or of a method named `info`, `warn`, `error`,
-  `debug`, `trace` or `log`) is still `survived`, but marked `(only changes a
-  log line)` (`logOnly` in JSON) and counted on its own: `survived 185 (109
-  only change a log line)`. Triage can set those aside.
+  arguments of `console.*`, of a method named `info`, `warn`, `error`,
+  `debug`, `trace` or `log`, or of what makes a logger: `createLogger(...)`,
+  `getLogger(...)`, `pino(...)`, and `.child(...)` of a logger) is still
+  `survived`, but marked `(only changes a log line)` (`logOnly` in JSON) and
+  counted on its own: `survived 185 (109 only change a log line)`. Triage can
+  set those aside.
 - `--fail-on` exits `1` when a mutant asked about has one of the statuses
   given. On `runs latest mutants` they are weak statuses, from the run alone;
   on `supercov mutants` and `mutants test` they are verdicts: `survived`,

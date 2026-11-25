@@ -715,11 +715,13 @@ type StructuralSource, written and read = "owned-probes" | "native-import" | "mi
 type SupportReach, written = {
   files: {string: [string]}
   names: {string: string}
+  loaded?: [string] | null
 }
 
 type SupportReach, read = {
   files: {string: [string]}
   names?: {string: string}
+  loaded?: [string] | null
 }
 
 type TestProvenance, written and read = closed {

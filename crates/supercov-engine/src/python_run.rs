@@ -622,6 +622,7 @@ fn run_direct_python_in(
             Archived {
                 report: analysed,
                 inputs: Some(source_inputs.manifest()),
+                parts: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -884,6 +885,7 @@ impl PythonServer {
                         Archived {
                             report: analysed,
                             inputs: Some(self.source_inputs.manifest()),
+                            parts: None,
                         },
                     )
                     .map_err(|error| error.to_string())?;

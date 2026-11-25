@@ -9,9 +9,12 @@ use serde_json::Value;
 use supercov_contracts::FrontendRunDeclaration;
 
 use crate::{
-    evidence_archive::{EvidenceArchiveEntry, read_archive, write_archive},
-    lifecycle::{ProjectLock, finalize_published_run, publish_run, remove_stored_tree_deferred},
-    run_store::{RawEvidenceMetadata, RunMetadata, StoredRun, discover_runs},
+    evidence_archive::{EvidenceArchiveEntry, read_archive, read_archive_selected, write_archive},
+    lifecycle::{
+        Archived, ProjectLock, finalize_published_run, publish_archived_run,
+        remove_stored_tree_deferred,
+    },
+    run_store::{RawEvidenceMetadata, RunInventory, RunMetadata, StoredRun, discover_runs},
     strong_plan::StrongVerdicts,
 };
 
@@ -1317,8 +1320,23 @@ pub fn merge_runs(
                 .map(|grown| grown.across.clone())
                 .filter(|across| !across.is_empty()),
         };
-        publish_run(root, &metadata, &archive_path)
-            .map_err(|error| format!("Could not publish merged run: {error}"))?;
+        // What each run answers with, kept in the merged run: it is answered
+        // from them, and stands alone once they are gone.
+        let parts = work.join(crate::run_store::PARTS_DIRECTORY);
+        inputs
+            .iter()
+            .try_for_each(|input| keep_part(&inventory, input, &parts))
+            .map_err(|error| format!("Could not keep the merged runs' records: {error}"))?;
+        publish_archived_run(
+            root,
+            &metadata,
+            &archive_path,
+            Archived {
+                parts: Some(parts),
+                ..Archived::default()
+            },
+        )
+        .map_err(|error| format!("Could not publish merged run: {error}"))?;
         finalize_published_run(root, merged_run_id)
             .map_err(|error| format!("Could not finalize merged run: {error}"))?;
         let mut notes = kept_verdicts(root, merged_run_id, &inputs, held, &owners, &hashes);
@@ -1344,6 +1362,73 @@ pub fn merge_runs(
         (Ok(_), Err(error)) => Err(error),
         (Ok(merged), Ok(())) => Ok(merged),
     }
+}
+
+/// The entries of a run's archive that say what its tests are and what they
+/// reached beside the code it measured: what `tests affected` and a check of
+/// the run against the checkout read (`source_manifest::affected_tests`,
+/// `run_currency::Ran`), with the model and frontend every archive holds.
+const ANSWERED_WITH: &[&str] = &[
+    "coverage-model.json",
+    "frontend.json",
+    "manifest.json",
+    crate::source_capture::ARCHIVE_PATH,
+    "statement-exclusions.json",
+    crate::support_reach::ARCHIVE_PATH,
+    crate::run_currency::PLAYWRIGHT_CONFIGURATION,
+];
+
+/// Keeps under `into` what `run` answers with, as a run of its own: its
+/// metadata, its record of what each test ran, and the entries of its
+/// archive that `ANSWERED_WITH` names (a merge's own at its top level and
+/// its runs' under `shards/`). A merged run's own runs are kept in it the
+/// same way, where they are held. A merged run is answered from its runs, so
+/// one that keeps them answers with its runs gone: a baseline cached alone.
+fn keep_part(inventory: &RunInventory, run: &StoredRun, into: &Path) -> std::io::Result<()> {
+    let directory = into.join(&run.id);
+    // fault-site: run-merge.keep-part.create-dir-all
+    crate::fault_fs::create_dir_all(&directory)?;
+    let merged = run.metadata.merged == Some(true);
+    let entries = read_archive_selected(&run.evidence_path, |path| {
+        let name = if merged {
+            path.rsplit('/').next().unwrap_or(path)
+        } else {
+            path
+        };
+        ANSWERED_WITH.contains(&name)
+    })
+    .and_then(|entries| write_archive(entries, &directory.join("evidence.raw.gz")))
+    .map_err(std::io::Error::other)?;
+    let mut metadata = run.metadata.clone();
+    metadata.raw_evidence = RawEvidenceMetadata {
+        schema_version: entries.schema_version,
+        format: entries.format.into(),
+        file: entries.file.into(),
+        files: entries.files,
+        uncompressed_bytes: entries.uncompressed_bytes,
+        compressed_bytes: entries.compressed_bytes,
+    };
+    // fault-site: run-merge.keep-part.write-metadata
+    crate::fault_fs::write(
+        directory.join("run.json"),
+        serde_json::to_vec_pretty(&metadata).expect("plain data serializes"),
+    )?;
+    let executions = run.directory.join(crate::source_manifest::EXECUTIONS_FILE);
+    if let Ok(record) = crate::fault_fs::read(&executions) {
+        // fault-site: run-merge.keep-part.write-executions
+        crate::fault_fs::write(
+            directory.join(crate::source_manifest::EXECUTIONS_FILE),
+            record,
+        )?;
+    }
+    // A merge's own runs, where they are held; a run's have none.
+    let parts = directory.join(crate::run_store::PARTS_DIRECTORY);
+    run.metadata
+        .parents
+        .iter()
+        .flatten()
+        .filter_map(|id| crate::run_store::merged_part(inventory, run, id))
+        .try_for_each(|part| keep_part(inventory, &part, &parts))
 }
 
 /// The merged run's strong verdicts, from those the runs merged saved
@@ -2913,10 +2998,11 @@ mod tests {
         );
         assert_eq!(kept_statuses(&root), None);
         // The merged run's archive cannot be read again to plan it (the
-        // third archive opened: each run's, then the merged run's): nothing
-        // is lent, and the merge stands.
+        // fifth archive opened: each run's, each run's again for what the
+        // merge keeps of it, then the merged run's): nothing is lent, and
+        // the merge stands.
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
-        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each@3", || {
+        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each@5", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");

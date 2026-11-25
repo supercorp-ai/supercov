@@ -715,16 +715,18 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
     let mut changed = BTreeMap::<String, Value>::new();
     let mut beyond = BTreeSet::<String>::new();
     let mut unmeasured = BTreeSet::<String>::new();
+    // Each added source, and the files that import it in any part.
+    let mut new_files = BTreeMap::<String, BTreeSet<String>>::new();
     let mut meaning = Value::Null;
     // Not empty, as just checked.
     parents.iter().try_for_each(|parent| -> Result<(), String> {
-        let Some(stored) = inventory.runs.iter().find(|stored| stored.id == *parent) else {
+        let Some(stored) = crate::run_store::merged_part(&inventory, run, parent) else {
             return Err(format!(
-                "Run {} was merged from {parent}, which is no longer stored, and a merge is answered from the runs it was merged from. Ask the others, or measure the suite again",
+                "Run {} was merged from {parent}, which is no longer stored, and a merge is answered from the runs it was merged from; a merge made by a Supercov before 4.29.14 does not hold them. Merge the runs again, or measure the suite again",
                 run.id
             ));
         };
-        let report = affected_tests(root, stored)?;
+        let report = affected_tests(root, &stored)?;
         for (rank, bucket) in BUCKETS.iter().enumerate() {
             for test in report[*bucket].as_array().into_iter().flatten() {
                 let key = (
@@ -770,6 +772,19 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
                 .filter_map(Value::as_str)
                 .map(str::to_owned),
         );
+        for file in report["newFiles"].as_array().into_iter().flatten() {
+            new_files
+                .entry(file["file"].as_str().unwrap_or_default().to_owned())
+                .or_default()
+                .extend(
+                    file["importedBy"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+        }
         if meaning.is_null() {
             meaning = report["meaning"].clone();
         }
@@ -802,6 +817,14 @@ fn affected_tests_of_merge(root: &Path, run: &StoredRun) -> Result<Value, String
         "changedFiles": changed.into_values().collect::<Vec<_>>(),
         "beyondTheRun": beyond,
         "unmeasured": unmeasured,
+        "newFiles": new_files
+            .into_iter()
+            .map(|(file, importers)| if importers.is_empty() {
+                json!({"file": file, "reach": "unknown, new file"})
+            } else {
+                json!({"file": file, "importedBy": importers})
+            })
+            .collect::<Vec<_>>(),
         "meaning": meaning,
     }))
 }
@@ -1169,8 +1192,47 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     let places = |checkout: &crate::run_currency::Checkout<'_>, file: &str| {
         checkout.places(file) || rust_placed.includes(file)
     };
+    // Where the run's own runners are configured: what they may load from
+    // where no import shows it (a script, a fixture another program reads)
+    // is in their tree, not in another runner's.
+    let own_trees = ran
+        .as_ref()
+        .and_then(|ran| ran.runners.as_ref())
+        .map(|runners| {
+            configurations
+                .iter()
+                .filter(|file| {
+                    crate::test_loads::configuration_runner(file)
+                        .is_some_and(|runner| runners.contains(runner))
+                })
+                .map(|file| file.rsplit_once('/').map_or("", |(directory, _)| directory))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    // Whether a helper no import places could have been loaded by the
+    // run's tests. A run that kept what its processes loaded and read
+    // (`SupportReach::loaded`) says: one of them did, or it is in the tree
+    // of a runner of the run. A changed test or helper of another runner's
+    // suite is neither. Without that evidence, any test may have.
+    let may_load = |file: &str| match ran
+        .as_ref()
+        .and_then(|ran| ran.support.as_ref())
+        .and_then(|support| support.loaded.as_ref())
+    {
+        Some(loaded) => {
+            loaded.contains(file)
+                || own_trees.iter().any(|directory| {
+                    directory.is_empty()
+                        || file
+                            .strip_prefix(directory)
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+        }
+        None => true,
+    };
     let named_by_tests = named_by_tests(&changes);
     let mut test_sources = BTreeMap::<&str, Option<String>>::new();
+    let added = added_sources(&root, run, manifest, executions);
 
     let mut affected = Vec::new();
     let mut undetermined = Vec::new();
@@ -1300,9 +1362,9 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                 }
                 let loaded = match loads {
                     Some(loads) if loads.open.is_none() => {
-                        loads.includes(file) || !places(checkout, file)
+                        loads.includes(file) || (!places(checkout, file) && may_load(file))
                     }
-                    _ => true,
+                    _ => may_load(file),
                 };
                 if loaded {
                     reasons.push(match loads {
@@ -1329,6 +1391,22 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             if reached {
                 reasons.push(format!(
                     "{asset} changed (embedded by {source}: {what}, which this test ran)"
+                ));
+            }
+        }
+        // A source added since the run, which no record names: it reaches
+        // a test whose own file, or a file it ran code in, imports it now.
+        for (file, importers) in &added.reached {
+            if importers.contains(&record.test.file) {
+                reasons.push(format!(
+                    "{file} added since the run (this test's file loads it)"
+                ));
+            } else if let Some(importer) = importers
+                .iter()
+                .find(|importer| record.files.contains_key(*importer))
+            {
+                reasons.push(format!(
+                    "{file} added since the run (imported by {importer}, which this test ran code in)"
                 ));
             }
         }
@@ -1417,6 +1495,9 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         // Changed code the run measured nothing of: what it reaches is not in
         // any test's record. Run what it can reach in full.
         "unmeasured": unmeasured,
+        // Sources added since the run: those no file its tests ran or load
+        // imports are of unknown reach. Run what they can reach in full.
+        "newFiles": added.files,
         "summary": {
             "tests": executions.tests.len(),
             "affected": affected.len(),
@@ -1443,6 +1524,75 @@ fn test_code(root: &Path, file: &str, path: &str) -> bool {
             .functions
             .iter()
             .any(|function| function.test && function.path == path)
+}
+
+/// The sources added since a run, and which of the files its tests ran or
+/// are written in import each now.
+#[derive(Default)]
+struct Added {
+    /// Each added source a file of the run's imports, with those files.
+    reached: BTreeMap<String, BTreeSet<String>>,
+    /// Every added source, with what reaches it: `importedBy`, or a reach
+    /// that is `unknown, new file`.
+    files: Vec<Value>,
+}
+
+/// The JavaScript and TypeScript sources the checkout has under the roots
+/// the run measured and the run never recorded: added since. No record says
+/// which test runs one, so the import graph does, as it stands now: a test
+/// reaches an added file that its own file, or a file it ran code in,
+/// imports, through other files or not. One that none of those import has a
+/// reach no one can say.
+fn added_sources(
+    root: &Path,
+    run: &StoredRun,
+    manifest: &InputManifest,
+    executions: &Executions,
+) -> Added {
+    if manifest.language != "javascript" {
+        return Added::default();
+    }
+    let Ok(scope) =
+        crate::source_discovery::discover_source_scope(root, run.metadata.source_roots.as_deref())
+    else {
+        return Added::default();
+    };
+    let added = scope
+        .source_files
+        .into_iter()
+        .filter(|file| !manifest.files.contains_key(file))
+        .collect::<BTreeSet<_>>();
+    if added.is_empty() {
+        return Added::default();
+    }
+    let imports = crate::test_loads::Imports::new(root);
+    let importers = executions
+        .tests
+        .iter()
+        .flat_map(|record| record.files.keys().chain([&record.test.file]))
+        .collect::<BTreeSet<_>>();
+    let mut reached = BTreeMap::<String, BTreeSet<String>>::new();
+    importers
+        .into_iter()
+        .flat_map(|importer| {
+            let loads = imports.loads([importer.as_str()]);
+            loads
+                .files
+                .intersection(&added)
+                .map(|file| (file.clone(), importer.clone()))
+                .collect::<Vec<_>>()
+        })
+        .for_each(|(file, importer)| {
+            reached.entry(file).or_default().insert(importer);
+        });
+    let files = added
+        .iter()
+        .map(|file| match reached.get(file) {
+            Some(importers) => json!({"file": file, "importedBy": importers}),
+            None => json!({"file": file, "reach": "unknown, new file"}),
+        })
+        .collect();
+    Added { reached, files }
 }
 
 /// Why a test is affected by a change to its own file.
@@ -2784,6 +2934,130 @@ mod tests {
         assert_eq!(report["summary"]["changedFiles"], 1, "{report}");
     }
 
+    /// A merge keeps what each of its runs answers with, a merge of merges
+    /// what theirs do: it answers as it did once they are gone from the
+    /// store. A merge made by an earlier release, which kept nothing, still
+    /// needs them, and says so.
+    #[test]
+    fn a_merge_answers_from_the_runs_it_kept_once_they_are_gone() {
+        let project = Project::new("kept");
+        let files = ["src/app.js", "tests/app.test.js"];
+        let make = crate::run_store::create_analyzable_test_run;
+        project.published("ran", make, &files);
+        let missed = project.published("missed", make, &files);
+        project.published("third", make, &files);
+        project.published("fourth", make, &files);
+        edit_record(&missed, |executions| executions.tests[0].files.clear());
+        let merge = |runs: &[&str], id: &str| {
+            crate::run_merge::merge_runs(
+                &project.root,
+                &runs.iter().map(|run| (*run).to_owned()).collect::<Vec<_>>(),
+                id,
+                &format!("2026-01-0{}T00:00:00.000Z", runs.len()),
+                false,
+            )
+            .unwrap();
+            project.stored(id)
+        };
+        merge(&["ran", "missed"], "inner");
+        // An earlier release's merge, which kept nothing of its runs.
+        let old = merge(&["ran", "missed"], "old");
+        fs::remove_dir_all(old.directory.join(crate::run_store::PARTS_DIRECTORY)).unwrap();
+        merge(&["third", "fourth"], "other");
+        let outer = merge(&["inner", "other"], "outer");
+        let kept = outer.directory.join("parts/inner/parts");
+        assert!(kept.join("ran/run.json").is_file());
+        assert!(kept.join("missed").join(EXECUTIONS_FILE).is_file());
+        project.write("src/app.js", &APP.replace("return 1;", "return 1 + 0;"));
+        let before = affected_tests(&project.root, &outer).unwrap();
+        assert_eq!(bucket(&before, "affected"), ["test"], "{before}");
+        for id in ["ran", "missed", "third", "fourth", "inner", "other"] {
+            fs::remove_dir_all(project.stored(id).directory).unwrap();
+        }
+        assert_eq!(affected_tests(&project.root, &outer), Ok(before));
+        assert_eq!(
+            affected_tests(&project.root, &old).unwrap_err(),
+            "Run old was merged from ran, which is no longer stored, and a merge is answered from the runs it was merged from; a merge made by a Supercov before 4.29.14 does not hold them. Merge the runs again, or measure the suite again"
+        );
+        // Merged again, the old merge's runs are gone: kept without them. A
+        // run with no record of what its tests ran is kept without one.
+        let bare = project.published("bare", make, &files);
+        fs::remove_file(bare.directory.join(EXECUTIONS_FILE)).unwrap();
+        project.published("sixth", make, &files);
+        merge(&["bare", "sixth"], "spare");
+        let again = merge(&["old", "spare"], "again");
+        let parts = again.directory.join("parts/old");
+        assert!(parts.join("run.json").is_file());
+        assert!(!parts.join(crate::run_store::PARTS_DIRECTORY).exists());
+        let bare = again.directory.join("parts/spare/parts/bare");
+        assert!(bare.join("run.json").is_file());
+        assert!(!bare.join(EXECUTIONS_FILE).exists());
+        // A merge that cannot keep its runs' records is not made.
+        let refused = crate::fault::during(
+            "fs.create_dir_all#run-merge.keep-part.create-dir-all",
+            || {
+                crate::run_merge::merge_runs(
+                    &project.root,
+                    &["old".to_owned(), "outer".to_owned()],
+                    "refused",
+                    "2026-01-09T00:00:00.000Z",
+                    false,
+                )
+            },
+        );
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.starts_with("Could not keep the merged runs' records: ")),
+            "{:?}",
+            refused.map(|merged| merged.id)
+        );
+        // Nor one whose runs' metadata, records, or a merged run's own runs
+        // cannot be kept: `spare` is kept second, after `old`, and its runs
+        // after it.
+        for fault in [
+            "fs.write#run-merge.keep-part.write-metadata",
+            "fs.write#run-merge.keep-part.write-executions",
+            "fs.create_dir_all#run-merge.keep-part.create-dir-all@3",
+        ] {
+            let refused = crate::fault::during(fault, || {
+                crate::run_merge::merge_runs(
+                    &project.root,
+                    &["old".to_owned(), "spare".to_owned()],
+                    "refused",
+                    "2026-01-09T00:00:00.000Z",
+                    false,
+                )
+            });
+            assert!(
+                refused.as_ref().is_err_and(
+                    |error| error.starts_with("Could not keep the merged runs' records: ")
+                ),
+                "{fault}: {:?}",
+                refused.map(|merged| merged.id)
+            );
+        }
+        let unpublished =
+            crate::fault::during("fs.rename#lifecycle.publish-run-with-fault.parts", || {
+                crate::run_merge::merge_runs(
+                    &project.root,
+                    &["old".to_owned(), "outer".to_owned()],
+                    "unpublished",
+                    "2026-01-09T00:00:00.000Z",
+                    false,
+                )
+            });
+        assert!(
+            unpublished
+                .as_ref()
+                .is_err_and(|error| error.starts_with("Could not publish merged run: ")),
+            "{:?}",
+            unpublished.map(|merged| merged.id)
+        );
+        assert!(!project.root.join(".supercov/runs/refused").exists());
+        assert!(!project.root.join(".supercov/runs/unpublished").exists());
+    }
+
     /// Rust: a test reaches what it names by path, a source's embedded file
     /// reaches the tests that ran the declaration embedding it, and changed
     /// code no probe measured is named.
@@ -3057,6 +3331,254 @@ mod tests {
                 "{file}"
             );
         }
+    }
+
+    /// A source added since a run reaches the tests whose own file, or a
+    /// file they ran code in, imports it now, through other added files or
+    /// not; one nothing of theirs imports has a reach no one can say, and is
+    /// named so. A merge says what any of its runs says.
+    #[test]
+    fn an_added_source_reaches_the_tests_that_load_what_imports_it() {
+        let project = Project::new("added");
+        let files = ["src/app.js", "tests/app.test.js"];
+        let inputs = crate::source_capture::capture(
+            &project.root,
+            "javascript",
+            files.iter().map(PathBuf::from),
+        )
+        .unwrap();
+        let entry = crate::evidence_archive::EvidenceArchiveEntry {
+            path: ARCHIVE_PATH.into(),
+            contents: serde_json::to_vec(&inputs.manifest()).unwrap(),
+        };
+        let publish = |id: &str| {
+            let directory = project.run_with(
+                id,
+                crate::run_store::create_analyzable_test_run,
+                vec![entry.clone()],
+            );
+            let metadata: RunMetadata =
+                serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap()).unwrap();
+            prepare_publication(&project.root, &directory, &metadata, None).unwrap();
+            project.stored(id)
+        };
+        let run = publish("added");
+        let other = publish("other");
+        // The test ran code in the app; another ran code elsewhere only.
+        edit_record(&run, |executions| {
+            executions.tests[0]
+                .files
+                .insert("src/app.js".into(), vec![0]);
+            let mut elsewhere = executions.tests[0].clone();
+            elsewhere.test.name = "elsewhere".into();
+            elsewhere.test.file = "tests/other.test.js".into();
+            elsewhere.files = BTreeMap::from([("src/other.js".to_owned(), vec![0])]);
+            executions.tests.push(elsewhere);
+        });
+        // Nothing added yet.
+        assert_eq!(project.affected(&run)["newFiles"], json!([]));
+        project.write(
+            "src/app.js",
+            &format!("import {{ helper }} from './helper.js';\n{APP}"),
+        );
+        project.write(
+            "src/helper.js",
+            "import { deep } from './deep.js';\nexport const helper = deep;\n",
+        );
+        project.write("src/deep.js", "export const deep = 1;\n");
+        project.write("src/alone.js", "export const alone = 1;\n");
+        project.write(
+            "tests/app.test.js",
+            "import '../src/checked.js';\nassert.equal(work(), 1);\n",
+        );
+        project.write("src/checked.js", "export const checked = 1;\n");
+        let report = project.affected(&run);
+        assert_eq!(bucket(&report, "unaffected"), ["elsewhere"], "{report}");
+        let reasons = report["affected"][0]["reasons"].clone();
+        for reason in [
+            "src/helper.js added since the run (imported by src/app.js, which this test ran code in)",
+            "src/deep.js added since the run (imported by src/app.js, which this test ran code in)",
+            "src/checked.js added since the run (this test's file loads it)",
+        ] {
+            assert!(
+                reasons.as_array().unwrap().contains(&json!(reason)),
+                "{reason} in {report}"
+            );
+        }
+        assert_eq!(
+            report["newFiles"],
+            json!([
+                {"file": "src/alone.js", "reach": "unknown, new file"},
+                {"file": "src/checked.js", "importedBy": ["tests/app.test.js"]},
+                {"file": "src/deep.js", "importedBy": ["src/app.js"]},
+                {"file": "src/helper.js", "importedBy": ["src/app.js"]},
+            ]),
+            "{report}"
+        );
+        // A merge of runs that each say so says the same.
+        let mut merged = run.clone();
+        merged.id = "merged".into();
+        merged.metadata.merged = Some(true);
+        merged.metadata.parents = Some(vec!["added".into(), other.id.clone()]);
+        assert_eq!(project.affected(&merged)["newFiles"], report["newFiles"]);
+        // Roots that cannot be read now, or that hold nothing added: nothing
+        // is said of added files.
+        for roots in ["gone", "tests"] {
+            let mut elsewhere = run.clone();
+            elsewhere.metadata.source_roots = Some(vec![roots.into()]);
+            assert_eq!(
+                project.affected(&elsewhere)["newFiles"],
+                json!([]),
+                "{roots}"
+            );
+        }
+        // A checkout that cannot be walked: the same.
+        let unread = crate::fault::during(
+            "fs.symlink_metadata:13#source-discovery.existing-roots",
+            || project.affected(&run),
+        );
+        assert_eq!(unread["newFiles"], json!([]), "{unread}");
+    }
+
+    /// A published run's archive with Vitest among the runners it declares.
+    fn declare_vitest(project: &Project, run: &StoredRun) -> StoredRun {
+        let mut entries = read_archive(&run.evidence_path).unwrap();
+        let frontend = entries
+            .iter_mut()
+            .find(|entry| entry.path == "frontend.json")
+            .unwrap();
+        let mut declaration = serde_json::from_slice::<Value>(&frontend.contents).unwrap();
+        let mut vitest = declaration["runners"][0].clone();
+        vitest["runner"] = json!("vitest");
+        declaration["runners"].as_array_mut().unwrap().push(vitest);
+        frontend.contents = serde_json::to_vec(&declaration).unwrap();
+        let archive = write_archive(entries, &run.evidence_path).unwrap();
+        let mut metadata = run.metadata.clone();
+        metadata.raw_evidence.compressed_bytes = archive.compressed_bytes;
+        metadata.raw_evidence.uncompressed_bytes = archive.uncompressed_bytes;
+        fs::write(&run.metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        project.stored(&run.id)
+    }
+
+    /// A changed file no import places is one the run's tests may load
+    /// only where the run says a process of it loaded or read it, or where
+    /// it is in the tree of a runner the run used: another runner's test or
+    /// helper selects none of its tests. A run that kept no such evidence
+    /// still takes any to be loaded.
+    #[test]
+    fn a_file_no_import_places_reaches_a_run_that_loaded_it_or_whose_tree_holds_it() {
+        let project = Project::new("unplaced");
+        for directory in ["tests/unit", "tests/integration", "tests/fixtures"] {
+            fs::create_dir_all(project.root.join(directory)).unwrap();
+        }
+        let helpers = [
+            "tests/integration/other.test.js",
+            "tests/integration/db.js",
+            "tests/fixtures/read.json",
+            "tests/unit/data.json",
+        ];
+        for file in helpers {
+            project.write(file, "1\n");
+        }
+        project.write("tests/unit/vitest.config.js", "export default {};\n");
+        let files = [
+            [
+                "src/app.js",
+                "tests/app.test.js",
+                "tests/unit/vitest.config.js",
+            ]
+            .as_slice(),
+            &helpers,
+        ]
+        .concat();
+        let reach = |loaded: Value| crate::evidence_archive::EvidenceArchiveEntry {
+            path: crate::support_reach::ARCHIVE_PATH.into(),
+            contents: serde_json::to_vec(&json!({"files": {}, "loaded": loaded})).unwrap(),
+        };
+        let make = crate::run_store::create_analyzable_test_run;
+        let kept = project.published_with(
+            "kept",
+            make,
+            &files,
+            vec![reach(json!([
+                "tests/app.test.js",
+                "tests/fixtures/read.json"
+            ]))],
+        );
+        let kept = declare_vitest(&project, &kept);
+        let before = project.published_with("before", make, &files, vec![reach(json!(null))]);
+        for file in helpers {
+            project.write(file, "2\n");
+        }
+        let reasons = |project: &Project, run: &StoredRun| {
+            let report = project.affected(run);
+            report["affected"][0]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|reason| reason.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            reasons(&project, &kept),
+            [
+                "tests/fixtures/read.json changed (a file tests may load)",
+                "tests/unit/data.json changed (a file tests may load)",
+            ]
+        );
+        assert_eq!(
+            reasons(&project, &before),
+            [
+                "tests/fixtures/read.json changed (a file tests may load)",
+                "tests/integration/db.js changed: top level (a file tests may load)",
+                "tests/integration/other.test.js changed: top level (a file tests may load)",
+                "tests/unit/data.json changed (a file tests may load)",
+            ]
+        );
+        // Only another runner's files changed: none of the run's tests.
+        project.write("tests/fixtures/read.json", "1\n");
+        project.write("tests/unit/data.json", "1\n");
+        let report = project.affected(&kept);
+        assert!(bucket(&report, "affected").is_empty(), "{report}");
+
+        // A runner configured at the root holds every file in its tree; a
+        // test whose imports cannot all be followed is judged by the
+        // evidence alone.
+        let project = Project::new("unplaced-root");
+        fs::create_dir_all(project.root.join("tests/integration")).unwrap();
+        project.write("tests/integration/db.js", "1\n");
+        project.write("vitest.config.js", "export default {};\n");
+        project.write(
+            "tests/app.test.js",
+            "const name = process.env.HELPER;\nawait import(name);\n",
+        );
+        let files = [
+            "src/app.js",
+            "tests/app.test.js",
+            "vitest.config.js",
+            "tests/integration/db.js",
+        ];
+        let root = project.published_with(
+            "root",
+            make,
+            &files,
+            vec![reach(json!(["tests/app.test.js"]))],
+        );
+        let root = declare_vitest(&project, &root);
+        let open = project.published_with(
+            "open",
+            make,
+            &files,
+            vec![reach(json!(["tests/app.test.js"]))],
+        );
+        project.write("tests/integration/db.js", "2\n");
+        assert_eq!(
+            reasons(&project, &root),
+            ["tests/integration/db.js changed: top level (a file tests may load)"]
+        );
+        let report = project.affected(&open);
+        assert!(bucket(&report, "affected").is_empty(), "{report}");
+        assert_eq!(report["changedFiles"][0]["file"], "tests/integration/db.js");
     }
 
     /// A helper a serving process loaded for a test, which the test's own

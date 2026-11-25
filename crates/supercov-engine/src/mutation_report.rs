@@ -34,6 +34,10 @@ pub enum Outcome {
     Error,
     /// No driver runs its language's tests yet.
     NotRun,
+    /// A first tier of candidates passed with it, and the rest have not run
+    /// with it yet (`strong_tiers::survived_so_far`): no verdict, never a
+    /// survivor, not in the score.
+    SurvivedSoFar,
     /// No strong verdict: no pass ran it.
     Pending,
 }
@@ -49,6 +53,7 @@ impl Outcome {
             Self::Unviable => "unviable",
             Self::Error => "error",
             Self::NotRun => "not-run",
+            Self::SurvivedSoFar => crate::strong_tiers::SURVIVED_SO_FAR,
             Self::Pending => "pending",
         }
     }
@@ -80,6 +85,7 @@ pub fn outcome(entry: &MutantEntry) -> Outcome {
         "no-coverage" => Outcome::NoCoverage,
         "equivalent" => Outcome::Equivalent,
         "unviable" => Outcome::Unviable,
+        crate::strong_tiers::SURVIVED_SO_FAR => Outcome::SurvivedSoFar,
         _ if undriven(&verdict).is_some() => Outcome::NotRun,
         _ => Outcome::Error,
     }
@@ -133,6 +139,10 @@ pub fn why(entry: &MutantEntry, strong_ran: bool) -> String {
             "not run: no driver for {} yet",
             saved.as_ref().and_then(undriven).unwrap_or_default()
         ),
+        Outcome::SurvivedSoFar => format!(
+            "survived so far: {} passed with it in place, and the rest of its candidates have not run with it yet",
+            tests(ran)
+        ),
         Outcome::Pending => match entry.status {
             MutantStatus::Infected | MutantStatus::Unknown if strong_ran => format!(
                 "no strong verdict: the strong pass did not run it ({}); `mutants test` runs it",
@@ -159,6 +169,7 @@ pub struct StrongCounts {
     pub unviable: usize,
     pub error: usize,
     pub not_run: usize,
+    pub survived_so_far: usize,
     pub pending: usize,
 }
 
@@ -173,6 +184,7 @@ impl StrongCounts {
             Outcome::Unviable => &mut self.unviable,
             Outcome::Error => &mut self.error,
             Outcome::NotRun => &mut self.not_run,
+            Outcome::SurvivedSoFar => &mut self.survived_so_far,
             Outcome::Pending => &mut self.pending,
         } += 1;
     }
@@ -378,7 +390,7 @@ fn stryker_status(entry: &MutantEntry) -> &'static str {
         Outcome::Equivalent => "Ignored",
         Outcome::Unviable => "CompileError",
         Outcome::Error => "RuntimeError",
-        Outcome::NotRun => "Pending",
+        Outcome::NotRun | Outcome::SurvivedSoFar => "Pending",
         Outcome::Pending => match entry.status {
             MutantStatus::NotReached => "NoCoverage",
             MutantStatus::NotInfected => "Survived",
@@ -477,6 +489,8 @@ fn pit_status(entry: &MutantEntry) -> Option<(&'static str, bool)> {
         // A pass that gave no verdict did not run the mutant to its end:
         // PIT's RUN_ERROR would count it detected.
         Outcome::Error | Outcome::NotRun => ("NOT_STARTED", false),
+        // Some of its candidates ran with it, not all.
+        Outcome::SurvivedSoFar => ("STARTED", false),
         Outcome::Equivalent => return None,
         Outcome::Pending => match entry.status {
             MutantStatus::NotReached => ("NO_COVERAGE", false),
@@ -560,6 +574,7 @@ mod tests {
     fn entry(file: &str, line: u32, status: MutantStatus, strong: Option<Value>) -> MutantEntry {
         MutantEntry {
             log_only: false,
+            line_tests: None,
             id: format!("{file}:{line}:5-{line}:9:EqualityOperator:<"),
             file: file.into(),
             span: MutantSpan {
@@ -677,6 +692,11 @@ mod tests {
                 "not run: no driver for cobol yet",
             ),
             (
+                json!({"status": "survived-so-far", "tests": 32}),
+                Outcome::SurvivedSoFar,
+                "survived so far: 32 tests passed with it in place, and the rest of its candidates have not run with it yet",
+            ),
+            (
                 json!({"status": "strange"}),
                 Outcome::Error,
                 "the pass could not give it a verdict",
@@ -714,12 +734,13 @@ mod tests {
             Outcome::Unviable,
             Outcome::Error,
             Outcome::NotRun,
+            Outcome::SurvivedSoFar,
             Outcome::Pending,
         ]
         .map(Outcome::name);
         assert_eq!(
             names.join(","),
-            "killed,timeout,survived,no-coverage,equivalent,unviable,error,not-run,pending"
+            "killed,timeout,survived,no-coverage,equivalent,unviable,error,not-run,survived-so-far,pending"
         );
     }
 
@@ -826,6 +847,12 @@ mod tests {
             entry("src/a.js", 12, Equivalent, None),
             entry("src/a.js", 13, Infected, None),
             entry("src/a.js", 14, Unknown, None),
+            entry(
+                "src/a.js",
+                15,
+                Infected,
+                Some(json!({"status": "survived-so-far", "tests": 32})),
+            ),
             entry("gone.rs", 1, Infected, None),
         ];
         let sources = BTreeMap::from([("src/a.js".to_owned(), "x\n".to_owned())]);
@@ -855,6 +882,7 @@ mod tests {
                 "NoCoverage",
                 "Survived",
                 "Ignored",
+                "Pending",
                 "Pending",
                 "Pending"
             ]
@@ -927,6 +955,12 @@ mod tests {
             entry("app/src/main/kotlin/a/B.kt", 1, Infected, None),
             entry("Win\\Path.go", 1, Infected, None),
             entry("noext", 1, Infected, None),
+            entry(
+                "noext",
+                2,
+                Infected,
+                Some(json!({"status": "survived-so-far", "tests": 32})),
+            ),
         ];
         let xml = pit_xml(&data(mutants));
         let statuses = xml
@@ -949,7 +983,8 @@ mod tests {
                 "NOT_STARTED",
                 "NOT_STARTED",
                 "NOT_STARTED",
-                "NOT_STARTED"
+                "NOT_STARTED",
+                "STARTED"
             ]
         );
         assert!(xml.starts_with(

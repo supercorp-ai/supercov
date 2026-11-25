@@ -968,6 +968,9 @@ pub fn publish_run(
 pub struct Archived {
     pub report: Option<crate::coverage_report::CoverageReport>,
     pub inputs: Option<crate::source_manifest::InputManifest>,
+    /// A merge's directory of what each of its runs answers with, moved into
+    /// the run as `parts` (`run_store::PARTS_DIRECTORY`).
+    pub parts: Option<PathBuf>,
 }
 
 /// `publish_run` for a frontend that holds what it archived; see `Archived`.
@@ -1014,6 +1017,7 @@ pub(crate) fn publish_run_with_fault(
     // hashing of the evidence below: it is the last and longest step of
     // publishing a large run, and only its header needs that digest.
     let report = archived.report.map(std::sync::Arc::new);
+    let parts = archived.parts;
     let early_sections = report
         .as_ref()
         .filter(|_| metadata.merged != Some(true))
@@ -1178,6 +1182,14 @@ pub(crate) fn publish_run_with_fault(
         return Err(LifecycleError::InvalidState(format!(
             "source manifest publication: {reason}"
         )));
+    }
+    if let Some(parts) = parts {
+        let kept = staging.join(crate::run_store::PARTS_DIRECTORY);
+        // fault-site: lifecycle.publish-run-with-fault.parts
+        if let Err(source) = fs::rename(&parts, &kept) {
+            let _ = remove_stored_tree_deferred(root, &staging);
+            return Err(io_error(&kept, source));
+        }
     }
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
@@ -3894,6 +3906,7 @@ mod tests {
             Archived {
                 report: None,
                 inputs: Some(inputs),
+                parts: None,
             },
         )
         .unwrap_err();

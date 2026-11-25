@@ -2076,3 +2076,21 @@ directory whole, every job's evidence included, for whoever studies it.
   (`mutation-drivers.md`).
 - A mutant of Rust compiled to wasm that a switch cannot hold: `error`, as the
   command builds the wasm once.
+- One build for the measured run and the pass. A Playwright suite whose
+  command builds the app (`next build`) builds it twice: once with probes for
+  the measured run, once with switches for the pass (about 2.5 minutes of a
+  pull request's check on a large Next.js application). The two builds are
+  different programs, and neither can stand in for the other soundly. The
+  measured build carries the probes and no switch: a strong copy instruments
+  switches in place of the probes (`js_schemata.rs`), and the files it
+  switches are those holding the mutants the measured run left undecided
+  (`SUPERCOV_STRONG_FILES`), known only once it has run. A build holding both
+  would be measured as other code than the project's: each switch is an
+  expression the probes would count, so the run's coverage model, its weak
+  verdicts and its identity (what `merge` compares, a baseline's runs among
+  them) would differ from a run of the same command without the pass. And
+  every attempt of the pass would run the probes and record nothing from
+  them. Switching every file a change could hold a mutant in, before
+  measuring, would make the measured run depend on which change is checked.
+  So the pass builds its own copy; `SUPERCOV_STRONG_RESTART` lets a command
+  skip the build where its copy already has one (a restart of the same pass).

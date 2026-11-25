@@ -419,7 +419,9 @@ The output names the base, the merge base and how many changed lines hold a
 mutant, then lists the mutants the tests leave alive, not infected first and
 then not reached, each with the part it changes and why, and counts the rest
 in one line. `--json` lists every mutant of the change, survivors first, with
-`diff` (`base`, `mergeBase`, `commit`, `changedLines`, `linesWithMutants`).
+`diff` (`base`, `mergeBase`, `commit`, `changedLines`, `linesWithMutants`, and
+`unrunLines`: the changed lines of code no test of the run ran, by file).
+Each mutant listed has `lineTests`: how many of the run's tests ran its line.
 
 `--format markdown` writes a table for a pull request's comment: the counts in
 one line, then up to 25 not-infected and not-reached mutants (or those
@@ -428,9 +430,15 @@ their status and why, and the command that lists the rest. Once `mutants test`
 gave verdicts, a second line has the mutation score, with how many mutants it
 is over (or, with none, why there is no score), and every verdict counted
 (killed, timed out, survived, no coverage, unviable, error, not run for want
-of a driver, and those with none yet), and the table lists the survivors: the
-mutants that survived or that no test covers, then those weak mutation shows
-no test can kill, each with its weak status, its strong verdict and why.
+of a driver, survived so far, and those with none yet), and the table lists
+the survivors: the mutants that survived or that no test covers, then those
+weak mutation shows no test can kill, each with its weak status, its strong
+verdict and why. Every table says how many of the run's tests ran each
+mutant's line. A change's comment names its lines of code no test ran, file
+by file. Survivors that only change a log line (`logOnly`) are folded apart
+in a `<details>`, and so are the mutants `survived so far` (a first tier of
+their candidates passed, the rest not run yet): not survivors, and not in the
+score. A CI can post the file as it is.
 
 #### Mutation reports other tools read
 
@@ -1037,9 +1045,13 @@ TypeScript helper that only gained functions affects none), and every test
 where Supercov cannot read the imports. A dependency,
 lockfile, configuration or toolchain change affects every test and is reported
 as such; a test runner's settings affect only the runs that used that runner.
-A source file
-added since the run is outside every test's record; the working-tree check
-says so, and the suite should run in full.
+A JavaScript or TypeScript source file added since the run, under the roots it
+measured, is outside every test's record: it affects the tests whose own file,
+or a file they ran code in, imports it now, directly or through other files
+(`src/new.ts added since the run (imported by src/app.ts, which this test ran
+code in)`). One that nothing of theirs imports is named as `unknown, new file`;
+run what can reach it in full. `--json` lists each under `newFiles`, with
+`importedBy` or `"reach": "unknown, new file"`.
 
 A Rust test loads what it names by path: a fixture, a data file or a script
 named in its own function (or in its entry of a macro that declares a test
@@ -1064,6 +1076,15 @@ helper it imports or the data it reads, affects the tests it served and no
 others. A mock keeps its state between tests, so a mock's files count whole,
 not route by route; a file the application's server loaded, a preload of its
 own, affects every test it served.
+
+A changed file no test's import places -- a fixture another program reads, a
+file a command names, or another runner's test or helper -- is one any test
+may load. A Playwright run keeps what each of its Node processes (the
+runner, its workers, the servers) loaded and read, and then such a file
+affects its tests only where one of them did, or where it is in the tree of
+a configuration of a runner the run used (`tests/e2e/` for
+`tests/e2e/playwright.config.ts`): a changed integration test or its helper
+selects none of an e2e run's tests.
 
 ### Which affected tests check the change
 
@@ -1282,6 +1303,20 @@ saved into the latest of them; run such a round again.
 reusing the answers saved when its parts were assessed. `tests affected` of a
 merged run is answered from the runs it was merged from, which hold the record
 of what each test ran; a test in several of them is affected where any says so.
+The merged run keeps what each of them answers with (in its `parts/`
+directory: each run's metadata, its record of what each test ran, and the
+few entries of its archive that say what its tests loaded), so it answers
+alone, with its runs gone from `.supercov/runs`: a merged baseline can be
+cached and restored by itself. A merge made by a Supercov before 4.29.14 kept
+none of that, and needs its runs.
+
+A file a server of the run reads that the measured command itself wrote, and
+that git does not track -- a local stack's settings that a harness writes with
+each machine's ports and keys -- is not an input of the run: a later checkout
+cannot change it under the run, and each machine's part of a suite reads its
+own. The run leaves it out of what it records (and says so), so such parts
+merge, and a change to it affects no test. A tracked file the command
+rewrites, such as a mock's data it saves, stays an input.
 
 ## Add coverage measured elsewhere
 

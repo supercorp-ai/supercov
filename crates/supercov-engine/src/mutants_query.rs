@@ -105,6 +105,10 @@ pub struct DiffSummary {
     pub changed_lines: usize,
     /// Of those, the lines a mutant of the files asked about is on.
     pub lines_with_mutants: usize,
+    /// Of those, the lines of code no test of the run ran, by file: what no
+    /// mutant on them can be killed by, and no test checks.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub unrun_lines: BTreeMap<String, Vec<u32>>,
 }
 
 impl<'de> Deserialize<'de> for MutantStatus {
@@ -379,10 +383,16 @@ pub struct MutantEntry {
     pub stryker: Option<String>,
     /// The mutated span lies wholly inside the arguments of a logging call
     /// (`console.*`, or a method named `info`, `warn`, `error`, `debug`,
-    /// `trace` or `log`): all it can change is a log line. A survivor so
+    /// `trace` or `log`) or of a call that makes a logger (`createLogger`,
+    /// `getLogger`, `pino`, a logger's `.child`): all it can change is a log
+    /// line. A survivor so
     /// marked is equivalent for behaviour, and triage may set it aside.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub log_only: bool,
+    /// How many of the run's tests ran the line the mutant starts on, where
+    /// the run says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_tests: Option<usize>,
 }
 
 /// Where no statement or function point contains the mutant, the run
@@ -440,6 +450,7 @@ impl MutantEntry {
             strong: None,
             stryker,
             log_only: mutant.log_only,
+            line_tests: None,
         }
     }
 }
@@ -799,11 +810,26 @@ pub fn coverage_mutants_query(
             .collect::<std::collections::HashSet<_>>();
         let mut changed_lines = 0;
         let mut lines_with_mutants = 0;
+        let mut unrun_lines = BTreeMap::new();
         for (file, lines) in &diff.changed {
             if !measured.contains(file.as_str()) {
                 continue;
             }
             changed_lines += lines.len();
+            // Lines of code the run measured and no test ran; a line it has
+            // no record of (a comment, a blank) is no code.
+            // An index that cannot say leaves the lines unnamed.
+            let unrun = index
+                .lines_in_file(CoverageViewId::All, file)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|record| record.measured && !record.covered)
+                .filter_map(|record| u32::try_from(record.line).ok())
+                .filter(|line| lines.contains(line))
+                .collect::<Vec<_>>();
+            if !unrun.is_empty() {
+                unrun_lines.insert(file.clone(), unrun);
+            }
             lines_with_mutants += lines
                 .iter()
                 .filter(|line| {
@@ -827,6 +853,7 @@ pub fn coverage_mutants_query(
             commit: diff.commit.clone(),
             changed_lines,
             lines_with_mutants,
+            unrun_lines,
         });
     }
     let mut counts = MutantCounts::default();
@@ -933,6 +960,23 @@ pub fn coverage_mutants_query(
             entry
         })
         .collect::<Vec<_>>();
+    let mut page = page;
+    // How many tests ran each mutant's line, each file's lines read once.
+    let mut ran_by_file = BTreeMap::<String, BTreeMap<usize, usize>>::new();
+    for entry in &mut page {
+        if !ran_by_file.contains_key(&entry.file) {
+            let ran = index
+                .lines_in_file(CoverageViewId::All, &entry.file)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|record| (record.line, record.tests.len()))
+                .collect();
+            ran_by_file.insert(entry.file.clone(), ran);
+        }
+        entry.line_tests = ran_by_file[&entry.file]
+            .get(&(entry.span.start[0] as usize))
+            .copied();
+    }
     let pagination = agent_json::pagination(options.offset, options.limit, page.len(), total);
     let mut rows = match diff {
         // The change's mutants of each file it touched.
@@ -1546,15 +1590,37 @@ mod tests {
             manifest: CoverageManifest {
                 unmeasured: Vec::new(),
                 decisions: Vec::new(),
-                points: vec![PointMeta {
-                    id: "point".into(),
-                    kind: crate::coverage_analysis::PointKind::Statement,
-                    file: "app/route.ts".into(),
-                    line: 1,
-                    column: 1,
-                    source: "work();".into(),
-                    label: None,
-                }],
+                points: vec![
+                    PointMeta {
+                        id: "point".into(),
+                        kind: crate::coverage_analysis::PointKind::Statement,
+                        file: "app/route.ts".into(),
+                        line: 1,
+                        column: 1,
+                        source: "work();".into(),
+                        label: None,
+                    },
+                    // A line no test runs.
+                    PointMeta {
+                        id: "idle".into(),
+                        kind: crate::coverage_analysis::PointKind::Statement,
+                        file: "app/route.ts".into(),
+                        line: 2,
+                        column: 1,
+                        source: "idle();".into(),
+                        label: None,
+                    },
+                    // A line whose obligations are declined, below.
+                    PointMeta {
+                        id: "declined".into(),
+                        kind: crate::coverage_analysis::PointKind::Statement,
+                        file: "app/route.ts".into(),
+                        line: 3,
+                        column: 1,
+                        source: "eval(code);".into(),
+                        label: None,
+                    },
+                ],
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
@@ -1614,6 +1680,13 @@ mod tests {
         ] {
             view.scope = Some(scope.clone());
         }
+        // Line 3 is not measured: neither run nor unrun.
+        report
+            .view
+            .lines
+            .iter_mut()
+            .filter(|line| line.line == 3)
+            .for_each(|line| line.measured = false);
         report.mutation = mutation.map(|mutants| crate::coverage_index::MutationResults {
             mutant_set: "stryker-js@10.1.1".into(),
             mutants,
@@ -1858,7 +1931,7 @@ mod tests {
                     commit: None,
                     changed: BTreeMap::from([(
                         "app/route.ts".to_owned(),
-                        std::collections::BTreeSet::from([1, 2, 10]),
+                        std::collections::BTreeSet::from([1, 2, 3, 10]),
                     )]),
                     untracked: std::collections::BTreeSet::from([
                         "app/router.ts".to_owned(),
@@ -1889,8 +1962,22 @@ mod tests {
             );
             assert_eq!(pagination.total, 3);
             let diff = data.diff.unwrap();
-            assert_eq!(diff.changed_lines, 4);
+            assert_eq!(diff.changed_lines, 5);
             assert_eq!(diff.lines_with_mutants, 3);
+            // Of the changed lines, line 2 is code no test ran; line 3 is not
+            // measured, and line 10 has no record of code.
+            assert_eq!(
+                diff.unrun_lines,
+                BTreeMap::from([("app/route.ts".to_owned(), vec![2])])
+            );
+            // How many tests ran each mutant's line, where the run says.
+            assert_eq!(
+                data.mutants
+                    .iter()
+                    .map(|mutant| mutant.line_tests)
+                    .collect::<Vec<_>>(),
+                [Some(1), None, None]
+            );
             let joined = data.stryker.unwrap();
             assert_eq!(joined.matched, 1);
             assert_eq!(joined.only_stryker.total, 0);

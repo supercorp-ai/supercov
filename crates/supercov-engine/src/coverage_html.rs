@@ -224,6 +224,10 @@ fn mutation_card(section: &Section) -> String {
                 (strong.unviable, "unviable: does not compile".into()),
                 (strong.error, "error: no verdict".into()),
                 (strong.not_run, format!("not run: no driver for {undriven}")),
+                (
+                    strong.survived_so_far,
+                    "survived so far: the rest of their candidates not run yet".into(),
+                ),
                 (strong.pending, "without a strong verdict yet".into()),
             ]),
         );
@@ -238,6 +242,7 @@ fn mutation_card(section: &Section) -> String {
                         mutant.outcome,
                         crate::mutation_report::Outcome::Error
                             | crate::mutation_report::Outcome::NotRun
+                            | crate::mutation_report::Outcome::SurvivedSoFar
                             | crate::mutation_report::Outcome::Pending
                     )
             })
@@ -895,6 +900,7 @@ mod tests {
             commit: None,
             changed_lines: 4,
             lines_with_mutants: 1,
+            unrun_lines: BTreeMap::new(),
         });
         let page = html(&view(), &BTreeMap::new(), "", Some(&weak));
         for expected in [
@@ -921,6 +927,16 @@ mod tests {
             page.contains("No mutant is on a line this change added or changed."),
             "{page}"
         );
+        // Survived so far: no verdict, and why is given.
+        let mut open = section(vec![mutant("src/a.js", 1, false, SurvivedSoFar)], true);
+        open.tally.strong.survived_so_far = 1;
+        let page = html(&view(), &BTreeMap::new(), "", Some(&open));
+        for expected in [
+            "<strong>1</strong> survived so far: the rest of their candidates not run yet</li>",
+            "Why some have no verdict:",
+        ] {
+            assert!(page.contains(expected), "{expected} in {page}");
+        }
         // Every verdict one a score counts: no reasons to give.
         let settled = section(vec![mutant("src/a.js", 1, false, Killed)], true);
         let page = html(&view(), &BTreeMap::new(), "", Some(&settled));

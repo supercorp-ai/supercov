@@ -11636,8 +11636,28 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
     assert!(fired_at(&said, "run-store.discover-runs"), "{said}");
-    // A run it was merged from that is no longer stored cannot answer.
+    // The merge keeps what its runs answer with: with them gone from the
+    // store, it answers as before.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
+    std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&second)).unwrap();
+    let alone = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        alone.contains("1 of 3 tests affected by changes since the run"),
+        "{alone}"
+    );
+    // A merge that kept nothing of a run no longer stored cannot answer.
+    let merged = project.latest();
+    std::fs::remove_dir_all(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&merged)
+            .join("parts")
+            .join(&first),
+    )
+    .unwrap();
     let gone = project
         .supercov(&["runs", "latest", "tests", "affected"])
         .exits(2);
@@ -17496,6 +17516,8 @@ fn tests_affected_names_the_record_it_cannot_read() {
         project
             .root
             .join(".supercov/runs")
+            .join(&run)
+            .join("parts")
             .join(&first)
             .join("test-executions.json"),
     )
@@ -21427,8 +21449,8 @@ fn mutants_on_a_change_are_those_on_its_lines() {
         &[
             "### Mutants on this change",
             "on 4 of 4 changed lines since `base`",
-            "| Where | Mutant | Status | Why |",
-            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | `sum` never equal to `10` |",
+            "| Where | Mutant | Status | Tests on its line | Why |",
+            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | 1 | `sum` never equal to `10` |",
         ],
     );
 
@@ -21587,6 +21609,8 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
             },
             "strong": null,
             "stryker": null,
+            // How many of the run's tests ran its line.
+            "lineTests": 2,
         })
     );
 
@@ -28840,8 +28864,8 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
         &[
             "Mutation score **66.7%** (of 3 of ",
             " mutants) · 1 killed · 1 timed out · 1 survived · 1 not run (no driver)",
-            "| Where | Mutant | Weak | Strong | Why |",
-            " | survived | every test that reached it passed with it in place (2 tests ran) |",
+            "| Where | Mutant | Weak | Strong | Tests on its line | Why |",
+            " | survived | 2 | every test that reached it passed with it in place (2 tests ran) |",
         ],
     );
     let stryker: serde_json::Value =

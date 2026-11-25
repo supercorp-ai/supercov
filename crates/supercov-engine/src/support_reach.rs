@@ -34,15 +34,54 @@ pub struct SupportReach {
     /// Each of those tests' name, as the run names it.
     #[serde(default)]
     pub names: BTreeMap<String, String>,
+    /// Every project file any Node process of the run loaded or read --
+    /// the test runner, its workers, the servers -- served a request or
+    /// not: the run's evidence of what its tests could load. None for a run
+    /// recorded before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded: Option<BTreeSet<String>>,
 }
 
 impl SupportReach {
+    /// Leaves out the files the measured command wrote that the project does
+    /// not track, and returns them. Such a file -- a local stack's settings,
+    /// written by the harness with each machine's ports and keys -- is what
+    /// the command made, not something the checkout holds: a later checkout
+    /// cannot change it under the run, and runs of the command on several
+    /// machines read it different. Recorded, a suite measured in parts on
+    /// several machines could not be merged. A tracked file the command
+    /// rewrote (a mock's data it saves) is kept, as is every file where git
+    /// cannot say what it tracks.
+    pub fn leave_out_generated(&mut self, root: &Path, written: &BTreeSet<String>) -> Vec<String> {
+        let candidates = self
+            .files
+            .keys()
+            .filter(|file| written.contains(*file))
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let Some(tracked) = tracked_of(root, &candidates) else {
+            return Vec::new();
+        };
+        let generated = candidates
+            .into_iter()
+            .filter(|file| !tracked.contains(file))
+            .collect::<Vec<_>>();
+        self.files.retain(|file, _| !generated.contains(file));
+        generated
+    }
+
     /// One reach from several (a merge's runs).
     pub fn extend(&mut self, other: SupportReach) {
         for (file, tests) in other.files {
             self.files.entry(file).or_default().extend(tests);
         }
         self.names.extend(other.names);
+        if let Some(loaded) = other.loaded {
+            self.loaded.get_or_insert_with(BTreeSet::new).extend(loaded);
+        }
     }
 }
 
@@ -113,7 +152,9 @@ pub fn read(directory: &Path, workspace: &Path, served: &[ServedTest]) -> Option
     }
     let mut reach = SupportReach::default();
     let mut any = false;
+    let mut loaded = BTreeSet::new();
     for process in processes {
+        loaded.extend(process.files.iter().cloned());
         // A process no request reached is not a server: a test worker loads
         // the tests' helpers, which their imports already place.
         if process.served.is_empty() && process.unscoped.is_empty() {
@@ -145,7 +186,36 @@ pub fn read(directory: &Path, workspace: &Path, served: &[ServedTest]) -> Option
                 .extend(tests.iter().cloned());
         }
     }
+    // What any process loaded is the run's own evidence, whoever it served.
+    if !loaded.is_empty() {
+        any = true;
+        reach.loaded = Some(loaded);
+    }
     any.then_some(reach)
+}
+
+/// Which of `files` git tracks in the project at `root`; none where git
+/// cannot say (no repository, no git).
+fn tracked_of(root: &Path, files: &[String]) -> Option<BTreeSet<String>> {
+    use crate::fault_process::Launch;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--"])
+        .args(files)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .launch_output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|file| !file.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// A file URL's path, its percent escapes decoded.
@@ -274,9 +344,88 @@ mod tests {
             Some(&both)
         );
         assert!(!reach.files.contains_key("tests/helpers.ts"));
+        // The worker loaded it all the same: the run's evidence says so.
+        assert!(reach.loaded.as_ref().unwrap().contains("tests/helpers.ts"));
+        // Merged, what either loaded; one recorded before it was kept adds
+        // nothing to it.
+        let mut merged = SupportReach::default();
+        merged.extend(SupportReach::default());
+        assert_eq!(merged.loaded, None);
+        merged.extend(reach.clone());
+        assert_eq!(merged.loaded, reach.loaded);
         assert_eq!(
             reach.names.get("t-refund").map(String::as_str),
             Some("t-refund")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A file the command wrote that git does not track is left out of the
+    /// reach; one git tracks stays, rewritten or not, and so does every file
+    /// where there is no repository to ask.
+    #[test]
+    fn generated_files_are_left_out() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-support-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(root.join("tests/stack")).unwrap();
+        let tests = BTreeSet::from(["t-a".to_owned()]);
+        let reach = SupportReach {
+            files: [
+                "tests/stack/.env.local",
+                "tests/mock.json",
+                "tests/mock.mjs",
+            ]
+            .into_iter()
+            .map(|file| (file.to_owned(), tests.clone()))
+            .collect(),
+            names: BTreeMap::new(),
+            loaded: None,
+        };
+        let written = ["tests/stack/.env.local", "tests/mock.json"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        // Outside a repository: git cannot say, and everything stays.
+        // (The temporary directory is in no repository.)
+        let mut outside = reach.clone();
+        assert!(outside.leave_out_generated(&root, &written).is_empty());
+        assert_eq!(outside, reach);
+        // Nothing written: nothing to ask.
+        let mut unwritten = reach.clone();
+        assert!(
+            unwritten
+                .leave_out_generated(&root, &BTreeSet::new())
+                .is_empty()
+        );
+        assert_eq!(unwritten, reach);
+        let git = |arguments: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(arguments)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        fs::write(root.join("tests/mock.json"), "{}").unwrap();
+        fs::write(root.join("tests/mock.mjs"), "").unwrap();
+        fs::write(root.join("tests/stack/.env.local"), "KEY=1").unwrap();
+        git(&["add", "tests/mock.json", "tests/mock.mjs"]);
+        let mut inside = reach.clone();
+        assert_eq!(
+            inside.leave_out_generated(&root, &written),
+            ["tests/stack/.env.local"]
+        );
+        assert_eq!(
+            inside.files.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["tests/mock.json", "tests/mock.mjs"]
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -354,7 +503,9 @@ mod tests {
             BTreeSet::from(["t-gone".to_owned()])
         );
         assert!(reach.names.is_empty());
-        // Nothing served: no reach at all; no directory: the same.
+        // What every process loaded, a test worker's too.
+        assert_eq!(reach.loaded, Some(BTreeSet::from(["mock.json".to_owned()])));
+        // Nothing served: what was loaded alone; no directory: nothing.
         let quiet = root.join("quiet");
         fs::create_dir(&quiet).unwrap();
         fs::write(
@@ -362,7 +513,13 @@ mod tests {
             serde_json::json!({ "loaded": at("a.js") }).to_string(),
         )
         .unwrap();
-        assert_eq!(read(&quiet, &workspace, &[]), None);
+        assert_eq!(
+            read(&quiet, &workspace, &[]),
+            Some(SupportReach {
+                loaded: Some(BTreeSet::from(["a.js".to_owned()])),
+                ..SupportReach::default()
+            })
+        );
         assert_eq!(read(&root.join("absent"), &workspace, &[]), None);
         fs::remove_dir_all(root).unwrap();
     }

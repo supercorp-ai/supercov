@@ -634,6 +634,24 @@ fn read_metadata(path: &Path) -> Result<RunMetadata, RunStoreError> {
     Ok(metadata)
 }
 
+/// Where a merged run keeps what each run it was merged from answers with
+/// (`run_merge::keep_parts`): a directory of each, named by its id.
+pub const PARTS_DIRECTORY: &str = "parts";
+
+/// One of the runs `run` was merged from, as the merge kept it, or else as
+/// the store still holds it.
+pub fn merged_part(inventory: &RunInventory, run: &StoredRun, id: &str) -> Option<StoredRun> {
+    load_run(&run.directory.join(PARTS_DIRECTORY).join(id), id)
+        .ok()
+        .or_else(|| {
+            inventory
+                .runs
+                .iter()
+                .find(|stored| stored.id == id)
+                .cloned()
+        })
+}
+
 fn load_run(directory: &Path, entry: &str) -> Result<StoredRun, RunStoreError> {
     if !valid_run_id(entry) {
         return Err(RunStoreError::InvalidRun("run directory name"));

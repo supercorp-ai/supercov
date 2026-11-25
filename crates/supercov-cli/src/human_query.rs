@@ -3221,6 +3221,7 @@ mod tests {
         };
         let mutant = |line: u32, status: MutantStatus| MutantEntry {
             log_only: false,
+            line_tests: None,
             id: format!("src/a.ts:{line}:3-{line}:9:LogicalOperator:&&"),
             file: "src/a.ts".into(),
             span: MutantSpan {
@@ -3271,6 +3272,7 @@ mod tests {
                 commit: None,
                 changed_lines: 40,
                 lines_with_mutants: 31,
+                unrun_lines: Default::default(),
             }),
             fail_on: None,
         };
@@ -3281,7 +3283,7 @@ mod tests {
         assert!(text.starts_with("### Mutants on this change\n\n**31 mutants** on 31 of 40 changed lines since `origin/main` (from `0123456789ab`): weak score **3.2%** · 30 not infected · 1 infected\n"), "{text}");
         assert_eq!(text.matches("| `src/a.ts:").count(), 25, "{text}");
         assert!(
-            text.contains("| `src/a.ts:1:3` | `` a \\|\\| `b` → a && `b` `` | not infected | `a` was always true \\| never false |"),
+            text.contains("| `src/a.ts:1:3` | `` a \\|\\| `b` → a && `b` `` | not infected | — | `a` was always true \\| never false |"),
             "{text}"
         );
         assert!(!text.contains("src/a.ts:40:"), "{text}");

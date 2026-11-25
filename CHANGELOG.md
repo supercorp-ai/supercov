@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A merged run answers alone. It keeps what each run it was merged from answers with (its metadata, its record of what each test ran, and the entries of its archive that say what its tests loaded) in its `parts/` directory, a merge of merges what theirs do, so `tests affected` of a merged run, and the check of it against the checkout, no longer need its runs in `.supercov/runs`: a merged baseline can be cached and restored by itself. Before, with its runs gone, it answered `merged from run_…, which is no longer stored`; a merge made before still does, and says to merge the runs again.
+- `mutants --format markdown` is a pull request's comment a CI can post as it is: each mutant's row says how many of the run's tests ran its line; a change's comment names its lines of code no test ran, file by file; survivors that only change a log line are folded in a `<details>` of their own, and so are the mutants `survived so far`, counted apart in the verdicts' line. `mutants --json` gives each mutant's `lineTests`, and `diff.unrunLines`.
+- A mutant `survived so far` is an outcome of its own in every report: `survived so far` in the markdown and HTML reports, `Pending` in StrykerJS's `mutation.json`, `STARTED` in PIT's `mutations.xml`. It was counted as an error.
+- A mutant in the arguments of what makes a logger only changes a log line (`logOnly`), as one in a logging call's does: `createLogger(...)`, `getLogger(...)` (log4js, winston, bunyan) and `pino(...)`, called alone or as a method, and `.child(...)` of a logger (a receiver named like one, or a logger such a call made). Replacing a logger's context object (`createLogger({ domain: 'integrations' })` → `{}`, `logger.child({ request })` → `{}`) was listed among the survivors to fix.
+- `tests affected` of a Playwright run no longer takes another runner's tests and helpers to be files every test may load. A changed file no test's import places affected every test of the run; on a large application's e2e suite, a pull request that changed an integration test or its helper selected every e2e test. Each Node process of a Playwright run now notes what it loaded and read, the test runner's and its workers' as much as the servers', and such a file affects the run's tests only where one of them loaded or read it, or where it is in the tree of a configuration of a runner the run used (`tests/e2e/` for `tests/e2e/playwright.config.ts`). A run recorded before takes it as before.
+- `tests affected` reads a JavaScript or TypeScript source added since the run through the imports as they are now: it affects the tests whose own file, or a file they ran code in, imports it, directly or through other files (`src/new.ts added since the run (imported by src/app.ts, which this test ran code in)`). One nothing of theirs imports is said to be of unknown reach (`unknown, new file`) where before it was not mentioned and selected no test; `--json` lists each under `newFiles`.
+
+**Fixed**
+
+- Runs of one suite measured in parts on several machines merge again where each machine's harness writes its own settings files, which the suite's servers read: `tests/stack/.env.local` written by the measured command into the copy it runs in, with each machine's ports and keys. Such a file was recorded as an input of the run, so the parts read as measured on different files, and `merge` refused them, `--allow-changed` or not (`tests/stack/.env.local changed, and 1 of its tests reached it through a server that served them`). The refusal is as old as the record of what servers read (4.12.0), not new in 4.29.13: 4.29.12 refuses the same parts the same way. A file a server read that the command itself created or changed during the run, and that git does not track, is now left out of the run's record, and the run says so (`1 file(s) the servers read were written by the command and are not tracked, so they are not inputs of the run`). A tracked file the command rewrites, such as a mock's data it saves, is still an input. Parts recorded before must be measured again to merge.
+
 ## 4.29.13
 
 **Changed**

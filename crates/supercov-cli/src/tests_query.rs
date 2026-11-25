@@ -918,6 +918,19 @@ fn render(data: &Value) -> String {
                 .join("; ")
         ));
     }
+    let unknown = data["newFiles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|file| file["importedBy"].is_null())
+        .filter_map(|file| file["file"].as_str())
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        out.push_str(&format!(
+            "Added since the run, and imported by nothing its tests ran or load: {} (unknown, new file). No test's record says what reaches it; run what can reach it in full.\n",
+            unknown.join("; ")
+        ));
+    }
     entries(&mut out, &affected);
     if !undetermined.is_empty() {
         out.push_str(
@@ -1136,12 +1149,18 @@ mod tests {
         let data = json!({
             "run": "r", "summary": {"tests": 1}, "affected": [], "undetermined": [],
             "unmeasured": ["src/lib.rs: windows (line 7)"],
+            "newFiles": [
+                {"file": "src/new.ts", "reach": "unknown, new file"},
+                {"file": "src/used.ts", "importedBy": ["src/a.ts"]},
+            ],
         });
+        let text = render(&data);
+        assert!(text.contains("src/lib.rs: windows (line 7)"), "{text}");
         assert!(
-            render(&data).contains("src/lib.rs: windows (line 7)"),
-            "{}",
-            render(&data)
+            text.contains("Added since the run, and imported by nothing its tests ran or load: src/new.ts (unknown, new file)."),
+            "{text}"
         );
+        assert!(!text.contains("src/used.ts"), "{text}");
     }
 
     #[test]
