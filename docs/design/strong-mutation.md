@@ -769,6 +769,19 @@ reason }`, where `tests` is how many ran. Statuses: `killed`, `survived`,
 `(killed + timeout) / (killed + timeout + survived + no-coverage)`, as
 StrykerJS's.
 
+A survivor whose mutated span lies wholly inside the arguments of a logging
+call -- `console.*`, or a method named `info`, `warn`, `error`, `debug`,
+`trace` or `log` on any receiver -- only changes a log line: equivalent for
+behaviour unless a test reads the log. It is still `survived`, and counts as
+one in the score; the listing marks it (`logOnly` in JSON, `(only changes a
+log line)` in text), the pass summary and the `Strong` line of `mutants`
+count them on their own (`survived 185 (109 only change a log line)`), and
+the pass summary lists the other survivors first. The mutant list records it
+as it lists the mutants (`logOnly` in `mutants.json`), so a run listed by an
+earlier release has none marked until it is listed again. On a large
+application's e2e areas, 109 of 169 survivors in one and about 10 of 41 in
+another were of this kind.
+
 While a pass runs, a line on stderr every 15 s says how far it got: the
 mutants with a verdict of those it runs, how many are killed, timed out,
 survived and errors, the time so far, and the time left at this pace. The
@@ -821,6 +834,18 @@ fixture's header, the page's cookies and fetch header, a child process's
 request's async work as the scope does. A separate `x-supercov-mutant` header
 would have reached only what a header reaches: a page's first navigation
 carries cookies, not the fetch patch's header.
+
+A test that reaches the server without a page carries it too, and a fixture
+test (`mutants_test_kills_server_mutants_tests_reach_without_a_page`) holds
+each way to it: a request context the test makes itself
+(`request.newContext()`, the fixture's `playwright.request`) and the page's
+own `page.request` (the context's cookies), a request a `page.route` handler
+sends again with `route.fetch` (the browser context's cookies go with it),
+and Node's `fetch` and `http` from the test's process (the runtime's patch
+adds the header from the test's active scope). What carries no scope is a
+request from a client the runtime does not reach: `curl` or another
+language's process the test starts, a tool outside Node. Its work names no
+test; see "Run alone" below for how such a mutant still gets its verdict.
 
 **In the server**, the first scope that names a mutant turns the process's
 switches into accessors: each switch's `a` is read from the request being
@@ -1229,6 +1254,34 @@ check) is not such work: it ran with no mutant, as every request runs with
 its own, and leaving it out keeps every handler's mutant from running alone.
 That is the one place the pass trusts that a request's work does not reach
 the tests' through shared state; the controls after each kill check the rest.
+
+A request that named no test while tests ran is such work, though by time it
+is no test's: with several tests running at once it is credited to none of
+them, and one of them may have sent it from a client that carries no scope
+(`curl` from the test). Each request runs with the mutant its own scope
+names, so a mutant switched on per request never reached it, and its
+candidates all passing proved nothing: before 4.29.10 such a mutant was
+`survived`. The run keeps, for work no test was credited with, whether a
+test was running when its request came (from each test's span, its first to
+its last moment, or its phases where it has none), and the plan marks the
+mutant `by-time`, so it runs alone with the server started with it. The
+tests that count are those the server served a request of, and those no
+server did (a test that only sends what carries no name): a harness that
+starts a server a slot checks each new one for readiness while the earlier
+slots' tests run, and counting those tests sent 9,002 of a 10,503-mutant
+plan to run alone, where its own server's tests send none.
+
+So does a mutant whose switch a server evaluates as it loads a module,
+though its code is in a function: an arrow mutated whole (`() => undefined`)
+where the module defines it at its top level (`export const GET = async ()
+=> ...`, a handler in an object literal). The switch picks the arrow once, as
+the server loads the module, under whatever request loaded it, and every
+later request gets that arrow whatever mutant it names: such a mutant also
+survived before 4.29.10. The strong build already marks such a switch
+(`static` in the copy's list); the plan marks a mutant whose code a server
+ran (`serverRan`), and the driver runs a `static` one of those alone
+(`module-level`). A `static` mutant only a page ran stays per attempt: a
+page loads its modules after the attempt's init script has named the mutant.
 
 Each further round a driver asks for (a `restart` record in the results: one
 mutant alone, a serial round, the rest of what did not finish, the main

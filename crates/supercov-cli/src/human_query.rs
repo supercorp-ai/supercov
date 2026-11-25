@@ -1063,13 +1063,34 @@ pub(crate) fn strong_verdict(mutant: &supercov_engine::mutants_query::MutantEntr
 
 /// The hint that a mutant not infected is practically untestable.
 fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    let log_line = if mutant.log_only {
+        "  (only changes a log line)"
+    } else {
+        ""
+    };
     match mutant.weak.untestable {
         Some(kind)
             if mutant.status == supercov_engine::coverage_index::MutantStatus::NotInfected =>
         {
-            format!("  ({} boundary)", kind.name())
+            format!("  ({} boundary){log_line}", kind.name())
         }
-        _ => String::new(),
+        _ => log_line.to_owned(),
+    }
+}
+
+/// A strong verdict's count as the summary says it: the survivors with how
+/// many of them only change a log line.
+pub(crate) fn strong_count(status: &str, n: usize, log_only_survivors: Option<usize>) -> String {
+    match log_only_survivors {
+        // Never `Some(0)`: the summary leaves out a count of none.
+        Some(log_only) if status == "survived" => {
+            format!(
+                "{} {status} ({} only change a log line)",
+                count(n),
+                count(log_only)
+            )
+        }
+        _ => format!("{} {status}", count(n)),
     }
 }
 
@@ -1385,7 +1406,7 @@ fn mutants_text(
                 score(summary.mutation_score),
                 strong
                     .iter()
-                    .map(|(status, n)| format!("{} {status}", count(*n)))
+                    .map(|(status, n)| strong_count(status, *n, summary.log_only_survivors))
                     .collect::<Vec<_>>()
                     .join(" · ")
             ));
@@ -3047,6 +3068,18 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The survivors' count says how many only change a log line; other
+    /// verdicts' counts, and a summary with none so marked, say only theirs.
+    #[test]
+    fn the_survivors_count_says_how_many_only_change_a_log_line() {
+        assert_eq!(
+            strong_count("survived", 185, Some(109)),
+            "185 survived (109 only change a log line)"
+        );
+        assert_eq!(strong_count("killed", 40, Some(109)), "40 killed");
+        assert_eq!(strong_count("survived", 3, None), "3 survived");
+    }
+
     /// Each branch outcome a frontend labels is said as the outcome not
     /// observed, and each assertion confidence by what it means.
     #[test]
@@ -3187,6 +3220,7 @@ mod tests {
             MutantsSummary, WeakResult,
         };
         let mutant = |line: u32, status: MutantStatus| MutantEntry {
+            log_only: false,
             id: format!("src/a.ts:{line}:3-{line}:9:LogicalOperator:&&"),
             file: "src/a.ts".into(),
             span: MutantSpan {

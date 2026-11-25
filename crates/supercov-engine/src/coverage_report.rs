@@ -652,14 +652,31 @@ pub const ATTRIBUTION_PARTIAL: &str = "partial";
 /// reach and never hides any of it.
 pub const ATTRIBUTION_BY_TIME: &str = "by-time";
 
+/// What work no test was credited with keeps of its request's number: that
+/// it was done for a request, sent while no test was running (a web server's
+/// readiness check, work between tests).
+pub(crate) const REQUEST_OUTSIDE_TESTS: u64 = 0;
+
+/// What work no test was credited with keeps of its request's number: that
+/// it was done for a request that named no test, sent while a test was
+/// running (several at once, or one whose phases do not cover it). A test
+/// may have sent it from a client that carries no test's name (`curl` in a
+/// child process, a tool or language the runtime does not reach), so a
+/// mutant switched on per request never reaches it: strong mutation starts
+/// the server with such a mutant switched on (`strong_plan`).
+pub(crate) const REQUEST_DURING_TESTS: u64 = 1;
+
 /// Server work for a request that named no test -- a webhook a mock server
 /// sends -- done while one test, and only one, was running is that test's,
 /// credited by the time it ran. Where tests ran at once, or none was
-/// running (start-up, between tests), it stays no test's, and is returned.
+/// running (start-up, between tests), it stays no test's, and is returned;
+/// its request number says which ([`REQUEST_DURING_TESTS`],
+/// [`REQUEST_OUTSIDE_TESTS`]).
 ///
 /// A test's time is from its first phase to the end of its last: what it did
 /// is known to fall inside, and work after it is left alone rather than
-/// guessed at.
+/// guessed at. Whether any test was running is judged by each test's whole
+/// span where it has one, from its start to its end.
 fn credit_by_time(
     raw_results: &mut [RawTestResult],
     processes: Vec<Vec<ServerRecord>>,
@@ -681,18 +698,66 @@ fn credit_by_time(
             Some((index, start, end, attempt))
         })
         .collect::<Vec<_>>();
+    // Each test's whole time: its span, or its phases where it has none.
+    let running = raw_results
+        .iter()
+        .filter(|raw| raw.role != "background")
+        .filter_map(|raw| {
+            let attempt = raw.scope.as_ref().map(|scope| scope.attempt_id.clone());
+            raw.span
+                .map(|[start, end]| (start, end, attempt.clone()))
+                .or_else(|| {
+                    let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+                    // Phases there are, as `start` says.
+                    let end = raw
+                        .phases
+                        .iter()
+                        .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                        .max()
+                        .expect("a test with a phase's start has its end");
+                    Some((start, end, attempt))
+                })
+        })
+        .collect::<Vec<_>>();
+    // The attempts each process served a request naming.
+    let served_by = processes
+        .iter()
+        .map(|records| {
+            records
+                .iter()
+                .filter(|record| record.record_type == "served")
+                .filter_map(|record| record.id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    let served_anywhere = served_by
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let mut work = Vec::new();
-    for records in processes {
+    for (records, served) in processes.into_iter().zip(served_by) {
+        // The tests whose time says whether a request this process served
+        // naming no test came while a test ran: those it served a request
+        // of, and those no process did (a test that only sends what carries
+        // no name, `curl`). Another server's tests are not this one's: a
+        // harness that starts a server a slot, each as the slot begins,
+        // checks each new one is ready while the others' tests run.
+        let during_tests = |at: i64| {
+            running.iter().any(|(start, end, attempt)| {
+                *start <= at
+                    && at <= *end
+                    && (served.is_empty()
+                        || attempt
+                            .as_ref()
+                            .is_none_or(|id| served.contains(id) || !served_anywhere.contains(id)))
+            })
+        };
         // The attempts this process served a request naming, and among those
         // alone, where it served any: with a server per worker, the worker's
         // test, whatever the other workers ran meanwhile. A process that
         // served none -- one only an unmeasured mock calls -- is judged
         // against every test running.
-        let served = records
-            .iter()
-            .filter(|record| record.record_type == "served")
-            .filter_map(|record| record.id.clone())
-            .collect::<std::collections::HashSet<_>>();
         let candidates = windows
             .iter()
             .filter(|(_, _, _, attempt)| {
@@ -718,13 +783,14 @@ fn credit_by_time(
                 running.next().is_none().then_some(only.0)
             });
             owners.extend(owner);
-            work.push((owner, record));
+            let during = owner.is_none() && record.timestamp_ms.is_some_and(during_tests);
+            work.push((owner, record, during));
         }
         if let Some(values) = values {
             work.extend(
                 owners
                     .into_iter()
-                    .map(|owner| (Some(owner), values.clone())),
+                    .map(|owner| (Some(owner), values.clone(), false)),
             );
         }
     }
@@ -732,7 +798,7 @@ fn credit_by_time(
     // A request's work appears once per request; what stays no test's is
     // counted once.
     let mut kept = std::collections::HashSet::new();
-    for (owner, record) in work {
+    for (owner, record, during) in work {
         match owner {
             Some(index) => {
                 let raw = &mut raw_results[index];
@@ -741,11 +807,19 @@ fn credit_by_time(
             }
             None => {
                 // Which request it was is left out, so a request's work is
-                // counted once; that it was a request's is kept (`Some(0)`):
-                // strong mutation switches a request's mutant per request,
-                // and start-up work only by starting the server with it.
+                // counted once; that it was a request's is kept, and whether
+                // a test was running then: strong mutation switches a
+                // request's mutant per request, and start-up work, or a
+                // request a test may have sent without its name, only by
+                // starting the server with it.
                 let mut record = record;
-                record.request = record.request.map(|_| 0);
+                record.request = record.request.map(|_| {
+                    if during {
+                        REQUEST_DURING_TESTS
+                    } else {
+                        REQUEST_OUTSIDE_TESTS
+                    }
+                });
                 if kept.insert(serde_json::to_vec(&record).unwrap_or_default()) {
                     unattributed.push(record);
                 }
@@ -5363,15 +5437,17 @@ mod tests {
         // A third that overlaps the second: they ran at once.
         let mut beside = raw("report", 0, "passed", &[]);
         beside.phases = vec![phase(350, 450)];
-        // A test that reported no phase has no time to credit.
-        let unphased = raw("unphased", 0, "passed", &[]);
+        // A test that reported no phase has no time to credit, though its
+        // span says it was running.
+        let mut unphased = raw("unphased", 0, "passed", &[]);
+        unphased.span = Some([600, 700]);
         let mut results = vec![first, second, beside, unphased];
         // A second process repeats the work left after every test: it is
         // counted once.
         let left = credit_by_time(
             &mut results,
             vec![
-                vec![at(50), at(155), loading, at(320), at(360), at(500)],
+                vec![at(50), at(155), loading, at(320), at(360), at(500), at(650)],
                 vec![at(500)],
             ],
         );
@@ -5385,11 +5461,25 @@ mod tests {
         assert_eq!(results[2].server.len(), 0);
         assert_eq!(results[2].attribution, ATTRIBUTION_EXACT);
         assert!(results[3].server.is_empty());
+        // What is left says whether a test was running when its request
+        // came: while two ran at once, one of them may have sent it.
+        assert_eq!(
+            left.iter()
+                .map(|record| (record.timestamp_ms.unwrap(), record.request))
+                .collect::<Vec<_>>(),
+            [
+                (50, Some(REQUEST_OUTSIDE_TESTS)),
+                (170, None),
+                (360, Some(REQUEST_DURING_TESTS)),
+                (500, Some(REQUEST_OUTSIDE_TESTS)),
+                (650, Some(REQUEST_DURING_TESTS)),
+            ]
+        );
         let left = left
             .iter()
             .filter_map(|record| record.timestamp_ms)
             .collect::<Vec<_>>();
-        assert_eq!(left, [50, 170, 360, 500]);
+        assert_eq!(left, [50, 170, 360, 500, 650]);
         // Still complete: the credit adds to the test's reach, never hides it.
         assert!(coverage_is_complete(ATTRIBUTION_BY_TIME));
         assert_eq!(
@@ -5439,13 +5529,24 @@ mod tests {
             outcome: None,
         };
         // Two workers' tests overlap from 150 to 200; each has its own server.
-        let mut results = vec![scoped("first", 100, 200), scoped("second", 150, 300)];
+        // A third test, from 400 to 500, sends only what names no test.
+        let mut results = vec![
+            scoped("first", 100, 200),
+            scoped("second", 150, 300),
+            scoped("curl", 400, 500),
+        ];
         let first_server = vec![
             record("served", "attempt-first", 101, None),
             // During the overlap: the first worker's server, so its test.
             record("hit", "webhook", 170, Some(1)),
-            // While only the second worker's test runs: not this server's.
+            // While only the second worker's test runs: not this server's,
+            // and not sent while a test of this server ran (a server a
+            // harness starts for a later slot, checked while the earlier
+            // slot's tests run).
             record("hit", "late", 250, Some(2)),
+            // While the test no server was named by runs: it may have sent
+            // it.
+            record("hit", "curl", 450, Some(3)),
         ];
         let second_server = vec![record("served", "attempt-second", 151, None)];
         let left = credit_by_time(&mut results, vec![first_server, second_server]);
@@ -5453,8 +5554,13 @@ mod tests {
         assert_eq!(results[0].server[0].id.as_deref(), Some("webhook"));
         assert!(results[1].server.is_empty());
         assert_eq!(
-            left.iter().filter_map(|r| r.id.clone()).collect::<Vec<_>>(),
-            ["late"],
+            left.iter()
+                .map(|r| (r.id.clone().unwrap(), r.request))
+                .collect::<Vec<_>>(),
+            [
+                ("late".to_owned(), Some(REQUEST_OUTSIDE_TESTS)),
+                ("curl".to_owned(), Some(REQUEST_DURING_TESTS)),
+            ],
             "served markers are not coverage"
         );
     }

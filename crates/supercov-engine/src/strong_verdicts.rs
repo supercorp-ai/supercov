@@ -287,6 +287,7 @@ mod tests {
                 .collect(),
             whole_files: whole.iter().map(|file| (*file).to_owned()).collect(),
             server_wide: None,
+            server_ran: false,
             covering: candidates.len(),
             statement: None,
             function: None,

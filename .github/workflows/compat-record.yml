@@ -66,7 +66,9 @@ jobs:
   record:
     needs: fixtures
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Ten for the recording, and up to five more while npm catches up with
+    # the release's native packages (scripts/compat-record.sh).
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

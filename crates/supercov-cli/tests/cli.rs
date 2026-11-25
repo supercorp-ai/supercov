@@ -24215,6 +24215,210 @@ fn a_module_level_value_s_mutants_run_against_the_tests_that_read_it() {
     assert!(killed >= 6, "{broad_context}");
 }
 
+/// `mutants test` over Playwright tests that reach the server without a
+/// page navigation: a request context the test makes itself, the page's
+/// own `request`, Node's `fetch` and `http`, a routed request
+/// `route.fetch` sends again, and `curl` in a child process, which carries
+/// no test's name at all and is sent while another test runs. Each route's
+/// mutant is killed by the one test that reaches it; so is an arrow defined
+/// at the module's top level and mutated whole, whose switch the server
+/// evaluates once, as it loads the module, whatever mutant a request names.
+/// What survives only changes a log line, and is counted as such.
+#[cfg(unix)]
+#[test]
+fn mutants_test_kills_server_mutants_tests_reach_without_a_page() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    let curl = std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available || !curl {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright, Chromium and curl are required"
+        );
+        eprintln!("skipping: Playwright, Chromium or curl is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-outside-pages");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-outside-pages", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { routes } from \"../server/app.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  const route = routes[url.pathname.slice(1)];\n  if (!route) {\n    response.statusCode = 404;\n    return response.end(\"none\");\n  }\n  response.end(String(route(Number(url.searchParams.get(\"q\")))));\n}).listen(Number(process.env.PORT));\n",
+    );
+    // Each route's own arithmetic, and `context` an arrow at the module's
+    // top level; `fetch` logs what no test reads.
+    project.write(
+        "server/app.js",
+        "export const routes = {\n  context: (q) => q * 2,\n  page(q) {\n    return q * 3;\n  },\n  fetch(q) {\n    console.info(`fetched ${q}`, q + 1);\n    return q * 4;\n  },\n  http(q) {\n    return q * 5;\n  },\n  route(q) {\n    return q * 6;\n  },\n  curl(q) {\n    return q * 7;\n  },\n  ready() {\n    return \"ready\";\n  },\n};\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  fullyParallel: true,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/outside.spec.js",
+        concat!(
+            "import { test, expect, request as playwrightRequest } from \"@playwright/test\";\n",
+            "test(\"a request context of its own\", async ({ baseURL }) => {\n",
+            "  const api = await playwrightRequest.newContext({ baseURL });\n",
+            "  expect(await (await api.get(\"/context?q=5\")).text()).toBe(\"10\");\n",
+            "  await api.dispose();\n",
+            "});\n",
+            "test(\"the page's request\", async ({ page }) => {\n",
+            "  expect(await (await page.request.get(\"/page?q=5\")).text()).toBe(\"15\");\n",
+            "});\n",
+            "test(\"node fetch\", async ({ baseURL }) => {\n",
+            "  expect(await (await fetch(`${baseURL}/fetch?q=5`)).text()).toBe(\"20\");\n",
+            "});\n",
+            "test(\"node http\", async ({ baseURL }) => {\n",
+            "  const http = await import(\"node:http\");\n",
+            "  const body = await new Promise((done, fail) => http.get(`${baseURL}/http?q=5`, (response) => {\n",
+            "    let text = \"\";\n",
+            "    response.on(\"data\", (chunk) => (text += chunk)).on(\"end\", () => done(text));\n",
+            "  }).on(\"error\", fail));\n",
+            "  expect(body).toBe(\"25\");\n",
+            "});\n",
+            "test(\"a routed fetch\", async ({ page, baseURL }) => {\n",
+            "  await page.route(\"**/route*\", async (route) => {\n",
+            "    const response = await route.fetch();\n",
+            "    await route.fulfill({ response, body: `<p id=\"out\">${await response.text()}</p>`, contentType: \"text/html\" });\n",
+            "  });\n",
+            "  await page.goto(`${baseURL}/route?q=5`);\n",
+            "  await expect(page.locator(\"#out\")).toHaveText(\"30\");\n",
+            "});\n",
+        ),
+    );
+    // curl's request names no test, and the other worker's test runs all
+    // the while: it is no test's by time.
+    project.write(
+        "tests/child.spec.js",
+        concat!(
+            "import { test, expect } from \"@playwright/test\";\n",
+            "import { execFileSync } from \"node:child_process\";\n",
+            "test(\"a child process\", async ({ baseURL }) => {\n",
+            "  await new Promise((done) => setTimeout(done, 500));\n",
+            "  expect(execFileSync(\"curl\", [\"-s\", `${baseURL}/curl?q=5`], { encoding: \"utf8\" })).toBe(\"35\");\n",
+            "});\n",
+            "test(\"waits beside it\", async ({ request }) => {\n",
+            "  await new Promise((done) => setTimeout(done, 2000));\n",
+            "  expect(await (await request.get(\"/ready\")).text()).toBe(\"ready\");\n",
+            "});\n",
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("requests outside pages");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    let strong = |line: u32, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("server/app.js:{line}:")) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{line} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    // Each way a test reaches the server kills its route's mutant.
+    for (line, way) in [
+        (2, "a request context of its own"),
+        (4, "the page's request"),
+        (8, "Node's fetch"),
+        (11, "Node's http"),
+        (14, "a routed fetch"),
+        (17, "curl in a child process"),
+    ] {
+        let verdict = strong(line, ":ArithmeticOperator:/");
+        assert_eq!(verdict["status"], "killed", "{way}\n{context}");
+    }
+    // curl's request named no test, and was no test's by time: its mutant
+    // ran with the server started with it.
+    let child = strong(17, ":ArithmeticOperator:/");
+    assert!(
+        child["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("its code ran for a request that named no test")),
+        "{context}"
+    );
+    // The arrow, mutated whole: the server made it as it loaded the module.
+    let arrow = strong(2, ":ArrowFunction:undefined");
+    assert_eq!(arrow["status"], "killed", "{context}");
+    assert!(
+        arrow["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("it is a server module's top-level code")),
+        "{context}"
+    );
+    // What survives only changes the log line: counted on its own, and
+    // marked where survivors are listed.
+    assert_eq!(reply["summary"]["survived"], 2, "{context}");
+    assert_eq!(reply["survivors"]["logOnly"], 2, "{context}");
+    for logged in mutants
+        .iter()
+        .filter(|mutant| mutant["strong"]["status"] == "survived")
+    {
+        assert!(
+            logged["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("server/app.js:7:")
+                && logged["logOnly"] == true,
+            "{context}"
+        );
+    }
+    let survivors = project
+        .supercov(&["runs", "latest", "mutants", "--status", "survived"])
+        .succeeds();
+    contains_all(
+        &survivors,
+        &[
+            "2 survived (2 only change a log line)",
+            "(only changes a log line)",
+        ],
+    );
+}
+
 /// A Playwright mutant attempt is stopped at its time limit, its test's
 /// baseline x 1.5 + 5 s: a mutant that keeps an element from appearing ends
 /// there as a `timeout`, though its test clicks with no timeout of its own
@@ -25233,6 +25437,20 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     let context = format!("{reply}\n{said}");
     assert!(!said.contains("ran out of memory"), "{context}");
     assert!(!said.contains("heap out of memory"), "{context}");
+    // Each slot's server is checked for readiness while the slots before it
+    // run their tests: such a request names no test, but none of those
+    // tests is this server's, so the mutants it ran are not taken for ones
+    // a test reached without its name. Taken so, 6,351 of them went to run
+    // alone, and that round ran out of heap.
+    let main_pass = reply["passes"]
+        .as_array()
+        .and_then(|passes| passes.iter().find(|pass| pass["pass"] == "main"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        main_pass["next"]["alone"].as_u64() < Some(10),
+        "{main_pass}\n{context}"
+    );
     // The list saw the project's thirty tests, once each, every time it
     // finished: the budget ends the invocation it falls in, which may be
     // listing. That the pass went on to further invocations is asserted

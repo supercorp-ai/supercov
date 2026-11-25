@@ -559,6 +559,7 @@ mod tests {
 
     fn entry(file: &str, line: u32, status: MutantStatus, strong: Option<Value>) -> MutantEntry {
         MutantEntry {
+            log_only: false,
             id: format!("{file}:{line}:5-{line}:9:EqualityOperator:<"),
             file: file.into(),
             span: MutantSpan {

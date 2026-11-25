@@ -1089,12 +1089,22 @@ fn plan_text(data: &Value) -> String {
                 budget.saturating_sub(measuring)
             ));
         }
+        // The survivors that only change a log line, counted on their own.
+        let survived = match data["survivors"]["logOnly"].as_u64() {
+            Some(log_only) if log_only > 0 => {
+                format!(
+                    "{} ({log_only} only change a log line)",
+                    summary["survived"]
+                )
+            }
+            _ => summary["survived"].to_string(),
+        };
         return format!(
             "Strong mutation for {}{header}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n{}  ran {} mutant(s) in {} ms\n",
             data["run"].as_str().unwrap_or(""),
             summary["killed"],
             summary["timeout"],
-            summary["survived"],
+            survived,
             summary["noCoverage"],
             summary["equivalent"],
             summary["error"],
@@ -1413,20 +1423,34 @@ fn survivors(
         })
         .map(|(data, _)| data.mutants)
         .unwrap_or_default();
-    let shown = listed
+    let mut listed_survivors = listed
         .iter()
         .filter(|mutant| survived.contains(mutant.id.as_str()))
+        .collect::<Vec<_>>();
+    // Those that only change a log line are counted on their own, and shown
+    // after the rest: equivalent for behaviour, they wait for triage last.
+    let log_only = listed_survivors
+        .iter()
+        .filter(|mutant| mutant.log_only)
+        .count();
+    listed_survivors.sort_by_key(|mutant| mutant.log_only);
+    let shown = listed_survivors
+        .into_iter()
         .take(SURVIVORS_SHOWN)
         .map(|mutant| {
-            json!({
+            let mut shown = json!({
                 "id": mutant.id,
                 "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
                 "mutator": mutant.mutator,
                 "change": crate::human_query::mutant_change(mutant),
-            })
+            });
+            if mutant.log_only {
+                shown["logOnly"] = json!(true);
+            }
+            shown
         })
         .collect::<Vec<_>>();
-    json!({"total": survived.len(), "shown": shown})
+    json!({"total": survived.len(), "logOnly": log_only, "shown": shown})
 }
 
 /// The pass summary's last lines: the survivors, capped.
@@ -1438,10 +1462,15 @@ fn survivors_text(run: &str, survivors: &Value) -> String {
     let mut text = String::from("Survived:\n");
     text.extend(shown.iter().map(|mutant| {
         format!(
-            "  {}  {}  {}\n",
+            "  {}  {}  {}{}\n",
             mutant["place"].as_str().unwrap_or(""),
             mutant["mutator"].as_str().unwrap_or(""),
-            mutant["change"].as_str().unwrap_or("")
+            mutant["change"].as_str().unwrap_or(""),
+            if mutant["logOnly"] == true {
+                "  (only changes a log line)"
+            } else {
+                ""
+            }
         )
     }));
     let total = survivors["total"].as_u64().unwrap_or(0) as usize;
@@ -2566,6 +2595,7 @@ mod tests {
                 .collect(),
             whole_files: Vec::new(),
             server_wide: None,
+            server_ran: false,
             covering: 0,
             statement: None,
             function: None,
@@ -2670,6 +2700,7 @@ mod tests {
                     candidates: Vec::new(),
                     whole_files: Vec::new(),
                     server_wide: None,
+                    server_ran: false,
                     covering: 0,
                     statement: None,
                     function: None,
@@ -3214,6 +3245,19 @@ mod tests {
         settle_progress(&mut progress, &saved);
         assert_eq!(progress.keys().collect::<Vec<_>>(), ["m1", "m4"]);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A survivor that only changes a log line is marked as such.
+    #[test]
+    fn a_survivor_that_only_changes_a_log_line_says_so() {
+        let shown = json!({"total": 2, "logOnly": 1, "shown": [
+            {"place": "a.js:1", "mutator": "M", "change": "x → y"},
+            {"place": "a.js:2", "mutator": "StringLiteral", "change": "\"saved\" → \"\"", "logOnly": true},
+        ]});
+        assert_eq!(
+            survivors_text("r1", &shown),
+            "Survived:\n  a.js:1  M  x → y\n  a.js:2  StringLiteral  \"saved\" → \"\"  (only changes a log line)\n"
+        );
     }
 
     /// The summary names the first survivors and counts the rest.

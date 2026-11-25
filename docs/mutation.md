@@ -210,6 +210,11 @@ npx supercov mutants --diff origin/main --format markdown --output mutants.md
   it has the mutation score and lists the survivors. `supercov mutants` takes
   `--format markdown` and `--output <file>` too, and writes its own answer
   that way.
+- A survivor that only changes a log line (its change lies wholly inside the
+  arguments of `console.*`, or of a method named `info`, `warn`, `error`,
+  `debug`, `trace` or `log`) is still `survived`, but marked `(only changes a
+  log line)` (`logOnly` in JSON) and counted on its own: `survived 185 (109
+  only change a log line)`. Triage can set those aside.
 - `--fail-on` exits `1` when a mutant asked about has one of the statuses
   given. On `runs latest mutants` they are weak statuses, from the run alone;
   on `supercov mutants` and `mutants test` they are verdicts: `survived`,

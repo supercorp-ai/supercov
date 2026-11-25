@@ -245,6 +245,10 @@ pub struct MutantsSummary {
     /// ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strong: Option<BTreeMap<String, usize>>,
+    /// Of the survivors a strong pass left, those all of whose change is a
+    /// logging call's arguments (`MutantEntry::log_only`), where any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_only_survivors: Option<usize>,
 }
 
 impl MutantsSummary {
@@ -261,6 +265,7 @@ impl MutantsSummary {
             weak_score_reached: score(status.infected + status.not_infected),
             mutation_score: None,
             strong: None,
+            log_only_survivors: None,
             status,
         }
     }
@@ -372,6 +377,12 @@ pub struct MutantEntry {
     pub strong: Option<Value>,
     /// StrykerJS's status, joined by id, when `--stryker` was given.
     pub stryker: Option<String>,
+    /// The mutated span lies wholly inside the arguments of a logging call
+    /// (`console.*`, or a method named `info`, `warn`, `error`, `debug`,
+    /// `trace` or `log`): all it can change is a log line. A survivor so
+    /// marked is equivalent for behaviour, and triage may set it aside.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub log_only: bool,
 }
 
 /// Where no statement or function point contains the mutant, the run
@@ -428,6 +439,7 @@ impl MutantEntry {
             },
             strong: None,
             stryker,
+            log_only: mutant.log_only,
         }
     }
 }
@@ -876,6 +888,10 @@ pub fn coverage_mutants_query(
         }
         counts
     });
+    let log_only_survivors = asked
+        .iter()
+        .filter(|mutant| mutant.log_only && strong_of(mutant).as_deref() == Some("survived"))
+        .count();
     let wanted = &options.options.statuses;
     let wanted_strong = &options.options.strong_statuses;
     let mut listed = asked
@@ -956,6 +972,7 @@ pub fn coverage_mutants_query(
             summary: MutantsSummary {
                 mutation_score: strong_score,
                 strong: strong_counts.filter(|counts| !counts.is_empty()),
+                log_only_survivors: (log_only_survivors > 0).then_some(log_only_survivors),
                 ..MutantsSummary::of(counts, untestable)
             },
             note,
@@ -1065,6 +1082,7 @@ mod tests {
         changed: Option<(&str, &str)>,
     ) -> IndexedMutant {
         IndexedMutant {
+            log_only: false,
             file: "app/route.ts".into(),
             start,
             end,
