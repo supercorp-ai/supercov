@@ -485,10 +485,8 @@ fn continued_run<'a>(
     }
     let mut refused = None;
     for run in runs {
-        let plan = plan_for_run(run, root)
-            .map(|planned| planned.plan)
-            .map_err(|error| format!("{error:?}"));
-        match failed_tests_only(&run.id, run.metadata.test_exit_code, plan) {
+        let planned = plan_for_run(run, root);
+        match failed_tests_only(&run.id, run.metadata.test_exit_code, planned) {
             Ok(failed) => return Ok(Continued { run, failed }),
             Err(why) => {
                 refused.get_or_insert(why);
@@ -511,10 +509,14 @@ fn continued_run<'a>(
 fn failed_tests_only(
     run: &str,
     code: Option<i32>,
-    plan: Result<Option<StrongPlan>, String>,
+    planned: Result<
+        supercov_engine::strong_plan::ArchivePlan,
+        supercov_engine::coverage_report::ReportError,
+    >,
 ) -> Result<Vec<String>, String> {
-    let plan = plan.map_err(|error| format!("run {run}'s evidence could not be read: {error}"))?;
-    let tests = plan.map(|plan| plan.tests).unwrap_or_default();
+    let planned =
+        planned.map_err(|error| format!("run {run}'s evidence could not be read: {error:?}"))?;
+    let tests = planned.plan.map(|plan| plan.tests).unwrap_or_default();
     let failed = tests
         .iter()
         .filter(|test| test.failed)
@@ -3127,35 +3129,46 @@ mod tests {
     /// with no test failed, or could not be read is not, and says which.
     #[test]
     fn a_failed_run_is_continued_only_where_failed_tests_explain_it() {
+        use supercov_engine::{coverage_report::ReportError, strong_plan::ArchivePlan};
+        let planned = |plan: Option<StrongPlan>| {
+            Ok(ArchivePlan {
+                plan,
+                changed: Vec::new(),
+            })
+        };
         let mut plan = plan_of(&[("a", false), ("b", true), ("c", false)], &[]);
         plan.tests[0].failed = true;
         assert_eq!(
-            failed_tests_only("r1", Some(1), Ok(Some(plan.clone()))),
+            failed_tests_only("r1", Some(1), planned(Some(plan.clone()))),
             Ok(vec!["a".to_owned()])
         );
         assert_eq!(
-            failed_tests_only("r1", None, Ok(Some(plan))),
+            failed_tests_only("r1", None, planned(Some(plan))),
             Err("run r1's command ended without an exit status (1 test failed while measuring and is not a candidate: a)".to_owned())
         );
         // Not passed, but not failed: skipped, or never finished.
         let unexplained = plan_of(&[("a", false), ("b", true)], &[]);
         assert_eq!(
-            failed_tests_only("r1", Some(3), Ok(Some(unexplained.clone()))),
+            failed_tests_only("r1", Some(3), planned(Some(unexplained.clone()))),
             Err("run r1's command exited 3, though none of its 2 test(s) failed: it failed for another reason, which may have left tests unrun".to_owned())
         );
         assert_eq!(
-            failed_tests_only("r1", None, Ok(Some(unexplained))),
+            failed_tests_only("r1", None, planned(Some(unexplained))),
             Err("run r1's command ended without an exit status".to_owned())
         );
         for nothing in [None, Some(plan_of(&[], &[]))] {
             assert_eq!(
-                failed_tests_only("r1", Some(1), Ok(nothing)),
+                failed_tests_only("r1", Some(1), planned(nothing)),
                 Err("run r1's command exited 1 and recorded no test".to_owned())
             );
         }
         assert_eq!(
-            failed_tests_only("r1", Some(1), Err("gone".to_owned())),
-            Err("run r1's evidence could not be read: gone".to_owned())
+            failed_tests_only(
+                "r1",
+                Some(1),
+                Err(ReportError::InvalidArchive("gone".to_owned()))
+            ),
+            Err("run r1's evidence could not be read: InvalidArchive(\"gone\")".to_owned())
         );
     }
 
