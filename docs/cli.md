@@ -1178,6 +1178,19 @@ timestamp, a path the test took, an outcome, is kept beside the others, so
 nothing any run recorded is lost. Jobs that each measured the whole suite
 record each test with times of their own, and keep a copy each.
 
+Runs made from one run without measuring whose archives are alike byte for
+byte (the jobs of a continuation round, each made from the same baseline)
+are read, merged and kept once, from the first of them: the merged run lists
+that one among its runs, keeps it alone under `parts/`, and says which runs
+were its copies (`7 run(s) hold run r1's evidence byte for byte, made from one
+run without measuring (r2; r3; r4; and 4 more): their evidence is kept once,
+from it, and their strong verdicts each`). Each copy's strong verdicts are
+kept as any run's. Eight such runs of a large e2e suite, each 232 MB with its
+baseline's archive and parts, merged in 12 s instead of 100 s and half the
+memory (a peak footprint of 12.5 GB, from 24.7 GB), into a run of 244 MB
+instead of 1 GB, which the next round's jobs each carry; its coverage and
+strong verdicts are the same.
+
 The runs may differ in their tests, the helpers beside them, and the test
 runners' settings, as long as nothing that changed reaches what an earlier
 run's tests did. Measuring a new test alone and adding it to the runs before it

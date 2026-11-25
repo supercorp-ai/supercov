@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- `supercov merge` reads, merges and keeps once the runs made from one run without measuring whose archives are alike byte for byte: the jobs of a continuation round, each made from the same baseline. Each of them carried the baseline's whole archive and its runs' records, and a merge read every copy whole side by side and kept each copy's records under `parts/`. Eight such jobs of a large e2e suite (232 MB each) merged in 100 s with a peak footprint of 24.7 GB, killed for its memory on a 32 GB machine whose disk is in memory, into a run of 1 GB that each job of the next round then carried. Read once, they merge in 12 s with 12.5 GB, into a run of 244 MB, with the same coverage and strong verdicts. The merged run lists the first among its runs and says which were its copies (`7 run(s) hold run r1's evidence byte for byte, made from one run without measuring (...)`); each copy's strong verdicts are kept as any run's.
+
 ## 4.29.14
 
 **Changed**
