@@ -1469,18 +1469,36 @@ mod tests {
             at("untimed", during, None),
             // A request, and the test runner's own process too.
             at("runner", during, Some(150)),
+            // A request marked during tests at a moment no test's time
+            // holds.
+            at("gap", during, Some(250)),
+            // At 350: only c ran, its time its phases (it has no span).
+            at("late", during, Some(350)),
+        ];
+        let mut c = browser("c", [0, 0]);
+        c.span = None;
+        c.phases = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "p", "kind": "test", "operation": "body",
+                "startedAtMs": 300, "endedAtMs": 400
+            }))
+            .unwrap(),
         ];
         let raw_results = vec![
             background,
             browser("a", [100, 200]),
             browser("b", [120, 220]),
-            browser("c", [300, 400]),
+            c,
             browser("d", [400, 500]),
         ];
-        let mutants = ["hook", "between", "start", "untimed", "runner"]
-            .into_iter()
-            .map(|point| mutant(serde_json::json!({"id": point, "statement": point})))
-            .collect::<Vec<_>>();
+        let mut mutants = [
+            "hook", "between", "start", "untimed", "runner", "gap", "late",
+        ]
+        .into_iter()
+        .map(|point| mutant(serde_json::json!({"id": point, "statement": point})))
+        .collect::<Vec<_>>();
+        // No point to look for: every test.
+        mutants.push(mutant(serde_json::json!({"id": "pointless"})));
         let plan = plan(&raw_results, listed(mutants, &[])).unwrap();
         let names = |id: &str| {
             candidates(&plan, id)
@@ -1489,11 +1507,14 @@ mod tests {
                     assert_eq!(reason, CandidateReason::Unattributed);
                     name
                 })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>()
         };
         assert_eq!(names("hook"), ["a", "b", "d"]);
+        assert_eq!(names("late"), ["c"]);
         let every = ["a", "b", "c", "d"];
-        for id in ["between", "start", "untimed", "runner"] {
+        for id in ["between", "start", "untimed", "runner", "gap", "pointless"] {
             assert_eq!(names(id), every, "{id}");
         }
     }
