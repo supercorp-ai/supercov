@@ -28,6 +28,10 @@ use crate::coverage_report::{
 use crate::js_weak_mutation::{Observations, Status, observations, verdict};
 use crate::mutant_list::{CandidateMutant, MutantsFile};
 
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
 /// A test the plan may run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,6 +152,11 @@ pub struct PlannedMutant {
     /// names: such a mutant, too, runs with the server started with it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub server_ran: bool,
+    /// How many of its candidates passed with it in earlier passes, which
+    /// this pass does not run again (`strong_verdicts::resume`): a mutant
+    /// some candidate let live is unlikely to fail its next one.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub passed_before: usize,
     /// How many tests ran its code: what a pass by coverage alone would run
     /// it against. The candidates are those of them that infected it.
     pub covering: usize,
@@ -511,6 +520,106 @@ fn server_runs(raw: &RawTestResult) -> ServerRuns<'_> {
     runs
 }
 
+/// For a record no test was credited with: each point its servers ran, with
+/// the moments requests that named no test ran it while a test of that server
+/// ran (`coverage_report::REQUEST_DURING_TESTS`), or `None` where some of that
+/// work was no request's, came while no test of its server ran (a readiness
+/// check, `REQUEST_OUTSIDE_TESTS`), kept no time, or the record ran the point
+/// outside its servers too (a test runner's own process, a page). Built only
+/// for such records; a test's own record needs none.
+type RequestTimes<'r> = HashMap<&'r str, Option<Vec<i64>>>;
+
+fn request_times(raw: &RawTestResult) -> RequestTimes<'_> {
+    let mut times = RequestTimes::new();
+    for record in raw
+        .server
+        .iter()
+        .filter(|record| record.record_type == "hit")
+    {
+        if let Some(id) = &record.id {
+            let at = (record.request == Some(crate::coverage_report::REQUEST_DURING_TESTS))
+                .then_some(record.timestamp_ms)
+                .flatten();
+            let seen = times.entry(id.as_str()).or_insert_with(|| Some(Vec::new()));
+            match (seen.as_mut(), at) {
+                (Some(moments), Some(at)) => moments.push(at),
+                _ => *seen = None,
+            }
+        }
+    }
+    for snapshot in raw.runtime.iter().chain(&raw.browser) {
+        let events = snapshot
+            .events
+            .iter()
+            .filter(|event| event.event_type == "hit")
+            .map(|event| &event.id);
+        for id in snapshot.hits.iter().chain(events) {
+            if let Some(seen) = times.get_mut(id.as_str()) {
+                *seen = None;
+            }
+        }
+    }
+    for moments in times.values_mut().flatten() {
+        moments.sort_unstable();
+        moments.dedup();
+    }
+    times
+}
+
+/// When each test ran, as `(start, end, test)`: each of its records' span
+/// (its attempt's first and last moment), or its phases where it has none.
+/// The time the measured run credits a request's work by
+/// (`coverage_report`'s `credit_by_time`), taken as widely.
+fn test_windows(
+    raw_results: &[RawTestResult],
+    test_index: &HashMap<String, usize>,
+) -> Vec<(i64, i64, usize)> {
+    let mut windows = raw_results
+        .iter()
+        .filter(|raw| role_of(raw) == "test")
+        .filter_map(|raw| {
+            let test = *test_index.get(raw.test_id.as_ref().unwrap_or(&raw.test))?;
+            let phases = || {
+                let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+                let end = raw
+                    .phases
+                    .iter()
+                    .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                    .max()?;
+                Some([start, end])
+            };
+            let [start, end] = raw.span.or_else(phases)?;
+            Some((start, end, test))
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    windows
+}
+
+/// The tests running at each of `moments` (sorted), or `None` where one of
+/// them fell while no test ran: work no test was running for may be any
+/// test's to see, and the server's whole start too.
+fn running_at(windows: &[(i64, i64, usize)], moments: &[i64]) -> Option<Vec<usize>> {
+    let mut tests = Vec::new();
+    for &at in moments {
+        // Windows are sorted by start: those after `at` cannot hold it.
+        let started = windows.partition_point(|(start, _, _)| *start <= at);
+        let before = tests.len();
+        tests.extend(
+            windows[..started]
+                .iter()
+                .filter(|(_, end, _)| *end >= at)
+                .map(|(_, _, test)| *test),
+        );
+        if tests.len() == before {
+            return None;
+        }
+    }
+    tests.sort_unstable();
+    tests.dedup();
+    Some(tests)
+}
+
 /// Whether a server process ran the mutant's code in this record (`runs`,
 /// its `server_runs`) in a way a request's own mutant cannot reach, and how.
 fn server_wide(
@@ -669,6 +778,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         *ok &= *stated;
         test.runnable = *ok;
     }
+    let windows = test_windows(raw_results, &test_index);
     let mut seen = Vec::<Seen>::new();
     let mut by_point = HashMap::<String, Vec<usize>>::new();
     let mut unbounded = Vec::<usize>::new();
@@ -706,6 +816,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             record,
             seen: own,
             server: server_runs(raw),
+            requests: (!matches!(role_of(raw), "test" | "setup")).then(|| request_times(raw)),
         });
     }
 
@@ -748,6 +859,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             whole_files: Vec::new(),
             server_wide: None,
             server_ran: false,
+            passed_before: 0,
             covering: 0,
             statement: mutant.statement.clone(),
             function: mutant.function.clone(),
@@ -789,6 +901,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     by_file: &by_file,
                     whole: &whole,
                     language: &planned.language,
+                    windows: &windows,
                 };
                 let broad = context.select(mutant, reach_only, None);
                 // A module-level value read through its literal: the
@@ -877,6 +990,9 @@ struct Seen<'r> {
     record: usize,
     seen: Observations,
     server: ServerRuns<'r>,
+    /// For a record no test was credited with, when requests that named no
+    /// test ran each point (`request_times`).
+    requests: Option<RequestTimes<'r>>,
 }
 
 /// A mutant's candidates, the test files it runs whole, and how a server
@@ -902,9 +1018,47 @@ struct Selecting<'r> {
     by_file: &'r BTreeMap<String, Vec<usize>>,
     whole: &'r Observations,
     language: &'r str,
+    /// When each test ran (`test_windows`).
+    windows: &'r [(i64, i64, usize)],
 }
 
 impl Selecting<'_> {
+    /// The tests that may have sent the requests in which work no test was
+    /// credited with ran the mutant's code: those running when each request
+    /// ran it. `None` (every test) where some of that work was no request's
+    /// (a server's start, a timer), kept no time, came while no test ran,
+    /// or ran outside the servers, and for a mutant with no point to look
+    /// for.
+    ///
+    /// A test that was not running when the code ran neither sent the
+    /// request nor saw its response, and its own evidence never ran the
+    /// code: it runs as without the mutant, as the plan takes of every test
+    /// whose own evidence did not reach a mutant. What the request left in
+    /// shared state for a later test is that test's to observe without a
+    /// read, as a by-time credit to the one test running already assumes.
+    fn during_requests(
+        &self,
+        mutant: &CandidateMutant,
+        own: &Observations,
+        requests: &RequestTimes<'_>,
+    ) -> Option<Vec<usize>> {
+        let mut moments = Vec::new();
+        let mut looked = false;
+        for point in [&mutant.statement, &mutant.function].into_iter().flatten() {
+            if !own.hits.contains(point) {
+                continue;
+            }
+            looked = true;
+            moments.extend(requests.get(point.as_str())?.as_ref()?.iter().copied());
+        }
+        if !looked {
+            return None;
+        }
+        moments.sort_unstable();
+        moments.dedup();
+        running_at(self.windows, &moments)
+    }
+
     /// The mutant's candidates. With `reads`, those of a module-level value
     /// read through its literal (`docs/design/strong-mutation.md`,
     /// "Module-level values"): its module's loading is not a read, so a
@@ -946,6 +1100,7 @@ impl Selecting<'_> {
                 record,
                 seen: own,
                 server,
+                requests,
             } = &self.seen[at];
             let raw = &self.raw_results[*record];
             let role = role_of(raw);
@@ -1019,9 +1174,24 @@ impl Selecting<'_> {
                 // Work no test was credited with, a module setup that names
                 // no test file among it (Mocha loads every test file before
                 // the first test): any test of the run may have caused it.
+                // Where it was only requests that named no test, each sent
+                // while tests ran, the tests running then are those that may
+                // have (`during_requests`).
                 _ => {
-                    for test in 0..self.tests.len() {
-                        take(test, CandidateReason::Unattributed);
+                    let during = requests
+                        .as_ref()
+                        .and_then(|requests| self.during_requests(mutant, own, requests));
+                    match during {
+                        Some(tests) => {
+                            for test in tests {
+                                take(test, CandidateReason::Unattributed);
+                            }
+                        }
+                        None => {
+                            for test in 0..self.tests.len() {
+                                take(test, CandidateReason::Unattributed);
+                            }
+                        }
                     }
                 }
             }
@@ -1260,6 +1430,93 @@ mod tests {
 
     fn planned<'p>(plan: &'p StrongPlan, id: &str) -> &'p PlannedMutant {
         plan.mutants.iter().find(|mutant| mutant.id == id).unwrap()
+    }
+
+    /// Work no test was credited with, done for requests that named no test
+    /// while tests ran (a webhook a mock server sends while several tests
+    /// run): its mutants' candidates are the tests running at those moments,
+    /// not every test of the run. Where any of that work came while no test
+    /// ran, was a server's start (no request), kept no time, or also ran
+    /// outside the servers, every test stays a candidate.
+    #[test]
+    fn work_for_requests_no_test_named_takes_the_tests_running_then() {
+        let browser = |id: &str, span: [i64; 2]| {
+            let mut raw = record(id, "test", Some("t/a.spec.js"), &[]);
+            raw.provenance.runner = "playwright".into();
+            raw.span = Some(span);
+            raw
+        };
+        let at = |id: &str, request: Option<u64>, ms: Option<i64>| ServerRecord {
+            timestamp_ms: ms,
+            ..server_hit(id, request)
+        };
+        let mut background = record("bg", "background", None, &["runner"]);
+        let during = Some(crate::coverage_report::REQUEST_DURING_TESTS);
+        let outside = Some(crate::coverage_report::REQUEST_OUTSIDE_TESTS);
+        background.server = vec![
+            // Two requests while tests of their server ran, at 150 (a and b
+            // ran) and 450 (d ran).
+            at("hook", during, Some(150)),
+            at("hook", during, Some(450)),
+            // One while no test of its server ran (a readiness check while
+            // another server's tests ran).
+            at("between", during, Some(150)),
+            at("between", outside, Some(150)),
+            // The server's start: no request.
+            at("start", None, Some(1)),
+            at("start", during, Some(150)),
+            // A request that kept no time.
+            at("untimed", during, None),
+            // A request, and the test runner's own process too.
+            at("runner", during, Some(150)),
+            // A request marked during tests at a moment no test's time
+            // holds.
+            at("gap", during, Some(250)),
+            // At 350: only c ran, its time its phases (it has no span).
+            at("late", during, Some(350)),
+        ];
+        let mut c = browser("c", [0, 0]);
+        c.span = None;
+        c.phases = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "p", "kind": "test", "operation": "body",
+                "startedAtMs": 300, "endedAtMs": 400
+            }))
+            .unwrap(),
+        ];
+        let raw_results = vec![
+            background,
+            browser("a", [100, 200]),
+            browser("b", [120, 220]),
+            c,
+            browser("d", [400, 500]),
+        ];
+        let mut mutants = [
+            "hook", "between", "start", "untimed", "runner", "gap", "late",
+        ]
+        .into_iter()
+        .map(|point| mutant(serde_json::json!({"id": point, "statement": point})))
+        .collect::<Vec<_>>();
+        // No point to look for: every test.
+        mutants.push(mutant(serde_json::json!({"id": "pointless"})));
+        let plan = plan(&raw_results, listed(mutants, &[])).unwrap();
+        let names = |id: &str| {
+            candidates(&plan, id)
+                .into_iter()
+                .map(|(name, reason)| {
+                    assert_eq!(reason, CandidateReason::Unattributed);
+                    name
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("hook"), ["a", "b", "d"]);
+        assert_eq!(names("late"), ["c"]);
+        let every = ["a", "b", "c", "d"];
+        for id in ["between", "start", "untimed", "runner", "gap", "pointless"] {
+            assert_eq!(names(id), every, "{id}");
+        }
     }
 
     /// A module-level mutant whose value is read through its literal, and
@@ -2199,6 +2456,7 @@ mod tests {
                     whole_files: whole.iter().map(|file| (*file).to_owned()).collect(),
                     server_wide: None,
                     server_ran: false,
+                    passed_before: 0,
                     covering: 0,
                     statement: None,
                     function: None,

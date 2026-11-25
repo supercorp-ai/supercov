@@ -445,7 +445,12 @@ no mutants shows none of this.
   against the tests that read its value, which a run measured with the
   mutants' probes records, not every test whose server loaded the module;
   the plan says how many were narrowed and by how much
-  (`docs/design/strong-mutation.md`, Module-level values). StrykerJS has no
+  (`docs/design/strong-mutation.md`, Module-level values). A mutant whose
+  code ran only for requests that named no test (a webhook a mock server
+  sends while tests run) runs against the tests that were running then, not
+  every test. A test runs without a mutant only after a failure, to confirm
+  it; a failure before any such run passed on its server (a cold server)
+  runs the mutant again once one has. StrykerJS has no
   Playwright runner, so Playwright's verdicts are checked by hand (see below).
   A test run with a mutant gets StrykerJS's time limit: its baseline (the
   longest of its measured run and its runs without a mutant in the pass)

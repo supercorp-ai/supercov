@@ -175,7 +175,10 @@ export default class SupercovPlaywrightStrongReporter {
             "failed": "fails",
             "timed-out": `ran out of its ${seconds(attempt.limitMs)} limit (its baseline ${seconds(attempt.baselineMs)})`,
         }[attempt.outcome] ?? attempt.outcome;
-        console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said} (${took})`);
+        // A cold attempt's failure decides nothing: it runs again once a
+        // control has passed on its server.
+        const cold = attempt.cold && (attempt.outcome === "failed" || attempt.outcome === "timed-out") ? ", before any control here: runs again after one" : "";
+        console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said} (${took}${cold})`);
     }
     /**
      * What this invocation is doing, for the engine's progress line: the
@@ -379,7 +382,9 @@ export default class SupercovPlaywrightStrongReporter {
             // A kill no control came after (the round ended first): as sure as a
             // kill on a server no other mutant's attempt shared, where it ended
             // before the round began to stop.
-            const killer = failed.find((attempt) => !attempt.beside && attempt.endedAt < trustedUntil);
+            // A cold attempt's failure (no control had passed before it on
+            // its server) is no kill: the round ended before it ran again.
+            const killer = failed.find((attempt) => !attempt.beside && !attempt.cold && attempt.endedAt < trustedUntil);
             if (killer) {
                 const { status, reason } = verdictOf(killer);
                 verdict({ status, killedBy: killer.original, reason: `${reason}${suffix}` });
