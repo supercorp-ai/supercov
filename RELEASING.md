@@ -13,8 +13,18 @@ gh run watch $(gh run list --workflow quick-check.yml --branch <branch> --limit 
 It runs `cargo fmt`, clippy and the tests a change most likely affects on Linux
 x64, macOS arm64 and Windows x64, in about ten minutes, and prints why each test
 was picked (`node scripts/quick-check.mjs` prints the same selection locally).
-It also runs first on every pull request. It is a pre-check: CI and
-Compatibility still decide.
+It is a pre-check: CI and Compatibility still decide.
+
+## What a pull request runs
+
+A pull request runs on Linux alone: the tests its change can affect, by
+Supercov's own `tests affected` over the Self Coverage map of main
+(`scripts/ci-affected.mjs`; each workflow's step summary says why each job ran
+in full, in part, or not at all). macOS, Windows and ARM, every Node and the
+whole Compatibility matrix run on a release pull request (titled
+`Release <v>`, or a `release/` branch), on every push to main, by hand, and on
+a pull request labelled `full-ci`. A pull request that changes only the
+compatibility corpus (`tests/compat`) runs the `compat` tests alone.
 
 ## A release
 

@@ -6,9 +6,16 @@ name: Self Coverage
 # jobs, each measured on its own, and the runs merged into one per platform.
 # Linux and macOS compile different code, so each platform is merged on its own.
 #
-# Every pull request ready for review is measured, again on each push, and
-# fails unless lines, branches and MC/DC are all at 100%: the speed releases
-# that skipped this measurement left 161 gaps on main that nothing reported. A
+# Every push to main is measured in full, held to 100% lines, branches and
+# MC/DC, and kept as the map CI's plan reads (`affected-map`): which code each
+# test ran, for `tests affected` to say which tests a pull request's change
+# can reach. A pull request ready for review is measured again on each push:
+# its affected tests alone (scripts/ci-affected.mjs), and the lines it adds or
+# changes held to 100% -- every other line is covered as on main, by tests the
+# change cannot reach. A release pull request, a change to CI, or a change the
+# map cannot answer for is measured in full and held to 100% everywhere: the
+# speed releases that skipped this measurement left 161 gaps on main that
+# nothing reported. A
 # draft is measured when it carries the `self-coverage` label, and on each
 # push while it does: Linux alone, about 40 minutes. The `self-coverage-macos`
 # label, or `macos: true` by hand, measures macOS too; the two platforms
@@ -31,28 +38,54 @@ on:
         default: ""
   pull_request:
     types: [labeled, opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
+  # The plan finds main's map among this workflow's runs.
+  actions: read
 
 # A newer push replaces the measurement of the one before. A label that does
 # not ask for a measurement is a run of its own, so adding one cancels nothing.
+# On main a measurement is never cancelled -- a busy day would leave no map --
+# and only the newest push waits behind the one running.
 concurrency:
-  group: self-coverage-${{ github.ref }}-${{ github.event.action == 'labeled' && !startsWith(github.event.label.name, 'self-coverage') && github.run_id || 'measure' }}
-  cancel-in-progress: true
+  group: self-coverage-${{ github.ref }}-${{ github.event.action == 'labeled' && !startsWith(github.event.label.name, 'self-coverage') && github.event.label.name != 'full-ci' && github.run_id || 'measure' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   SLICES: 10
 
 jobs:
-  platforms:
+  # Which tests a pull request's change can affect: they alone are measured.
+  # Every test on a push, by hand, on a release pull request, on a change to
+  # CI, or when the map cannot answer (the step summary says why).
+  plan:
     if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event.action == 'labeled' && startsWith(github.event.label.name, 'self-coverage'))
+      github.event_name != 'pull_request'
+      || (github.event.action == 'labeled' && (startsWith(github.event.label.name, 'self-coverage') || github.event.label.name == 'full-ci'))
       || (github.event.action != 'labeled'
           && (!github.event.pull_request.draft
+              || contains(github.event.pull_request.labels.*.name, 'full-ci')
               || contains(github.event.pull_request.labels.*.name, 'self-coverage')
               || contains(github.event.pull_request.labels.*.name, 'self-coverage-macos')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: self-coverage
+
+  platforms:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.jobs).measure.run
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.os.outputs.os }}
@@ -101,7 +134,7 @@ jobs:
           retention-days: 3
 
   measure:
-    needs: [platforms, build]
+    needs: [plan, platforms, build]
     name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -113,7 +146,11 @@ jobs:
         # is that half, which ran last and longest in slice 0; slices 1..8
         # share the gates by their time.
         # A targeted measurement (`tests`) is one slice of the named tests.
-        slice: ${{ fromJSON(inputs.tests != '' && '[0]' || '[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]') }}
+        # A pull request's affected tests take as few slices as hold them.
+        slice: ${{ inputs.tests != '' && fromJSON('[0]') || fromJSON(needs.plan.outputs.jobs).measure.matrix.slice }}
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).measure.mode == 'partial' }}
+      AFFECTED_SLICES: ${{ fromJSON(needs.plan.outputs.jobs).measure.slices }}
     steps:
       # The instrumented workspace, its build and the gates' toolchains do not
       # fit a Linux runner's free space as it comes.
@@ -160,6 +197,11 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      # The Bun tests skip without it, and the map would then say they run
+      # none of what CI's bun-bootstrap job runs them for.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -234,6 +276,11 @@ jobs:
         with:
           name: supercov-self-${{ matrix.os }}
           path: ${{ runner.temp }}/self
+      - if: env.AFFECTED == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: affected-selection
+          path: ${{ runner.temp }}/affected
       - name: Choose this slice's tests
         id: tests
         env:
@@ -301,6 +348,13 @@ jobs:
             }' .github/gate-seconds.tsv .github/test-seconds.tsv "$lists/excluded" "$lists/gates" > "$lists/picked"
           # A slice dealt nothing runs nothing: no name at all would be every test.
           [ -s "$lists/picked" ] || echo "no_test_was_dealt_to_this_slice" > "$lists/picked"
+          # A pull request's affected tests, this slice's share of them by
+          # their seconds.
+          if [ "$AFFECTED" = true ]; then
+            names=$(node scripts/ci-affected.mjs cargo-test "$RUNNER_TEMP/affected/selection.json" "$slice" "$AFFECTED_SLICES")
+            echo "command=cargo test --workspace -- --include-ignored --exact $names" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # A targeted measurement runs the named tests alone, matched as
           # libtest matches a filter: by substring.
           if [ -n "$TARGET_TESTS" ]; then
@@ -374,17 +428,23 @@ jobs:
         run: grep -qx 'exit 0' <(tail -1 "$RUNNER_TEMP/out/measure.log")
 
   merge:
-    needs: [platforms, measure]
+    needs: [plan, platforms, measure]
     if: always() && needs.measure.result != 'skipped'
     name: Merge ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).measure.mode == 'partial' }}
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The merge's base too: a pull request's changed lines are read
+          # against it.
+          fetch-depth: 2
       - uses: actions/download-artifact@v5
         with:
           name: supercov-self-${{ matrix.os }}
@@ -457,7 +517,32 @@ jobs:
       # A targeted measurement ran only some tests: it shows what they cover,
       # not what the whole suite leaves, so it holds no floor.
       - name: Hold Supercov to 100% coverage
-        if: inputs.tests == ''
+        if: inputs.tests == '' && env.AFFECTED != 'true'
         run: |
           "$RUNNER_TEMP/self/supercov" runs "$(cat "$RUNNER_TEMP/out/merged-id")" check \
             --min-lines 100 --min-branches 100 --min-mcdc 100
+      # A pull request measured in part: the lines it adds or changes held to
+      # 100% lines, branches and MC/DC by the affected tests. Every other line
+      # is covered as it was on main, where every test runs and the whole is
+      # held to 100%.
+      - name: Hold the changed lines to 100% coverage
+        if: env.AFFECTED == 'true'
+        run: node scripts/ci-affected.mjs changed-gaps HEAD^1 "$RUNNER_TEMP/out"/lines-gaps.jsonl "$RUNNER_TEMP/out"/branches-gaps.jsonl "$RUNNER_TEMP/out"/mcdc-gaps.jsonl
+      # main's measurement (or a full one by hand), kept as the map CI's plan
+      # reads: the runs (without
+      # what only queries read) and the build that answers for them.
+      - name: Keep the map
+        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        run: |
+          map="$RUNNER_TEMP/map"
+          mkdir -p "$map"
+          tar -czf "$map/map.tar.gz" --exclude='query-index.v1.bin*' --exclude='assessment-input.json.gz' --exclude='statement-spans.json' .supercov/runs
+          cp "$RUNNER_TEMP/self/supercov" "$map/supercov"
+          cp "$RUNNER_TEMP/out/merged-id" "$map/merged-id"
+          du -sh "$map"/*
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        with:
+          name: affected-map
+          path: ${{ runner.temp }}/map
+          retention-days: 30

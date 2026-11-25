@@ -1019,7 +1019,9 @@ pass in the run is listed regardless.
 per line, for a runner's filter. A Vitest, Playwright or node:test test inside
 `describe` blocks is printed as the blocks and the test joined by spaces
 (`small charges`), which is what `vitest -t`, `--grep` and
-`--test-name-pattern` match. `--kind`, `--runner`, `--tag`, `--title` and
+`--test-name-pattern` match. A Rust test is printed as its path in its crate
+(`tests::it_works`), which `cargo test -- --exact` and nextest's `test(=...)`
+match. `--kind`, `--runner`, `--tag`, `--title` and
 `--test-file` list only the affected tests they pick: from a run that merged two
 runners' suites, `tests affected --names --runner playwright` gives Playwright
 only its own tests. A helper beside the tests, or source outside what is
@@ -1031,6 +1033,20 @@ as such; a test runner's settings affect only the runs that used that runner.
 A source file
 added since the run is outside every test's record; the working-tree check
 says so, and the suite should run in full.
+
+A Rust test loads what it names by path: a fixture, a data file or a script
+named in its own function (or in its entry of a macro that declares a test
+per entry), or anywhere in its file outside another test, and what a script it
+names imports and names in turn. A path that goes on in a placeholder
+(`tests/fixtures/{name}`) names the directory before it. So a change to one
+fixture affects the tests that name it, and a file no test names, as before,
+affects every test. A file measured Rust source embeds with `include_str!` or
+`include_bytes!` is part of the declaration embedding it: a template or a
+script compiled into the binary affects the tests that ran that code. Changed
+code no probe of the run measured -- code for another platform, a feature the
+run's build left off -- is listed under `unmeasured` (`--json`) and named in
+the text: no test's record says what it reaches, so run the suite in full
+where that code is compiled.
 
 A server the suite starts is recorded too: a mock server `webServer` starts,
 or the application's own. Each Node process of a Playwright run notes the

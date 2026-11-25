@@ -14,8 +14,10 @@ name: Quick check
 #
 #   gh workflow run quick-check.yml --ref <branch>
 #
-# On a pull request it runs beside CI and Compatibility, finishes first, and a
-# failure stops the commit's other runs.
+# It runs by hand only. A pull request's own CI picks its tests from
+# Supercov's coverage map of main (scripts/ci-affected.mjs) and runs them on
+# Linux; macOS and Windows run on a release pull request, a push to main and
+# the `full-ci` label, so this is the way to try them on a branch first.
 
 on:
   workflow_dispatch:
@@ -24,7 +26,6 @@ on:
         description: The branch the change is measured from.
         default: main
         type: string
-  pull_request:
 
 permissions:
   contents: read
@@ -37,11 +38,9 @@ concurrency:
 
 jobs:
   check:
+    # main and a release branch run the full matrix already.
+    if: github.ref_name != 'main' && !startsWith(github.ref_name, 'release/')
     name: Quick check (${{ matrix.os }})
-    # A release pull request runs the whole matrix once; the quick check's
-    # picks there (gate scripts that need a release build or browsers this
-    # job does not set up) only fail for want of them.
-    if: ${{ !startsWith(github.head_ref, 'release/') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:

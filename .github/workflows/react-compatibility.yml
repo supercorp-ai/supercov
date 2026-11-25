@@ -3,6 +3,7 @@ name: React compatibility
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - 'crates/**'
       - 'Cargo*'
@@ -19,11 +20,29 @@ permissions:
   actions: write
 
 concurrency:
-  group: react-compatibility-${{ github.ref }}
+  group: react-compatibility-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: true
 
 jobs:
+  # Whether this change can affect the job (scripts/ci-affected.mjs), as in
+  # CI: the step summary says why it runs or not.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: react
+
   focused:
+    needs: plan
+    if: ${{ fromJSON(needs.plan.outputs.jobs)['focused'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
