@@ -1817,9 +1817,37 @@ one that only may have caused it to run (work no test was credited with, a
 module its file loaded), though those were 62% of the suite's candidate runs.
 
 **The order.** A Playwright mutant's candidates are taken in that order:
-those with their own evidence first, then the others; within each, cheapest
-to a kill first, as the driver orders them (a test's time over how likely it
-is to kill, one that infected it four times likelier).
+those with their own evidence first, then the others; within each, the tests
+that killed most of the run's other mutants of its file first, then cheapest
+to a kill, as the driver orders them (a test's time over how likely it is to
+kill, one that infected it four times likelier).
+
+A page component's or a shared service's first tier used to fill with the
+tests that only render or pass through its file -- a layout's, every
+dashboard test's, cheap and infecting -- while the tests that exercise it
+came later. On a dashboard page's component of the same suite (572 mutants,
+about 187 candidates each), a first round left 251 `survived so far`, and
+triage found most of them killed by the page's own spec files, past the
+first 32; every kill the round made there came from three spec files. A test
+that killed one mutant of a file exercises that file: its kills are the run's
+evidence of it. So the run's kills, saved verdicts with the test that made
+each, say for each file which tests killed its mutants and how many, and a
+mutant's tier takes those first, the most kills first. The first round of a
+run has none; each later pass over the run, and each round of a pass split
+across jobs and merged, has the kills before it.
+
+Measured on the suite's kills (3,878, each with the test that made it): of
+the 255 a first tier of 32 would leave to its rest, with the kills inside
+the first tiers as the run's history, 58% have their killer among the next
+32 candidates in this order (the median killer 10th), against none before
+(the median 53rd). Over every kill, with the run's other kills of the file
+as its history, 98.8% fall in a tier of 32 against 93.4%, and those of
+mutants with 100 or more candidates 89.5% against 56.0%. The tier's size is
+still read from the order without killers, where a kill's own count would put
+it first. The tests' coverage of the mutant's file was measured too, as the
+points of the file each test ran in the record that says which test ran which
+file: no better than the order before (94.0% against 93.4%), as most tests
+of a page run the same few points there.
 
 **The first tier.** Where a mutant has more candidates than a first tier
 holds, a pass runs it first against its first tier alone, in a round of its
@@ -1849,7 +1877,14 @@ candidates it passed (`tests`): `mutants --status survived` lists it beside
 the survivors, said as such, `--status survived-so-far` lists those alone,
 and the summary counts them apart. It is not in the mutation score, which
 counts verdicts, and `--fail-on survived` does not count it: it is undecided,
-as a mutant a budget left is. The pass's summary says how many there are:
+as a mutant a budget left is. Only a mutant that passed a first tier's worth
+of candidates (32) is `survived-so-far`: a pass its budget stops partway
+through a tier records the few candidates each open mutant passed, and 4.29.12
+listed those too. On a settings page's component of that suite, every
+`survived-so-far` mutant had passed 1 to 4 of its 135 candidates, never
+meeting the page's own spec files, which killed 176 of the 317 later. Such a
+mutant is open, as before, and the next pass resumes it. The pass's summary
+says how many there are:
 
     survived so far 212: lived through some candidates (a first tier holds 32), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs <run> mutants --status survived-so-far)
 

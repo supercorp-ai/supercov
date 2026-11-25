@@ -49,11 +49,53 @@ fn own_evidence(reason: CandidateReason) -> bool {
     )
 }
 
+/// The tests that killed mutants of each file in a run, by file, each with
+/// how many it killed there (`killers`).
+pub type Killers = BTreeMap<String, BTreeMap<usize, usize>>;
+
+/// Each test the run's verdicts say killed a mutant, by the mutant's file,
+/// with how many it killed there: a test that killed one mutant of a file
+/// exercises that file, and likely kills its other mutants. On a large
+/// application's e2e suite, of 255 mutants killed past a first tier of 32,
+/// 58% had their killer among the next 32 candidates with this order (from
+/// the kills within the first tiers alone), and none with the order before.
+pub fn killers(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> Killers {
+    let index = plan
+        .tests
+        .iter()
+        .enumerate()
+        .map(|(at, test)| (test.id.as_str(), at))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut killers = Killers::new();
+    for mutant in &plan.mutants {
+        let Some(killer) = verdicts
+            .get(&mutant.id)
+            .filter(|verdict| verdict.status == "killed")
+            .and_then(|verdict| verdict.killed_by.as_deref())
+            .and_then(|killer| index.get(killer))
+        else {
+            continue;
+        };
+        *killers
+            .entry(mutant.file.clone())
+            .or_default()
+            .entry(*killer)
+            .or_default() += 1;
+    }
+    killers
+}
+
 /// A mutant's candidates in the order its first tier takes them: those whose
-/// own evidence ran its code first, then the rest; within each, cheapest to
-/// a kill first (each test's measured time over how likely it is to kill,
-/// one that infected it the likelier), the plan's order between equals.
-pub fn ordered(mutant: &PlannedMutant, tests: &[PlannedTest]) -> Vec<Candidate> {
+/// own evidence ran its code first, then the rest; within each, the tests
+/// that killed most of its file's other mutants (`kills`, by test) first,
+/// then cheapest to a kill (each test's measured time over how likely it is
+/// to kill, one that infected it the likelier), the plan's order between
+/// equals.
+pub fn ordered(
+    mutant: &PlannedMutant,
+    tests: &[PlannedTest],
+    kills: &BTreeMap<usize, usize>,
+) -> Vec<Candidate> {
     let mut ordered = mutant.candidates.clone();
     ordered.sort_by_key(|candidate| {
         let time = tests[candidate.test].duration_ms.unwrap_or(UNTIMED_TEST_MS);
@@ -62,7 +104,12 @@ pub fn ordered(mutant: &PlannedMutant, tests: &[PlannedTest]) -> Vec<Candidate> 
         } else {
             INFECTED_LIKELIER
         };
-        (!own_evidence(candidate.reason), time * likelier)
+        let killed = kills.get(&candidate.test).copied().unwrap_or(0);
+        (
+            !own_evidence(candidate.reason),
+            std::cmp::Reverse(killed),
+            time * likelier,
+        )
     });
     ordered
 }
@@ -90,7 +137,9 @@ pub fn resumes_alone(mutant: &PlannedMutant, tests: &[PlannedTest]) -> bool {
 /// How many candidates a run's first tier holds: `FIRST_TIER`, or more where
 /// the run's kills say so. Each kill's place in its mutant's order is
 /// counted, and the tier holds `KILLS_HELD` of them. A first tier's kills
-/// are never past its end, so it only grows, from kills its rest made.
+/// are never past its end, so it only grows, from kills its rest made. The
+/// places are read without the run's killers first, whose order puts a kill
+/// at the front by its own count.
 pub fn size(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> usize {
     let mut places = Vec::new();
     for mutant in plan
@@ -105,7 +154,7 @@ pub fn size(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> usize {
         else {
             continue;
         };
-        if let Some(place) = ordered(mutant, &plan.tests)
+        if let Some(place) = ordered(mutant, &plan.tests, &BTreeMap::new())
             .iter()
             .position(|candidate| plan.tests[candidate.test].id == killer)
         {
@@ -121,18 +170,22 @@ pub fn size(plan: &StrongPlan, verdicts: &BTreeMap<String, Verdict>) -> usize {
 }
 
 /// The first tier of each mutant with more candidates than `size`: its
-/// first `size` candidates in `ordered`'s order, kept in the plan's, by
-/// mutant id.
+/// first `size` candidates in `ordered`'s order, with the tests that killed
+/// its file's other mutants (`killers`) first, kept in the plan's, by mutant
+/// id.
 pub fn first_tiers(
     mutants: &[PlannedMutant],
     tests: &[PlannedTest],
     size: usize,
+    killers: &Killers,
 ) -> BTreeMap<String, Vec<Candidate>> {
+    let none = BTreeMap::new();
     mutants
         .iter()
         .filter(|mutant| mutant.candidates.len() > size && tiered(mutant, tests))
         .map(|mutant| {
-            let mut tier = ordered(mutant, tests);
+            let kills = killers.get(&mutant.file).unwrap_or(&none);
+            let mut tier = ordered(mutant, tests, kills);
             tier.truncate(size);
             tier.sort_by_key(|candidate| {
                 mutant
@@ -170,17 +223,26 @@ pub fn lived_through(
     }
 }
 
-/// The mutants a run left with `survived so far`: no verdict, and candidates
-/// that passed with them. Each is said as a strong status of its own,
-/// `survived-so-far`, with how many candidates it passed: never a survivor,
-/// never in the score.
+/// Whether a mutant with no verdict that passed `passed` candidates lived
+/// through a first tier: as many as the smallest tier holds. A pass its
+/// budget stopped partway through a tier records the few candidates it
+/// passed too (on a large application's settings page, 1 to 4 of 135): such
+/// a mutant has not met its likeliest killers, and is no more than open.
+pub fn lived_a_tier(passed: usize) -> bool {
+    passed >= FIRST_TIER
+}
+
+/// The mutants a run left with `survived so far`: no verdict, and a first
+/// tier's worth of candidates that passed with them (`lived_a_tier`). Each
+/// is said as a strong status of its own, `survived-so-far`, with how many
+/// candidates it passed: never a survivor, never in the score.
 pub fn survived_so_far(
     verdicts: &BTreeMap<String, Verdict>,
     progress: &Progress,
 ) -> BTreeMap<String, serde_json::Value> {
     progress
         .iter()
-        .filter(|(id, passed)| !passed.is_empty() && !verdicts.contains_key(*id))
+        .filter(|(id, passed)| lived_a_tier(passed.len()) && !verdicts.contains_key(*id))
         .map(|(id, passed)| {
             (
                 id.clone(),
@@ -288,7 +350,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            ids(&tests, &ordered(&m, &tests)),
+            ids(&tests, &ordered(&m, &tests, &BTreeMap::new())),
             [
                 "untimed-infected",
                 "read",
@@ -326,7 +388,7 @@ mod tests {
             decided,
             server.clone(),
         ];
-        let tiers = first_tiers(&mutants, &tests, 2);
+        let tiers = first_tiers(&mutants, &tests, 2, &Killers::new());
         assert_eq!(
             tiers
                 .iter()
@@ -340,6 +402,71 @@ mod tests {
         assert!(resumes_alone(&server, &tests));
         assert!(!resumes_alone(&mutants[0], &tests));
         assert!(!resumes_alone(&mutants[2], &tests));
+    }
+
+    /// The tests that killed a file's mutants come first in its other
+    /// mutants' tiers, the one with more kills before, whatever their time;
+    /// a kill by a test the plan does not have, a survivor and another
+    /// file's kills count for nothing.
+    #[test]
+    fn a_file_s_killers_come_first_in_its_mutants_tiers() {
+        let tests = vec![
+            test("render", "playwright", Some(100)),
+            test("layout", "playwright", Some(200)),
+            test("page", "playwright", Some(9_000)),
+            test("page-again", "playwright", Some(8_000)),
+        ];
+        let all = [(0, Infected), (1, Infected), (2, Infected), (3, Infected)];
+        let mut elsewhere = mutant("elsewhere", &all);
+        elsewhere.file = "src/b.js".into();
+        let plan = StrongPlan {
+            mutant_set: "set".into(),
+            tests: tests.clone(),
+            mutants: vec![
+                mutant("k1", &all),
+                mutant("k2", &all),
+                mutant("k3", &all),
+                mutant("lost", &all),
+                mutant("lived", &all),
+                mutant("open", &all),
+                elsewhere,
+            ],
+        };
+        let verdicts = BTreeMap::from([
+            ("k1".to_owned(), verdict("killed", Some("page"), 1)),
+            ("k2".to_owned(), verdict("killed", Some("page"), 1)),
+            ("k3".to_owned(), verdict("killed", Some("page-again"), 1)),
+            ("lost".to_owned(), verdict("killed", Some("gone"), 1)),
+            ("lived".to_owned(), verdict("survived", None, 4)),
+            ("elsewhere".to_owned(), verdict("killed", Some("render"), 1)),
+        ]);
+        let empty = StrongPlan {
+            mutants: Vec::new(),
+            ..plan.clone()
+        };
+        assert!(killers(&empty, &verdicts).is_empty());
+        let killers = killers(&plan, &verdicts);
+        assert_eq!(
+            killers,
+            Killers::from([
+                ("src/a.js".to_owned(), BTreeMap::from([(2, 2), (3, 1)])),
+                ("src/b.js".to_owned(), BTreeMap::from([(0, 1)])),
+            ])
+        );
+        let tiers = first_tiers(&plan.mutants[5..6], &tests, 2, &killers);
+        assert_eq!(ids(&tests, &tiers["open"]), ["page", "page-again"]);
+        // Another file's killers change nothing of it.
+        let mut other = plan.mutants[5].clone();
+        other.file = "src/c.js".into();
+        let tiers = first_tiers(&[other], &tests, 2, &killers);
+        assert_eq!(ids(&tests, &tiers["open"]), ["render", "layout"]);
+        assert_eq!(
+            ids(
+                &tests,
+                &ordered(&plan.mutants[5], &tests, &killers["src/a.js"])
+            ),
+            ["page", "page-again", "render", "layout"]
+        );
     }
 
     /// The tier holds 95% of the run's kills, never fewer than 32
@@ -407,17 +534,26 @@ mod tests {
                 BTreeSet::from(["a".to_owned(), "b".to_owned(), "z".to_owned()])
             )])
         );
-        // What a run shows of them: those with progress and no verdict.
+        // What a run shows of them: those with no verdict that passed a
+        // first tier's worth of candidates; a few passed before a stop are
+        // not one.
+        let tier = (0..FIRST_TIER)
+            .map(|at| format!("t{at}"))
+            .collect::<BTreeSet<_>>();
         let progress = Progress::from([
-            ("all".to_owned(), BTreeSet::from(["a".to_owned()])),
-            ("killed".to_owned(), BTreeSet::from(["a".to_owned()])),
+            ("all".to_owned(), tier.clone()),
+            ("killed".to_owned(), tier),
+            (
+                "few".to_owned(),
+                BTreeSet::from(["a".to_owned(), "b".to_owned()]),
+            ),
             ("empty".to_owned(), BTreeSet::new()),
         ]);
         assert_eq!(
             survived_so_far(&verdicts, &progress),
             BTreeMap::from([(
                 "all".to_owned(),
-                serde_json::json!({"status": "survived-so-far", "tests": 1})
+                serde_json::json!({"status": "survived-so-far", "tests": 32})
             )])
         );
     }

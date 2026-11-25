@@ -561,7 +561,12 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     }
     let total = plan.mutants.len();
     // How many candidates a first tier holds: the run's own kills say.
-    let first_tier = supercov_engine::strong_tiers::size(&plan, &read_saved(run));
+    let earlier = read_saved(run);
+    let first_tier = supercov_engine::strong_tiers::size(&plan, &earlier);
+    // The tests that killed each file's mutants: first in its other
+    // mutants' tiers.
+    let killers = supercov_engine::strong_tiers::killers(&plan, &earlier);
+    drop(earlier);
     narrow(&mut plan, &root, run, options)?;
     let narrowed = plan.clone();
     let mut saved = read_saved(run);
@@ -631,6 +636,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         options,
         factor,
         first_tier,
+        &killers,
     )?;
     let verdicts = read_saved(run);
     let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
@@ -659,7 +665,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .iter()
         .filter(|(id, _)| !verdicts.contains_key(id))
         .filter_map(|(id, _)| progress.get(id))
-        .filter(|passed| !passed.is_empty())
+        .filter(|passed| supercov_engine::strong_tiers::lived_a_tier(passed.len()))
         .count();
     if so_far > 0 {
         data["survivedSoFar"] = json!({"mutants": so_far, "firstTier": first_tier});
@@ -1974,6 +1980,7 @@ fn execute(
     options: &Options,
     factor: f64,
     first_tier: usize,
+    killers: &supercov_engine::strong_tiers::Killers,
 ) -> Result<Executed, Stop> {
     // Decided without running.
     for mutant in &plan.mutants {
@@ -2063,7 +2070,12 @@ fn execute(
         let mut ran_out = None;
         // A first tier for each mutant with many candidates: every mutant
         // runs its likeliest killers before any runs the rest.
-        let tiers = supercov_engine::strong_tiers::first_tiers(&remaining, &plan.tests, first_tier);
+        let tiers = supercov_engine::strong_tiers::first_tiers(
+            &remaining,
+            &plan.tests,
+            first_tier,
+            killers,
+        );
         // The first round runs them: each with its first tier, the cheapest
         // first. The rounds after run what is left.
         let mut tiered = (!tiers.is_empty()).then(|| {

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A Playwright strong pass's first tier takes first the tests that killed most of the run's other mutants of the mutant's file: a page component's or a shared service's tier no longer fills with the cheap tests that only render or pass through it. On a dashboard page's component of a large application's e2e suite (572 mutants, about 187 candidates each), a first round left 251 `survived so far`, most of them killed by the page's own spec files past the first 32 candidates. From the suite's kills, with those the first tiers made as the run's history, 58% of the mutants a first tier left to its rest have their killer in the next 32 candidates, against none before; over every kill, a tier of 32 holds 98.8% against 93.4%, and for mutants with 100 or more candidates 89.5% against 56.0%. The run's kills come from its earlier passes and the merged rounds before it, so a run's first round is as before.
+
+**Fixed**
+
+- A mutant is `survived-so-far` only once it has passed a first tier's worth of candidates (32). A pass its budget stopped partway through a tier keeps the few candidates each open mutant passed, and those mutants were listed as `survived-so-far` too: on a settings page's component of a large e2e suite, every one of them had passed 1 to 4 of its 135 candidates, and the page's own specs, never run with them, killed 176 of the 317. They are open, as a mutant a budget left is, and the next pass resumes them.
+
 ## 4.29.12
 
 **Changed**
