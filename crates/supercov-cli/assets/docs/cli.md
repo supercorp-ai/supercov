@@ -507,7 +507,10 @@ many more). `mutants` then shows each mutant's verdict beside its weak status,
 and the mutation score with the verdicts' counts; `mutants --status survived`
 (or `killed`, `timeout`, `no-coverage`, `error`, `unviable`) lists the mutants
 with that verdict, and `--format markdown` lists the survivors under the
-mutation score.
+mutation score. A Playwright mutant with many candidates that lived through
+its first tier, with the rest of its candidates not run yet, is
+`survived-so-far`: listed by `--status survived` as such (and alone by
+`--status survived-so-far`), counted apart, and not in the score.
 
 It runs far less than StrykerJS: no dry run (the measured run is one), no
 mutant no test infected (decided `survived`) or reached (`no-coverage`), and

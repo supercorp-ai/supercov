@@ -152,6 +152,12 @@ mutants the tests let survive.
   that passed did. The candidates are kept as verdicts are, after an edit, a
   merge and in a later round: a candidate a change could reach runs again.
   The Playwright driver records them.
+- **A first tier.** A Playwright mutant with more candidates than its first
+  tier holds (32, or more where the run's kills come later) runs against
+  that tier first, every such mutant before any runs the rest. One the tier
+  lets live is `survived-so-far` until the rest runs, in the same pass where
+  it has the time: listed with the survivors as such, never in the score
+  (`docs/design/strong-mutation.md`, A first tier, then the rest).
 - **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
   finds a mutant; `2`, after the answer, when the measured command failed (a
   failing test kills nothing, so the verdicts cannot gate) or no mutant could
