@@ -1619,6 +1619,7 @@ fn kept_verdicts(
             id.clone(),
             document.mutants,
             document.progress,
+            document.lived,
             tests,
             other_bytes,
         ));
@@ -1630,9 +1631,10 @@ fn kept_verdicts(
     let lent = lending
         .iter()
         .map(
-            |(_, verdicts, progress, tests, other_bytes)| crate::strong_verdicts::Lent {
+            |(_, verdicts, progress, lived, tests, other_bytes)| crate::strong_verdicts::Lent {
                 verdicts,
                 progress,
+                lived,
                 tests,
                 other_bytes,
             },
@@ -1642,12 +1644,14 @@ fn kept_verdicts(
     // The candidates each mutant still open passed in any run: a pass over
     // the merged run, or a later round carrying it over, resumes there.
     let progress = crate::strong_verdicts::merged_progress(&plan, &lent, &mutants);
+    let lived = crate::strong_verdicts::merged_lived(&lent, &progress);
     let document = StrongVerdicts {
         schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: merged_run_id.to_owned(),
         mutants,
         mutant_set: plan.mutant_set,
         progress,
+        lived,
     };
     let from = lending
         .iter()

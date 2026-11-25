@@ -25761,7 +25761,7 @@ fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
     );
     let said = format!("{}\n{}", stopped.stdout(), stopped.stderr());
     assert!(
-        said.contains("  survived so far 1: lived through some candidates (a first tier holds 32)"),
+        said.contains("  survived so far 1: lived through a first tier (32 candidates or 60 s of their tests' time, whichever comes first)"),
         "{said}"
     );
     // The next pass runs the rest alone, and it survives with all 34, once
