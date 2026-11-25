@@ -2029,13 +2029,14 @@ fn execute(
             let mut round = StrongPlan {
                 mutant_set: plan.mutant_set.clone(),
                 tests: plan.tests.clone(),
-                mutants: remaining.clone(),
+                mutants: remaining
+                    .iter()
+                    .map(|mutant| PlannedMutant {
+                        candidates: tiers.get(&mutant.id).unwrap_or(&mutant.candidates).clone(),
+                        ..mutant.clone()
+                    })
+                    .collect(),
             };
-            for mutant in &mut round.mutants {
-                if let Some(tier) = tiers.get(&mutant.id) {
-                    mutant.candidates.clone_from(tier);
-                }
-            }
             round.cheapest_first();
             let by_id = tiers
                 .iter()
@@ -2142,7 +2143,6 @@ fn execute(
                 remaining = rest.mutants;
                 remaining.retain(|mutant| !saved.contains_key(&mutant.id));
                 passed_before = passed_counts(progress);
-                save(run, &plan.mutant_set, saved, progress)?;
                 continue;
             }
             if budget_spent() || remaining.len() == before {
