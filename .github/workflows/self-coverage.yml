@@ -10,7 +10,8 @@ name: Self Coverage
 # MC/DC, and kept as the map CI's plan reads (`affected-map`): which code each
 # test ran, for `tests affected` to say which tests a pull request's change
 # can reach. A pull request ready for review is measured again on each push:
-# its affected tests alone (scripts/ci-affected.mjs), and the lines it adds or
+# its affected tests and every test written in a file it changed (a test it
+# adds is in no map; scripts/ci-affected.mjs), and the lines it adds or
 # changes held to 100% -- every other line is covered as on main, by tests the
 # change cannot reach. A release pull request, a change to CI, or a change the
 # map cannot answer for is measured in full and held to 100% everywhere: the

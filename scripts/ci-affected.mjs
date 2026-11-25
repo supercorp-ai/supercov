@@ -25,6 +25,9 @@
 //   node scripts/ci-affected.mjs cargo-test <selection.json> <slice> <slices>
 //     A partial Self Coverage slice's `cargo test` filter: its share of the
 //     affected tests, by their recorded seconds.
+//   node scripts/ci-affected.mjs tests-in <file>...
+//     The tests written in the files named, by their libtest names: what a
+//     pull request's Self Coverage measures beside the affected tests.
 //   node scripts/ci-affected.mjs changed-gaps <base> <gaps.jsonl>...
 //     The gaps of a partial Self Coverage run on lines changed since <base>
 //     (`supercov runs <id> gaps --format jsonl`); exits 1 when there is one.
@@ -128,6 +131,128 @@ export function gatesNow(source = read(GATES)) {
     gates.set(name, [script.includes('/') ? script : `scripts/${script}`, ...words].join(' '));
   }
   return gates;
+}
+
+/**
+ * Rust source with its comments and the insides of its string and character
+ * literals blanked, lines kept: what is left is declarations and braces.
+ */
+function blankRust(source) {
+  let out = '';
+  let index = 0;
+  const blank = (text) => text.replace(/[^\n]/gu, ' ');
+  while (index < source.length) {
+    const rest = source.slice(index);
+    const raw = /^b?r(#*)"/u.exec(rest);
+    let match;
+    if (rest.startsWith('//')) {
+      match = /^\/\/[^\n]*/u.exec(rest)[0];
+    } else if (rest.startsWith('/*')) {
+      let depth = 0;
+      let end = 0;
+      do {
+        if (rest.startsWith('/*', end)) {
+          depth += 1;
+          end += 2;
+        } else if (rest.startsWith('*/', end)) {
+          depth -= 1;
+          end += 2;
+        } else {
+          end += 1;
+        }
+      } while (depth > 0 && end < rest.length);
+      match = rest.slice(0, end);
+    } else if (raw) {
+      const close = rest.indexOf(`"${raw[1]}`, raw[0].length);
+      match = rest.slice(0, close < 0 ? rest.length : close + 1 + raw[1].length);
+    } else if (/^b?"/u.test(rest)) {
+      match = /^b?"(?:\\[\s\S]|[^"\\])*"?/u.exec(rest)[0];
+    } else if (/^b?'(?:\\[\s\S][^']*|[^'\\])'/u.test(rest)) {
+      match = /^b?'(?:\\[\s\S][^']*|[^'\\])'/u.exec(rest)[0];
+    }
+    if (match) {
+      out += blank(match);
+      index += match.length;
+    } else {
+      out += source[index];
+      index += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * The module path of a Rust file in its test binary: `run::tests` for
+ * `src/run/tests.rs`, empty for a crate root or an integration test's own
+ * file, `common` for `tests/common/mod.rs`. `null` for a file no test binary
+ * holds tests of (a build script, a benchmark, an example).
+ */
+function rustModule(file) {
+  const parts = file.replace(/\.rs$/u, '').split('/');
+  const at = (name) => parts.lastIndexOf(name);
+  let inside;
+  if (at('src') >= 0) {
+    inside = parts.slice(at('src') + 1);
+    // `src/bin/x.rs` and `src/bin/x/main.rs` are a binary's root.
+    if (inside[0] === 'bin') inside = inside.length === 2 ? [] : inside.slice(2);
+  } else if (at('tests') >= 0) {
+    // `tests/cli.rs` is a test binary's root; `tests/common/mod.rs` is the
+    // `common` module test binaries declare.
+    inside = parts.slice(at('tests') + 1);
+    if (inside.length === 1) inside = [];
+  } else {
+    return null;
+  }
+  if (['lib', 'main', 'mod'].includes(inside.at(-1))) inside = inside.slice(0, -1);
+  return inside.join('::');
+}
+
+/** Every `#[test]` function a Rust file declares, by its libtest name. */
+export function rustTests(file, source) {
+  const module = rustModule(file);
+  if (module === null) return [];
+  const tests = [];
+  const stack = [];
+  let depth = 0;
+  let test = false;
+  for (const [token, attribute, modName, fnName] of blankRust(source).matchAll(/#!?\s*\[([^\]]*)\]|\bmod\s+([A-Za-z_]\w*)\s*\{|\bfn\s+([A-Za-z_]\w*)|[{}]/gu)) {
+    if (attribute !== undefined) {
+      // `#[test]`, `#[tokio::test]`: a path that ends in `test`.
+      test ||= /^\s*(?:[A-Za-z_]\w*\s*::\s*)*test\s*(?:\(.*)?$/u.test(attribute);
+    } else if (modName !== undefined) {
+      depth += 1;
+      stack.push({ name: modName, depth });
+    } else if (fnName !== undefined) {
+      if (test) tests.push([module, ...stack.map((entry) => entry.name), fnName].filter(Boolean).join('::'));
+      test = false;
+    } else if (token === '{') {
+      depth += 1;
+    } else {
+      if (stack.at(-1)?.depth === depth) stack.pop();
+      depth -= 1;
+    }
+  }
+  return tests;
+}
+
+/**
+ * The tests written in the files a pull request changed, which the map may
+ * not know: every `#[test]` of a changed Rust file, and every gate when the
+ * gates' file changed. A test the change added is among them.
+ */
+export function testsInFiles(changed, readFile = read) {
+  const names = new Set();
+  for (const file of changed.filter((path) => path.endsWith('.rs'))) {
+    let source;
+    try {
+      source = readFile(file);
+    } catch {
+      continue; // removed by the change
+    }
+    for (const name of rustTests(file, source)) names.add(name);
+    if (file === GATES) for (const gate of gatesNow(source).keys()) names.add(gate);
+  }
+  return [...names];
 }
 
 /** Seconds each test or gate took in Self Coverage, where recorded. */
@@ -353,13 +478,18 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       continue;
     }
     if (spec.selfCoverage) {
-      // Every test to run, dealt into as few slices as hold them at about
-      // fifteen minutes each.
-      const total = [...run].reduce((sum, test) => sum + (timing.get(test) ?? 1), 0);
+      // Every test to run: the affected ones, and every test written in a
+      // file the change touched -- one it added is in no map, and the lines
+      // it was written for are held to the floor. Dealt into as few slices
+      // as hold them at about fifteen minutes each.
+      const written = testsInFiles(changed);
+      const measured = new Set([...run, ...written]);
+      selection.names = [...measured];
+      const total = [...measured].reduce((sum, test) => sum + (timing.get(test) ?? 1), 0);
       const slices = Math.max(1, Math.min(MAX_SLICES, Math.ceil(total / SLICE_SECONDS)));
-      jobs[name] = run.size === 0
-        ? { run: false, mode: 'skip', why: 'no test is affected' }
-        : { run: true, mode: 'partial', why: `${run.size} affected test(s), about ${Math.round(total / 60)} minutes`, matrix: { slice: Array.from({ length: slices }, (_, index) => index) }, slices };
+      jobs[name] = measured.size === 0
+        ? { run: false, mode: 'skip', why: 'no test is affected or written in a changed file' }
+        : { run: true, mode: 'partial', why: `${run.size} affected test(s) and ${written.length} in changed files, about ${Math.round(total / 60)} minutes`, matrix: { slice: Array.from({ length: slices }, (_, index) => index) }, slices };
       continue;
     }
     jobs[name] = reasons.length === 0
@@ -523,12 +653,16 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     const { expression, picked } = nextestFilter(JSON.parse(readFileSync(selectionPath, 'utf8')), JSON.parse(readFileSync(listingPath, 'utf8')));
     appendFileSync(resolve(repository, '.config/nextest.toml'), `\n[profile.affected]\ndefault-filter = '''${expression || 'none()'}'''\n`);
     console.log(`[ci-affected] ${picked} test(s) picked`);
+  } else if (command === 'tests-in') {
+    // The tests a Self Coverage run of a pull request measures beside the
+    // affected ones: those written in the files named.
+    for (const name of testsInFiles(rest)) console.log(name);
   } else if (command === 'cargo-test') {
     const [selectionPath, slice, slices] = rest;
     const names = sliceTests(JSON.parse(readFileSync(selectionPath, 'utf8')), Number(slice), Number(slices));
     console.log(names.length > 0 ? names.join(' ') : 'no_test_was_dealt_to_this_slice');
   } else {
-    console.error('usage: ci-affected.mjs triage | plan <workflow> [answer directory] | nextest <selection.json> <list.json> | cargo-test <selection.json> <slice> <slices> | changed-gaps <base> <gaps.jsonl>...');
+    console.error('usage: ci-affected.mjs triage | plan <workflow> [answer directory] | nextest <selection.json> <list.json> | cargo-test <selection.json> <slice> <slices> | tests-in <file>... | changed-gaps <base> <gaps.jsonl>...');
     process.exit(2);
   }
 }
