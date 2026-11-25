@@ -64,7 +64,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
+          # npm's cache for main only: a run on another branch would keep a
+          # copy no pull request can read.
+          cache: ${{ github.ref == 'refs/heads/main' && 'npm' || '' }}
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: x86_64-unknown-linux-gnu
@@ -106,7 +108,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
+          # npm's cache for main only: a run on another branch would keep a
+          # copy no pull request can read.
+          cache: ${{ github.ref == 'refs/heads/main' && 'npm' || '' }}
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

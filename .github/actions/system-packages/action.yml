@@ -52,11 +52,12 @@ runs:
     # Saved whether or not the install finished: what it fetched is the next
     # run's head start. apt wrote it as root. A pull request saves only where
     # nothing was restored: one that started from main's copy, or an older
-    # one, would add a copy of its own to the repository's 10 GB of cache.
-    - if: always() && steps.kept.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || steps.kept.outputs.cache-matched-key == '')
+    # one, would add a copy of its own to the repository's 10 GB of cache. A
+    # run on another branch saves nothing: no pull request can read it.
+    - if: always() && steps.kept.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && steps.kept.outputs.cache-matched-key == ''))
       shell: bash
       run: sudo chown -R "$USER" ~/apt-archives
-    - if: always() && steps.kept.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || steps.kept.outputs.cache-matched-key == '')
+    - if: always() && steps.kept.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && steps.kept.outputs.cache-matched-key == ''))
       uses: actions/cache/save@v4
       with:
         path: ~/apt-archives

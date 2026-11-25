@@ -92,7 +92,9 @@ runs:
         now=$(bash "$GITHUB_ACTION_PATH/count.sh")
         echo "dependency files: ${JVM_DEPENDENCIES_FILES:-0} restored, $now now"
         [ "$now" -gt "${JVM_DEPENDENCIES_FILES:-0}" ] && echo "grew=true" >> "$GITHUB_OUTPUT" || true
-    - if: inputs.step == 'save' && steps.grew.outputs.grew == 'true'
+    # Saved by a pull request's runs and by main's, not by a run on another
+    # branch, which no pull request can read.
+    - if: inputs.step == 'save' && steps.grew.outputs.grew == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
       uses: actions/cache/save@v4
       with:
         path: |
