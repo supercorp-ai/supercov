@@ -114,8 +114,12 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
-      # The release build's dependencies kept between runs.
+      # The measure build's dependencies kept between runs, saved by main's
+      # run (this workflow runs on a push to main) and only restored by a
+      # pull request's.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # The system packages the slices' browsers need, fetched once here and
       # kept before any slice starts: ten slices fetching them at once from
@@ -243,7 +247,11 @@ jobs:
       - name: Hash the lockfiles
         id: locks
         run: echo "hash=$(git ls-files -s '*package-lock.json' | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      # Restored only, but for main's run: at 1.2 GB, a copy saved by each
+      # pull request was an eighth of the repository's 10 GB, and three of
+      # them evicted main's caches. Saved below, once the browsers are in.
+      - id: browsers
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/ms-playwright
@@ -273,6 +281,13 @@ jobs:
               PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npx -y "playwright@$version" install chromium
             fi
           done
+      - if: github.ref == 'refs/heads/main' && matrix.slice == 0 && steps.browsers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
       - uses: actions/download-artifact@v5
         with:
           name: supercov-self-${{ matrix.os }}
