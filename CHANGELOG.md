@@ -12,6 +12,7 @@
 
 **Added**
 
+- A Playwright strong pass runs a mutant with many candidate tests against its likeliest 32 first (its first tier: candidates whose own evidence ran its code first, then the cheapest to a kill), every such mutant before any runs the rest. One the tier lets live is `survived so far`: kept as the candidates it passed, never a verdict, not in the mutation score, listed by `mutants --status survived` as such (and alone by `--status survived-so-far`); the pass runs the rest where it has the time, the next pass where it does not. The tier grows where the run's own kills come later. On a large application's e2e suite, 93.5% of 3,448 kills came from a mutant's first 32 candidates, and a first tier costs 513 hours of test time where deciding every survivor costs 7,253: code every test runs (an auth middleware's mutants have about 1,170 candidates each: 39 minutes of test time to survive, 7 seconds for a first tier) gets its likely kills and its `survived so far` for a fourteenth of the time. A mutant a server must start with runs its tier in its round alone, and resumes from it in the same run. `docs/design/strong-mutation.md` has the measurements.
 - `tests affected` names changed code no probe of the run measured -- another platform's, a feature the build left off, a `const fn` -- under `unmeasured` (`--json`) and in the text: no test's record can say what it reaches.
 
 ## 4.29.11

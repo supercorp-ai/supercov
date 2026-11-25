@@ -25231,6 +25231,237 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
     assert!(saved().get("progress").is_none(), "{log}");
 }
 
+/// A mutant with more candidates than a first tier holds (32) runs first
+/// against its likeliest 32, every such mutant before any runs the rest:
+/// what the page logs (no test reads it) lives through its tier, then the
+/// rest, and survives with all 34; the flag only the slowest test reads,
+/// last in its order, is killed by it in the rest. A pass that stops after
+/// a first tier leaves `survived so far`: never a survivor or in the score,
+/// listed with the survivors as such, and run to its end by the next pass.
+#[cfg(unix)]
+#[test]
+fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-first-tier");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-first-tier", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file.startsWith(\"public/\") ? \"\" : \"static/\"}${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\">Active</p><script src=\"/public/log.js\"></script></body>\n",
+    );
+    project.write(
+        "public/log.js",
+        "console.log(\"loaded\");\nwindow.ready = true;\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // 33 quick tests that load the page, and a slow one that reads the flag.
+    project.write(
+        "tests/page.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nfor (let step = 1; step <= 33; step++) {\n  test(`loads ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\ntest(\"is ready, after a while\", async ({ page }) => {\n  await page.goto(\"/\");\n  await page.waitForTimeout(2_000);\n  expect(await page.evaluate(() => window.ready)).toBe(true);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright first tier");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &[roots],
+        )
+        .json();
+    let titles = plan["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| {
+            (
+                test["id"].as_str().unwrap().to_owned(),
+                test["title"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let run = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved_path = project
+        .root
+        .join(format!(".supercov/runs/{run}/strong-mutation.json"));
+    let out = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[roots, ("SUPERCOV_VERBOSE", "1")],
+    );
+    let log = format!("{}\n{}", out.stdout(), out.stderr());
+    assert_eq!(out.code(), 0, "{log}");
+    let listed = || -> Vec<serde_json::Value> {
+        project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let verdicts = listed();
+    let on_line = |line: u32| {
+        verdicts
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("public/log.js:{line}:"))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let logged = on_line(1)
+        .into_iter()
+        .find(|mutant| mutant["mutator"] == "StringLiteral")
+        .unwrap_or_else(|| panic!("{plan}"));
+    let logged_id = logged["id"].as_str().unwrap().to_owned();
+    assert_eq!(logged["strong"]["status"], "survived", "{log}");
+    assert_eq!(logged["strong"]["tests"], 34, "{log}");
+    let flag = on_line(2)
+        .into_iter()
+        .find(|mutant| mutant["mutator"] == "BooleanLiteral")
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert_eq!(flag["strong"]["status"], "killed", "{log}");
+    assert_eq!(
+        titles[flag["strong"]["killedBy"].as_str().unwrap()],
+        "is ready, after a while",
+        "{log}"
+    );
+    // The flag's tier ran before the rest: 32 candidates let it live before
+    // the slow test ran with it.
+    let flag_id = flag["id"].as_str().unwrap();
+    let lived = log
+        .lines()
+        .filter(|line| line.contains(&format!("{flag_id}: \"")) && line.contains("\" lives ("))
+        .count();
+    assert_eq!(lived, 33, "{log}");
+    // A pass that stopped after the survivor's first tier: what it passed
+    // is kept, and no verdict.
+    let mut document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+    document["mutants"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&logged_id);
+    let tier = titles
+        .iter()
+        .filter(|(_, title)| title.starts_with("loads ") && title != &"loads 33")
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(tier.len(), 32);
+    document["progress"] = serde_json::json!({ logged_id.clone(): tier });
+    std::fs::write(&saved_path, document.to_string()).unwrap();
+    let survivors = project
+        .supercov(&[
+            "runs", "latest", "mutants", "--status", "survived", "--json",
+        ])
+        .json();
+    let so_far = survivors["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == logged_id.as_str())
+        .unwrap_or_else(|| panic!("{survivors}"))
+        .clone();
+    assert_eq!(so_far["strong"]["status"], "survived-so-far", "{survivors}");
+    assert_eq!(so_far["strong"]["tests"], 32, "{survivors}");
+    assert_eq!(
+        survivors["data"]["summary"]["strong"]["survived-so-far"], 1,
+        "{survivors}"
+    );
+    let only = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--status",
+            "survived-so-far",
+            "--json",
+        ])
+        .json();
+    assert_eq!(
+        only["data"]["mutants"].as_array().unwrap().len(),
+        1,
+        "{only}"
+    );
+    let killed = project
+        .supercov(&["runs", "latest", "mutants", "--status", "killed", "--json"])
+        .json();
+    assert!(
+        killed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["strong"]["status"] == "killed"),
+        "{killed}"
+    );
+    // A pass whose budget is spent before it reaches it leaves it so.
+    let stopped = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--budget", "1"],
+        &[roots],
+    );
+    let said = format!("{}\n{}", stopped.stdout(), stopped.stderr());
+    assert!(
+        said.contains("  survived so far 1: lived through some candidates (a first tier holds 32)"),
+        "{said}"
+    );
+    // The next pass runs the rest alone, and it survives with all 34.
+    let out = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &[roots]);
+    let reply = out.json();
+    assert_eq!(reply["resumed"]["mutants"], 1, "{reply}");
+    let verdicts = listed();
+    let logged = verdicts
+        .iter()
+        .find(|mutant| mutant["id"] == logged_id.as_str())
+        .unwrap();
+    assert_eq!(logged["strong"]["status"], "survived", "{reply}");
+    assert_eq!(logged["strong"]["tests"], 34, "{reply}");
+}
+
 /// A harness that runs two `playwright test` slots, each with its own
 /// server, and keeps a spec file with a serial describe in the first: in a
 /// strong pass that file runs in the second slot too, with the harness and

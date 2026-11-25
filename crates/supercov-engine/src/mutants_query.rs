@@ -899,7 +899,13 @@ pub fn coverage_mutants_query(
         .filter(|mutant| wanted.is_empty() || wanted.contains(&mutant.status))
         .filter(|mutant| {
             wanted_strong.is_empty()
-                || strong_of(mutant).is_some_and(|status| wanted_strong.contains(&status))
+                || strong_of(mutant).is_some_and(|status| {
+                    // The survivors include those every candidate run so far
+                    // let live, said as such.
+                    wanted_strong.contains(&status)
+                        || (status == crate::strong_tiers::SURVIVED_SO_FAR
+                            && wanted_strong.iter().any(|wanted| wanted == "survived"))
+                })
         })
         .collect::<Vec<_>>();
     // A change's mutants, what its tests leave alive first: a stable sort
