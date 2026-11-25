@@ -1618,23 +1618,24 @@ struct Lender {
 /// both made from one run without measuring (`measured_as`): the jobs of a
 /// sharded pass, each continuing one baseline. Their records name that run
 /// alike, so the merge keeps one copy of each record anyway; read once, the
-/// copies cost it nothing. An archive that cannot be read is no copy, and
-/// fails the merge where it is read.
+/// copies cost it nothing. An archive that cannot be read here is no copy:
+/// it is read as any other run's.
 fn copies_of_one_archive(inputs: &[&StoredRun]) -> Vec<Option<usize>> {
     use sha2::Digest;
     // Only runs that could share an archive are read here: made from one
     // run, with archives of one length.
     let mut alike = BTreeMap::<(&str, u64), usize>::new();
-    for input in inputs {
-        if input.metadata.measured_as.is_some() {
+    inputs
+        .iter()
+        .filter(|input| input.metadata.measured_as.is_some())
+        .for_each(|input| {
             *alike
                 .entry((
                     input.evidence_run_id(),
                     input.metadata.raw_evidence.compressed_bytes,
                 ))
                 .or_default() += 1;
-        }
-    }
+        });
     let mut first = BTreeMap::<(&str, [u8; 32]), usize>::new();
     inputs
         .iter()
