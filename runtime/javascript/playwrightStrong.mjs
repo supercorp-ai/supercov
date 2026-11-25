@@ -30,10 +30,10 @@
 // The attempt's mutant goes into its scope, which reaches the app's server
 // with every request (header, cookies, child processes) and the page through
 // an init script. A mutant the server must start with (its code ran in work
-// no request named, or is a server module's top level, or ran for a request
-// that named no test, or its switch is evaluated as a server module loads)
-// is run alone afterwards, in an invocation of its own
-// with SUPERCOV_ACTIVE_MUTANT set, which the engine starts for each `restart`
+// no request named or waited for, or is a server module's top level, or ran
+// for a request that named no test, or its switch is evaluated as a server
+// module loads) is run alone afterwards, in an invocation of its own with
+// SUPERCOV_ACTIVE_MUTANT set, which the engine starts for each `restart`
 // record the judge writes (javascript_run.rs). So do a kill (or a timeout)
 // that ran beside another mutant's attempt or whose control failed (one test
 // at a time), and the mutants one invocation had no room for.
@@ -1497,7 +1497,7 @@ function surviveIfDone(pass, id) {
 }
 
 export const WHY = {
-    "background": "its code ran in server work no request named",
+    "background": "its code ran in server work no request was waiting for",
     "module-level": "it is a server module's top-level code",
     "by-time": "its code ran for a request that named no test",
     "unfinished": "not every candidate test ran in the shared pass",

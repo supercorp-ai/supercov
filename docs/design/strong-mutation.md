@@ -1368,8 +1368,9 @@ timeout; 130 kills became timeouts, 253 stayed kills.
 **Run alone, the server started with the mutant.** That per-request
 switching is exact only where nothing one request does reaches another, and
 a server keeps what its top level made. So the plan marks a mutant
-`serverWide` where a server ran its code in work no request named (start-up,
-timers: `background`), at a server module's top level (`module-level`), or
+`serverWide` where a server ran its code in work no request named or waited
+for (start-up, timers, what a request left running after its answer:
+`background`), at a server module's top level (`module-level`), or
 for a request that named no test, credited by time (`by-time`). Such a
 mutant is not queued: the engine starts the command again for it, alone, with
 `SUPERCOV_ACTIVE_MUTANT` set in every process, and its verdict's reason says
@@ -1407,6 +1408,42 @@ survived before 4.29.10. The strong build already marks such a switch
 ran (`serverRan`), and the driver runs a `static` one of those alone
 (`module-level`). A `static` mutant only a page ran stays per attempt: a
 page loads its modules after the attempt's init script has named the mutant.
+
+**Work a request leaves running.** A request's scope stays with its async
+work, and its mutant with it. That is exact for what the request does before
+its answer. But a server may answer first and go on: a cron route that
+answers `202` and leaves its pipeline running (a promise no one awaits,
+`after()`, a timer), or a coordinator whose one poller the process's first
+request started, in which every later request's batches are polled and read.
+Such work kept the context of the request that set it off: the poller ran as
+the first request's test, with that attempt's mutant, for as long as the
+server lived. A later test that waited for its own batch there never had its
+mutant reach the poller's code, and the measured run credited that code to
+the first test alone; its first runs in a pass have no mutant, so the poller
+ran none, and the mutant survived though every test that waits for a batch
+kills it. A fixture test
+(`mutants_test_kills_server_mutants_work_after_a_response_reaches`) holds
+both: a job read after its response, in its request's own continuation, and
+jobs a poller reads that an earlier request started.
+
+So a request's work ends with its answer: once its response has finished (or
+its connection closed) and the listeners of that event have run, what it left
+running is no request's. The runtime keeps the request's lifetime in each
+context made for it, which spreads and carriers copy and no header or
+environment variable serializes. Work under an answered context is recorded
+as the server's own (no scope, no request's number: background, as a timer's
+is), every test is its candidate, and the plan marks the mutant `background`:
+it runs alone with the server started with it, where every attempt names that
+mutant and the process runs it in work no request names. In a main round, a
+request's switch gives such work the process's mutant, none. What a request
+does before its answer is unchanged, a body read and a page streamed as the
+response goes out among it, and so is what a response's own `finish`
+listeners do in their turn.
+
+What it costs: a mutant in code that runs only after an answer (a pipeline a
+route leaves running, a job a webhook starts) runs alone against every test
+of the run, where per request it ran against the tests that reached it. What
+a request awaits before it answers costs nothing more.
 
 Each further round a driver asks for (a `restart` record in the results: one
 mutant alone, a serial round, the rest of what did not finish, the main

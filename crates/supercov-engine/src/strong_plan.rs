@@ -90,8 +90,9 @@ pub struct Candidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerWide {
-    /// Its code ran in a server's work no request named: start-up, timers,
-    /// work between tests.
+    /// Its code ran in a server's work no request named or waited for:
+    /// start-up, timers, work between tests, and what a request left running
+    /// after its answer.
     Background,
     /// Its code is a server module's top level, which runs once and keeps
     /// what it made for every later request.
