@@ -1554,6 +1554,10 @@ time per mutant and its files cheapest first:
   mutant runs again with its file whole (`overturned`).
 - A job's limit is 3× its baseline and 10 s; past it the job's process group
   is stopped, and the mutant is a `timeout` unless a test had already failed.
+  The baselines ran with the machine to themselves, so a job stopped while
+  others ran beside it (which it may only have waited on: the CPU, Cargo's
+  lock on the build directory every job of Rust compiled to wasm builds in)
+  runs again alone first; only one past its limit there is a `timeout`.
   A mutant that passed its hit limit (`<results>.timeouts.jsonl`; under
   Browser Mode, sent to node) is a `timeout`.
 - A job that ended without reporting a test its baseline reported (a module

@@ -6,7 +6,7 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { delimiter } from "node:path";
-import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, turns, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -157,6 +157,43 @@ test("jobs wait their turn by priority, first come first served among equals", a
     release();
     await Promise.all([first, ...queued]);
     assert.deepEqual(order, ["c", "e", "d", "b"]);
+});
+
+// Every job holds a lock the others wait on (Cargo's on the build directory
+// where each job builds Rust compiled to wasm): side by side, the last jobs
+// wait past a limit set by a baseline that ran alone. Each runs again alone,
+// and the verdicts are the ones a pass that ran them one at a time reaches.
+test("a job past its limit beside others runs again alone before it is a timeout", async () => {
+    const tests = [test_("w1", "t/w.test.js"), test_("w2", "t/w.test.js")];
+    const mutants = Array.from({ length: 8 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }));
+    const listed = mutants.map(({ id }) => ({ id }));
+    const rules = { "*": { w1: "locked" }, "src/a.js#0": { w1: "locked,fail" }, "src/a.js#7": { w1: "locked,fail" } };
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 8 });
+    const status = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id, verdict.status]));
+    assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "survived", m3: "survived", m4: "survived", m5: "survived", m6: "survived", m7: "killed" }, JSON.stringify(summary));
+    assert.ok(summary.alone >= 1, JSON.stringify(summary));
+});
+
+// Alone work waits for the shared work under way, and holds back the work
+// that comes after it, first come first served; shared work knows whether it
+// had company.
+test("work alone waits for the machine to be free", async () => {
+    const machine = turns();
+    const order = [];
+    let release;
+    const first = machine.shared((turn) => new Promise((done) => { release = () => done(turn); }));
+    const second = machine.shared(async (turn) => { order.push("second"); return turn; });
+    const alone = machine.alone(async (turn) => { order.push("alone"); return turn; });
+    const late = machine.shared(async (turn) => { order.push("late"); return turn; });
+    const otherAlone = machine.alone(async () => order.push("other alone"));
+    await second;
+    release();
+    const [firstTurn, secondTurn, aloneTurn, lateTurn] = await Promise.all([first, second, alone, late, otherAlone]);
+    assert.deepEqual(order, ["second", "alone", "late", "other alone"]);
+    assert.equal(firstTurn.crowded, true);
+    assert.equal(secondTurn.crowded, true);
+    assert.equal(aloneTurn.crowded, false);
+    assert.equal(lateTurn.crowded, false);
 });
 
 // Ctrl-C reaches the driver, not its jobs, which run in process groups of

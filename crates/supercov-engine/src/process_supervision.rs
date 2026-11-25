@@ -26,6 +26,12 @@ use supercov_contracts::{
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How often a command told to end is looked over again for process groups
+/// its descendants made since (a web server its test runner started all the
+/// same), each of which is told too.
+#[cfg(unix)]
+const DETACHED_RESCAN_INTERVAL: Duration = Duration::from_millis(100);
+
 #[cfg(unix)]
 use std::os::{
     fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -1986,8 +1992,9 @@ impl ProcessSupervisor {
         let timeout_at = options.timeout.map(|timeout| started + timeout);
         let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
         // The groups of the command's descendants that left its own, as
-        // the command was told to end: they are told too.
+        // the command was told to end and while it ends: they are told too.
         let mut detached = std::collections::BTreeSet::new();
+        let mut rescan_at = started;
         let mut timed_out = false;
         let mut interrupted_signal = None;
         let mut keyboard = Keyboard::default();
@@ -2058,12 +2065,28 @@ impl ProcessSupervisor {
                 write_diagnostic(child, started, verbose, writer);
                 next_diagnostic = next_interval(next_diagnostic, now, options.diagnostic_interval);
             }
+            // A descendant that outlives the signal (a test runner that
+            // handles it) may start a process group after it: a web server
+            // its runner starts all the same is told as well, or SIGKILL
+            // would end the runner and leave the server on its port.
+            if let Some((_, signal)) = termination
+                && now >= rescan_at
+            {
+                rescan_at = now + DETACHED_RESCAN_INTERVAL;
+                let fresh = detached_groups(child)
+                    .into_iter()
+                    .filter(|group| !detached.contains(group))
+                    .collect();
+                signal_groups(&fresh, signal.map_or(libc::SIGTERM, ForwardedSignal::raw));
+                detached.extend(fresh);
+            }
             if termination.is_some_and(|(terminated_at, _)| {
                 now.duration_since(terminated_at) >= options.termination_grace
             }) {
                 // Nothing outlives SIGKILL, and the command leads the group
                 // it is sent to: wait for it to go, and the next pass returns
-                // how it ended.
+                // how it ended. A group made since the last look goes too.
+                detached.extend(detached_groups(child));
                 signal_process_group(child, libc::SIGKILL);
                 signal_groups(&detached, libc::SIGKILL);
                 let _ = child.wait();
@@ -2864,6 +2887,65 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(), "the detached process {pid} outlived the command");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A command that handles the signal and starts a process group of its
+    /// own after it (a test runner that starts its web server all the same)
+    /// is ended at the grace's end, and so is the group it started.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_started_after_the_signal_ends_with_the_command() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-detached-late-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                format!(
+                    "trap \"perl -e 'setpgrp(0, 0); \\$SIG{{TERM}} = \\\"IGNORE\\\"; open(my \\$f, \\\">\\\", \\\"{}\\\"); print \\$f \\$\\$; close(\\$f); sleep 30' &\" TERM; while :; do sleep 1; done",
+                    pid_file.display()
+                )
+                .into(),
+            ],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let options = SupervisionOptions {
+            diagnostic_interval: Duration::from_secs(60),
+            timeout: Some(Duration::from_millis(500)),
+            termination_grace: Duration::from_millis(1_500),
+        };
+        let result = supervise_command(&spec, options, &mut Vec::new()).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // Gone, or a zombie no one has reaped yet.
+        let alive = || {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !alive(),
+            "the group {pid} started after the signal outlived the command"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

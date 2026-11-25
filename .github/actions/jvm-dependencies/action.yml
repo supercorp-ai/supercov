@@ -55,6 +55,26 @@ runs:
         # an idle one. MAVEN_ARGS reaches every `mvn` (Maven 3.9 and later),
         # including those the tests start.
         echo "MAVEN_ARGS=-Daether.connector.http.retryHandler.count=8 -Daether.connector.http.retryHandler.serviceUnavailable=429,500,502,503,504 -Daether.connector.http.connectionMaxTtl=25 -Dmaven.wagon.http.retryHandler.count=8 -Dmaven.wagon.httpconnectionManager.ttlSeconds=25" >> "$GITHUB_ENV"
+        # Maven fetches Central from Google's mirror of it. Central limits
+        # requests by address, and runners share theirs: with no cache to
+        # restore (main's had been evicted), a test's `mvn -q test` got 429
+        # for maven-resources-plugin on every try and failed after 190 s on
+        # 2026-11-25. The mirror keeps Central's id, so what the cache holds
+        # is still taken as Central's.
+        mkdir -p ~/.m2
+        if [ ! -e ~/.m2/settings.xml ]; then
+          cat > ~/.m2/settings.xml <<'EOF'
+        <settings>
+          <mirrors>
+            <mirror>
+              <id>central</id>
+              <mirrorOf>central</mirrorOf>
+              <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+            </mirror>
+          </mirrors>
+        </settings>
+        EOF
+        fi
         # Gradle's retries of a transient failure, with a longer first wait;
         # it doubles from there.
         mkdir -p ~/.gradle

@@ -6,10 +6,12 @@
 // mutant, then the test id:
 //   "fail", "hang" (never ends), "loop" (passes its hit limit and says so),
 //   "crash" (the process ends, nothing written), "subset-fail" (fails when
-//   run without the tests before it in its file), "slow" (passes in 0.8 s).
+//   run without the tests before it in its file), "slow" (passes in 0.8 s),
+//   "locked" (holds a lock every job shares for 0.8 s, as each job that
+//   builds Rust compiled to wasm holds Cargo's on its build directory).
 // A test id may also carry a second rule after a comma: "slow,subset-fail".
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const suite = JSON.parse(readFileSync(process.env.FAKE_SUITE, "utf8"));
 const job = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_JOB, "utf8"));
@@ -33,6 +35,27 @@ for (const [file, chosen] of Object.entries(job.files)) {
         const [rule, also] = String(rules[testId] ?? "").split(",").reverse();
         if (also === "slow" || rule === "slow")
             await new Promise((done) => setTimeout(done, 800));
+        if (also === "locked" || rule === "locked") {
+            // Released when its holder ends, however it ends, as Cargo's is.
+            const lock = join(dirname(process.env.FAKE_SUITE), "build.lock");
+            for (;;) {
+                try {
+                    writeFileSync(lock, String(process.pid), { flag: "wx" });
+                    break;
+                }
+                catch {
+                    try {
+                        process.kill(Number(readFileSync(lock, "utf8")), 0);
+                    }
+                    catch {
+                        rmSync(lock, { force: true });
+                    }
+                    await new Promise((done) => setTimeout(done, 10));
+                }
+            }
+            await new Promise((done) => setTimeout(done, 800));
+            rmSync(lock);
+        }
         if (rule === "hang")
             await new Promise(() => setInterval(() => { }, 1000));
         if (rule === "crash")
