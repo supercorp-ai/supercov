@@ -616,7 +616,9 @@ restored from an earlier round, which every job of the round holds).
 
 On an unchanged checkout that run is made, not measured
 (`lifecycle::derive_run`): the newest run with the latest run's fingerprint,
-not a merge, whose command passed and that recorded its mutants' values, is
+not a merge, that recorded its mutants' values and whose command passed (or,
+where none did, failed only in tests that failed: see
+`docs/design/strong-mutation.md`, "Continuing a run whose tests failed") is
 copied under a new id and start, without its verdicts and its query index.
 Its evidence and every record published from it stand for the new run,
 which differs only in its id. The evidence still names the run it was
@@ -624,8 +626,9 @@ recorded under as its scope, which the new run's `measuredAs` gives, and
 every analysis of it reads that id; it supersedes the runs of its command a run
 measured now would, keeps every verdict the restored runs hold (they were
 measured on the same files), and the round's runs merge as shards of one
-suite. Where no such run is restored (the latest run's command failed, or
-none recorded the values) the shard measures, as after an edit.
+suite. Where no such run is restored (none recorded the values, or each one's
+command failed for a reason other than its tests) the shard measures, as
+after an edit, and says what kept the newest such run out.
 
 4.29.6 measured a run of its own in every job of every round. On a large
 application's e2e suite that was about 100 s of each 10-minute job, and the

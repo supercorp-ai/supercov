@@ -22616,7 +22616,7 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
     // None of this command: measured.
     let (_, said) = shard(&["npx", "vitest", "run", "--reporter=dot"]);
     assert!(
-        said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values and whose command passed can be made into one): npx vitest run --reporter=dot"),
+        said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one): npx vitest run --reporter=dot"),
         "{said}"
     );
     // After an edit: measured.
@@ -22880,6 +22880,127 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
             "Each merged run must be unique: {b2} is named more than once. Copies of one run"
         )) && twice.contains("Run that round again and merge its jobs' runs"),
         "{twice}"
+    );
+}
+
+/// A measured run whose command failed only because a test failed (one
+/// timing-sensitive test, unrelated to the mutated code) is continued by a
+/// shard as one whose command passed is: the failed test is no candidate,
+/// so the shard saves into a run made from it, measures nothing, and says
+/// which test it leaves out. A run whose command failed for another reason
+/// is not continued: where no run can be, the shard measures and says what
+/// kept the newest one out, naming its failed tests.
+#[cfg(unix)]
+#[test]
+fn a_shard_continues_a_run_whose_command_failed_only_in_a_failed_test() {
+    let project = vitest_mutants_project("strong-shard-after-failed-test");
+    project.write(
+        "test/timing.test.js",
+        "import { expect, it } from \"vitest\";\nimport { shipping } from \"../src/cart.js\";\nit(\"settles in time\", () => {\n  expect(shipping(80)).toBe(0);\n  if (process.env.SLOW) throw new Error(\"took too long\");\n});\n",
+    );
+    project.commit("timing");
+    let command = ["npx", "vitest", "run"];
+    // The measuring job: its one slow test failed, and its command exited 1.
+    let mut args = vec!["mutants", "--file", "src/cart.js", "--budget", "30", "--"];
+    args.extend(command);
+    let measured = project.supercov_with(&args, &[("SLOW", "1")]);
+    assert_eq!(measured.code(), 2, "{}", measured.stderr());
+    let failing = project.latest();
+    let run_json = |run: &str| format!(".supercov/runs/{run}/run.json");
+    let metadata = |run: &str| {
+        serde_json::from_str::<serde_json::Value>(&project.read(&run_json(run))).unwrap()
+    };
+    assert_eq!(metadata(&failing)["testExitCode"], 1);
+    let shard = || {
+        let mut args = vec!["mutants", "--shard", "1/1", "--json", "--"];
+        args.extend(command);
+        let ran = project.supercov(&args);
+        (ran.json(), ran.stderr())
+    };
+    let slow = "settles in time";
+
+    // The shard continues it, measuring nothing, and says what it leaves out.
+    let (continued, said) = shard();
+    let own = continued["run"].as_str().unwrap().to_owned();
+    assert!(
+        said.contains(&format!(
+            "[supercov] not measuring: the checkout is unchanged since run {failing}, so this shard saves its verdicts into run {own}, made from it"
+        )) && said.contains(&format!(
+            "[supercov] continuing from run {failing}, whose command failed: 1 test failed while measuring and is not a candidate: {slow}"
+        )) && !said.contains("measuring first"),
+        "{said}"
+    );
+    assert_eq!(
+        continued["measurement"]["derivedFrom"],
+        failing.as_str(),
+        "{continued}"
+    );
+    assert_eq!(
+        continued["measurement"]["failedTests"],
+        serde_json::json!([slow]),
+        "{continued}"
+    );
+    // It keeps what the measuring job's pass decided, and no verdict is the
+    // failed test's.
+    assert_eq!(
+        continued["carried"]["from"],
+        serde_json::json!([failing]),
+        "{continued}"
+    );
+    assert!(
+        continued["summary"]["killed"].as_u64().unwrap() > 0,
+        "{continued}"
+    );
+    let verdicts = project.read(&format!(".supercov/runs/{own}/strong-mutation.json"));
+    assert!(
+        verdicts.contains("\"killed\"") && !verdicts.contains(slow),
+        "{verdicts}"
+    );
+
+    // A newer run whose command failed with no test failed (it failed
+    // outside its tests) is passed over for the one whose test failed.
+    project
+        .supercov_with(
+            &[&["--"][..], &command[..]].concat(),
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let broken = project.latest();
+    let mut edited = metadata(&broken);
+    edited["testExitCode"] = serde_json::json!(3);
+    project.write(&run_json(&broken), &edited.to_string());
+    let (again, said) = shard();
+    assert!(!said.contains("measuring first"), "{said}");
+    let from = again["measurement"]["derivedFrom"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        from != broken && metadata(&from)["testExitCode"] == 1,
+        "{again}"
+    );
+
+    // A run that ended without an exit status is not continued either:
+    // with none left, the shard measures, and says why, naming the newest
+    // such run's failed test.
+    let runs = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    for run in &runs {
+        let mut edited = metadata(run);
+        if edited["testExitCode"] == 1 {
+            edited["testExitCode"] = serde_json::Value::Null;
+            project.write(&run_json(run), &edited.to_string());
+        }
+    }
+    let newest = again["run"].as_str().unwrap();
+    let (_, said) = shard();
+    assert!(
+        said.contains(&format!(
+            "measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one: run {newest}'s command ended without an exit status (1 test failed while measuring and is not a candidate: {slow})): npx vitest run"
+        )),
+        "{said}"
     );
 }
 

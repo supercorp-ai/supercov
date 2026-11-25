@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `supercov mutants --shard` continues a run whose command failed only because tests failed, as it continues one whose command passed: it saves into a run made from it and measures nothing. A failed test is no candidate in any run, so the verdicts are the passing tests' alone. Before, one timing-sensitive test failing while a large e2e area was measured (1 of 1,456 Playwright tests, unrelated to the mutated files) made each of the 8 shard jobs that restored the run measure the whole area again, about 8 minutes each, and decide nothing. The shard names what it leaves out (`continuing from run r4, whose command failed: 1 test failed while measuring and is not a candidate: checkout > pays`; `measurement.failedTests` with `--json`). A run whose command failed otherwise -- it ended without an exit status, recorded no test, or exited non-zero with no test failed -- is still not continued; where no run can be, the shard measures and says what kept the newest one out, naming its failed tests. A run whose command passed is still taken first. `docs/design/strong-mutation.md` has the argument.
+
 ## 4.29.12
 
 **Changed**

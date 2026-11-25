@@ -258,7 +258,8 @@ expressions take, which spares the strong pass the tests that cannot tell a
 mutant apart; while the checkout is unchanged, the next supercov mutants
 reads that run again. With --shard, its verdicts go into a run of its own,
 never one restored from another job: on an unchanged checkout it is made
-from the newest run of it whose command passed, without measuring again.
+from the newest run of it whose command passed, or failed only in tests that
+failed (they are no candidates), without measuring again.
 A run of the same files keeps every verdict it holds. After an edit, a
 mutant keeps its verdict where neither its file nor any test that could kill
 it changed, and could reach nothing that changed. --budget counts from the
@@ -330,20 +331,25 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
     // the latest run can be one restored from an earlier round, and every
     // job of this round would save into its own copy of it: copies of one
     // run share its id, and no merge can add them up. Its own run is made
-    // from a run of this checkout whose command passed, with no measuring:
-    // measuring again records what that run records.
+    // from a run of this checkout whose command passed, or failed only in
+    // tests that failed, with no measuring: measuring again records what
+    // that run records.
     let own_run = options.shard.is_some() && !options.plan;
     let continued = match (&latest, &inventory) {
         (Some(latest), Some(inventory)) if own_run && !stale => {
-            continued_run(inventory, latest, given.as_deref())
+            continued_run(&root, inventory, latest, given.as_deref())
         }
-        _ => None,
+        _ => Err(NO_RUN_TO_CONTINUE.to_owned()),
     };
     let mut before = Before {
         started: Some(started),
         ..Before::default()
     };
-    if let Some(source) = continued {
+    if let Ok(Continued {
+        run: source,
+        failed,
+    }) = &continued
+    {
         let (run_id, started_at) = crate::public_run_identity();
         if let Err(error) =
             supercov_engine::lifecycle::derive_run(&root, source, &run_id, &started_at)
@@ -358,7 +364,15 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
             "[supercov] not measuring: the checkout is unchanged since run {}, so this shard saves its verdicts into run {run_id}, made from it",
             source.id
         );
+        if !failed.is_empty() {
+            eprintln!(
+                "[supercov] continuing from run {}, whose command failed: {}",
+                source.id,
+                failed_while_measuring(failed)
+            );
+        }
         before.derived_from = Some(source.id.clone());
+        before.failed_tests.clone_from(failed);
     } else if !valued || own_run {
         let Some(command) = given
             .clone()
@@ -376,8 +390,8 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
                 "no run yet"
             } else if stale {
                 "the checkout changed since the latest run"
-            } else if own_run {
-                "a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values and whose command passed can be made into one"
+            } else if let (true, Err(why)) = (own_run, &continued) {
+                why.as_str()
             } else {
                 "the latest run recorded no values for its mutants"
             },
@@ -417,32 +431,148 @@ struct Before {
     measuring: Option<std::time::Duration>,
     /// The run a shard's own run was made from, where it was not measured.
     derived_from: Option<String>,
+    /// The tests that failed in that run, where its command failed: none is
+    /// a candidate.
+    failed_tests: Vec<String>,
+}
+
+/// Why a shard measures where no run of this checkout can be continued.
+const NO_RUN_TO_CONTINUE: &str = "a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one";
+
+/// The run a shard continues, and the tests that failed in it.
+#[derive(Debug)]
+struct Continued<'a> {
+    run: &'a StoredRun,
+    /// Empty where its command passed.
+    failed: Vec<String>,
 }
 
 /// The run a shard continues on a checkout unchanged since `latest`: the
 /// newest run with `latest`'s fingerprint, not a merge, that recorded its
-/// mutants' values and whose command passed -- the command given, where one
-/// is. A run whose command failed planned without what its failing tests
-/// would have run; measuring again may give a better one.
+/// mutants' values, of the command given where one is. One whose command
+/// passed is taken first: a run whose command failed planned without what
+/// its failing tests would have run. Failing that, the newest whose command
+/// failed only in tests that failed (`failed_tests_only`): a failed test is
+/// no candidate, as in any run, so its verdicts are the other tests', which
+/// measuring again would record alike. Where there is none, why the shard
+/// measures, naming what kept the newest such run out.
 fn continued_run<'a>(
+    root: &Path,
     inventory: &'a supercov_engine::run_store::RunInventory,
     latest: &StoredRun,
     given: Option<&[String]>,
-) -> Option<&'a StoredRun> {
+) -> Result<Continued<'a>, String> {
     let command = given.unwrap_or(&latest.metadata.command);
     let mut runs = inventory
         .runs
         .iter()
         .filter(|run| {
             run.metadata.merged != Some(true)
-                && run.metadata.test_exit_code == Some(0)
                 && run.metadata.command == command
                 && run.metadata.integrity.fingerprint == latest.metadata.integrity.fingerprint
         })
+        .filter(|run| supercov_engine::strong_plan::run_recorded_mutant_values(&run.evidence_path))
         .collect::<Vec<_>>();
     runs.sort_by(|left, right| right.metadata.started_at.cmp(&left.metadata.started_at));
-    runs.into_iter()
-        .find(|run| supercov_engine::strong_plan::run_recorded_mutant_values(&run.evidence_path))
+    if let Some(run) = runs
+        .iter()
+        .find(|run| run.metadata.test_exit_code == Some(0))
+    {
+        return Ok(Continued {
+            run,
+            failed: Vec::new(),
+        });
+    }
+    let mut refused = None;
+    for run in runs {
+        let plan = plan_for_run(run, root)
+            .map(|planned| planned.plan)
+            .map_err(|error| format!("{error:?}"));
+        match failed_tests_only(&run.id, run.metadata.test_exit_code, plan) {
+            Ok(failed) => return Ok(Continued { run, failed }),
+            Err(why) => {
+                refused.get_or_insert(why);
+            }
+        }
+    }
+    Err(refused.map_or_else(
+        || NO_RUN_TO_CONTINUE.to_owned(),
+        |why| format!("{NO_RUN_TO_CONTINUE}: {why}"),
+    ))
+}
+
+/// The tests that failed in run `run`, whose command did not pass, where
+/// they explain it: it exited with a status, recorded its tests, and one of
+/// them failed or timed out. Otherwise why the run cannot be continued: a
+/// command that ended without an exit status (a signal), recorded no test,
+/// or exited non-zero with no test failed, failed for another reason (it
+/// crashed, a hook or the runner failed, it was interrupted), and may have
+/// left tests unrun or evidence unwritten.
+fn failed_tests_only(
+    run: &str,
+    code: Option<i32>,
+    plan: Result<Option<StrongPlan>, String>,
+) -> Result<Vec<String>, String> {
+    let plan = plan.map_err(|error| format!("run {run}'s evidence could not be read: {error}"))?;
+    let tests = plan.map(|plan| plan.tests).unwrap_or_default();
+    let failed = tests
+        .iter()
+        .filter(|test| test.failed)
+        .map(|test| test.name.clone())
+        .collect::<Vec<_>>();
+    let Some(code) = code else {
+        return Err(format!(
+            "run {run}'s command ended without an exit status{}",
+            if failed.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", failed_while_measuring(&failed))
+            }
+        ));
+    };
+    if tests.is_empty() {
+        return Err(format!(
+            "run {run}'s command exited {code} and recorded no test"
+        ));
+    }
+    if failed.is_empty() {
+        return Err(format!(
+            "run {run}'s command exited {code}, though none of its {} test(s) failed: it failed for another reason, which may have left tests unrun",
+            tests.len()
+        ));
+    }
+    Ok(failed)
+}
+
+/// `1 test failed while measuring and is not a candidate: a > b`, naming
+/// the first five.
+fn failed_while_measuring(failed: &[String]) -> String {
+    let named = failed
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = failed.len().saturating_sub(5);
+    format!(
+        "{} failed while measuring and {} not {}: {named}{}",
+        if failed.len() == 1 {
+            "1 test".to_owned()
+        } else {
+            format!("{} tests", failed.len())
+        },
+        if failed.len() == 1 { "is" } else { "are" },
+        if failed.len() == 1 {
+            "a candidate"
+        } else {
+            "candidates"
+        },
+        if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        }
+    )
 }
 
 /// Why `mutants test` stopped short of an answer.
@@ -690,6 +820,9 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // or measured, and what that spent of the budget.
     if let Some(from) = &options.before.derived_from {
         data["measurement"] = json!({"derivedFrom": from});
+        if !options.before.failed_tests.is_empty() {
+            data["measurement"]["failedTests"] = json!(options.before.failed_tests);
+        }
     } else if let Some(measuring) = options.before.measuring {
         data["measurement"] = json!({"seconds": measuring.as_secs()});
     }
@@ -2745,6 +2878,7 @@ mod tests {
                 duration_ms: None,
                 span: None,
                 runnable: true,
+                failed: false,
             })
             .to_vec();
         let mutant = |id: &str, language: &str, candidates: &[usize]| PlannedMutant {
@@ -2855,6 +2989,7 @@ mod tests {
                     duration_ms: None,
                     span: None,
                     runnable: *runnable,
+                    failed: false,
                 })
                 .collect(),
             mutants: weak
@@ -2987,6 +3122,61 @@ mod tests {
         );
     }
 
+    /// A run whose command failed is continued where tests that failed say
+    /// why; one that ended without an exit status, recorded no test, failed
+    /// with no test failed, or could not be read is not, and says which.
+    #[test]
+    fn a_failed_run_is_continued_only_where_failed_tests_explain_it() {
+        let mut plan = plan_of(&[("a", false), ("b", true), ("c", false)], &[]);
+        plan.tests[0].failed = true;
+        assert_eq!(
+            failed_tests_only("r1", Some(1), Ok(Some(plan.clone()))),
+            Ok(vec!["a".to_owned()])
+        );
+        assert_eq!(
+            failed_tests_only("r1", None, Ok(Some(plan))),
+            Err("run r1's command ended without an exit status (1 test failed while measuring and is not a candidate: a)".to_owned())
+        );
+        // Not passed, but not failed: skipped, or never finished.
+        let unexplained = plan_of(&[("a", false), ("b", true)], &[]);
+        assert_eq!(
+            failed_tests_only("r1", Some(3), Ok(Some(unexplained.clone()))),
+            Err("run r1's command exited 3, though none of its 2 test(s) failed: it failed for another reason, which may have left tests unrun".to_owned())
+        );
+        assert_eq!(
+            failed_tests_only("r1", None, Ok(Some(unexplained))),
+            Err("run r1's command ended without an exit status".to_owned())
+        );
+        for nothing in [None, Some(plan_of(&[], &[]))] {
+            assert_eq!(
+                failed_tests_only("r1", Some(1), Ok(nothing)),
+                Err("run r1's command exited 1 and recorded no test".to_owned())
+            );
+        }
+        assert_eq!(
+            failed_tests_only("r1", Some(1), Err("gone".to_owned())),
+            Err("run r1's evidence could not be read: gone".to_owned())
+        );
+    }
+
+    /// The failed tests are counted, and the first five named.
+    #[test]
+    fn the_failed_tests_are_counted_and_the_first_five_named() {
+        let names = |count: usize| (1..=count).map(|n| format!("t{n}")).collect::<Vec<_>>();
+        assert_eq!(
+            failed_while_measuring(&names(1)),
+            "1 test failed while measuring and is not a candidate: t1"
+        );
+        assert_eq!(
+            failed_while_measuring(&names(5)),
+            "5 tests failed while measuring and are not candidates: t1, t2, t3, t4, t5"
+        );
+        assert_eq!(
+            failed_while_measuring(&names(7)),
+            "7 tests failed while measuring and are not candidates: t1, t2, t3, t4, t5, and 2 more"
+        );
+    }
+
     /// The summary's first line names the mutants asked about where they
     /// are not all the run's, and the verdicts kept from an earlier run.
     #[test]
@@ -3093,6 +3283,7 @@ mod tests {
             duration_ms: None,
             span: None,
             runnable: true,
+            failed: false,
         };
         let tests = vec![
             test("t/a.test.js", "a1"),
@@ -3241,6 +3432,7 @@ mod tests {
             duration_ms: None,
             span: None,
             runnable: true,
+            failed: false,
         };
         let tests = vec![
             test("t/a.test.js", "a1"),
