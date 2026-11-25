@@ -692,9 +692,10 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         )));
     }
     let total = plan.mutants.len();
-    // How many candidates a first tier holds: the run's own kills say.
+    // How many candidates, and how much of their time, a first tier holds:
+    // the run's own kills say.
     let earlier = read_saved(run);
-    let first_tier = supercov_engine::strong_tiers::size(&plan, &earlier);
+    let first_tier = supercov_engine::strong_tiers::sizing(&plan, &earlier);
     // The tests that killed each file's mutants: first in its other
     // mutants' tiers.
     let killers = supercov_engine::strong_tiers::killers(&plan, &earlier);
@@ -704,9 +705,10 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     let mut saved = read_saved(run);
     // The candidates each mutant with no verdict already passed with it, in
     // passes over this run.
-    let mut progress = saved_document(run)
-        .map(|document| document.progress)
+    let (mut progress, marked) = saved_document(run)
+        .map(|document| (document.progress, document.lived))
         .unwrap_or_default();
+    *LIVED.lock().expect("no thread panics holding it") = marked;
     let asked = plan
         .mutants
         .iter()
@@ -793,14 +795,20 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     }
     // The mutants asked about that some candidates let live and the rest
     // have not run with yet: not survivors, and not in the score.
+    let marked_now = lived();
     let so_far = asked
         .iter()
         .filter(|(id, _)| !verdicts.contains_key(id))
-        .filter_map(|(id, _)| progress.get(id))
-        .filter(|passed| supercov_engine::strong_tiers::lived_a_tier(passed.len()))
+        .filter(|(id, _)| {
+            let passed = progress.get(id).map_or(0, BTreeSet::len);
+            supercov_engine::strong_tiers::lived_a_tier(id, passed, &marked_now)
+        })
         .count();
     if so_far > 0 {
-        data["survivedSoFar"] = json!({"mutants": so_far, "firstTier": first_tier});
+        data["survivedSoFar"] = json!({
+            "mutants": so_far,
+            "firstTier": {"candidates": first_tier.candidates, "seconds": first_tier.ms / 1000},
+        });
     }
     let limited = asked
         .iter()
@@ -1178,8 +1186,9 @@ fn plan_text(data: &Value) -> String {
         }
         if let Some(so_far) = data["survivedSoFar"]["mutants"].as_u64() {
             extra.push_str(&format!(
-                "  survived so far {so_far}: lived through some candidates (a first tier holds {}), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs {} mutants --status survived-so-far)\n",
-                data["survivedSoFar"]["firstTier"],
+                "  survived so far {so_far}: lived through a first tier ({} candidates or {} s of their tests' time, whichever comes first), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs {} mutants --status survived-so-far)\n",
+                data["survivedSoFar"]["firstTier"]["candidates"],
+                data["survivedSoFar"]["firstTier"]["seconds"],
                 data["run"].as_str().unwrap_or("")
             ));
         }
@@ -1430,8 +1439,11 @@ pub(crate) fn read_shown(run: &StoredRun) -> std::collections::BTreeMap<String, 
     let Some(document) = saved_document(run) else {
         return std::collections::BTreeMap::new();
     };
-    let mut shown =
-        supercov_engine::strong_tiers::survived_so_far(&document.mutants, &document.progress);
+    let mut shown = supercov_engine::strong_tiers::survived_so_far(
+        &document.mutants,
+        &document.progress,
+        &document.lived,
+    );
     shown.extend(
         document
             .mutants
@@ -1733,7 +1745,12 @@ impl Saving {
     /// open passed: a first tier's survivor among the latter.
     fn results(&self, results: &Path) -> (std::collections::BTreeMap<String, Verdict>, Passed) {
         let (mut verdicts, _, mut passed) = read_results(results);
-        supercov_engine::strong_tiers::lived_through(&mut verdicts, &mut passed, &self.tiers);
+        supercov_engine::strong_tiers::lived_through(
+            &mut verdicts,
+            &mut passed,
+            &mut LIVED.lock().expect("no thread panics holding it"),
+            &self.tiers,
+        );
         (verdicts, passed)
     }
 
@@ -1913,6 +1930,17 @@ fn hold_to_budget(budget_at: std::time::Instant) {
     });
 }
 
+/// The open mutants of the run whose progress holds a whole first tier
+/// (`StrongVerdicts::lived`): read with the run's progress, added to as a
+/// pass's first tiers end, and saved with it, the marks of mutants whose
+/// progress the save keeps.
+static LIVED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// The marks `LIVED` holds now.
+fn lived() -> BTreeSet<String> {
+    LIVED.lock().expect("no thread panics holding it").clone()
+}
+
 /// Set once the pass's budget is spent: the termination that stops the
 /// pass is the budget's, and the pass ends as one that finished.
 static BUDGET_SPENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2076,6 +2104,11 @@ fn save_to(
             mutant_set: mutant_set.to_owned(),
             mutants: saved.clone(),
             progress: progress.clone(),
+            // A mark stays only while its mutant's progress does.
+            lived: lived()
+                .into_iter()
+                .filter(|id| progress.contains_key(id))
+                .collect(),
         },
     )
 }
@@ -2102,7 +2135,7 @@ fn interrupted(exit: i32) -> bool {
 }
 
 /// Runs the plan's mutants and saves every verdict into the run, as it
-/// comes. A mutant with more than `first_tier` candidates runs its first
+/// comes. A mutant whose candidates outlast `first_tier` runs its first
 /// tier (`strong_tiers`) in the first round, every such mutant before any
 /// runs the rest.
 #[allow(clippy::too_many_arguments)]
@@ -2114,7 +2147,7 @@ fn execute(
     progress: &mut Passed,
     options: &Options,
     factor: f64,
-    first_tier: usize,
+    first_tier: supercov_engine::strong_tiers::Sizing,
     killers: &supercov_engine::strong_tiers::Killers,
 ) -> Result<Executed, Stop> {
     // Decided without running.
@@ -2286,6 +2319,7 @@ fn execute(
                     supercov_engine::strong_tiers::lived_through(
                         &mut verdicts,
                         &mut passed,
+                        &mut LIVED.lock().expect("no thread panics holding it"),
                         round_tiers,
                     );
                     for (id, verdict) in &mut verdicts {

@@ -228,6 +228,11 @@ pub struct StrongVerdicts {
     /// candidates (`docs/design/strong-mutation.md`, "Partial progress").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub progress: Progress,
+    /// The mutants with progress that lived through a whole first tier
+    /// (`strong_tiers::lived_through`): each `survived-so-far`. A mutant
+    /// whose progress a budget cut short is open, not one of these.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub lived: std::collections::BTreeSet<String>,
 }
 
 /// A mutant's candidate tests that passed with it, by mutant id: what

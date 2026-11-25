@@ -708,6 +708,7 @@ type StrongVerdicts, written and read = {
   mutantSet: string
   mutants: {string: Verdict}
   progress?: {string: [string]}
+  lived?: [string]
 }
 
 type StructuralSource, written and read = "owned-probes" | "native-import" | "mixed"

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A Playwright strong pass's first tier ends at 32 candidates or once its candidates take 60 s of their tests' measured time (at least four candidates), whichever comes first; the time grows, as the count does, where the run's kills come later. In an area of a large e2e suite whose tests take 6 to 14 s each, two rounds left 852 mutants resuming with about 6 candidates passed each, none at a 32-candidate tier: three or four more rounds just to label them. Of 3,972 kills of that suite, 95% came within 61 s of a mutant's candidates in tier order; a tier of 32 candidates or 60 s holds 93.4% of them where 32 candidates alone hold 93.7%, and costs a mutant 34 s of its tests on average where 32 candidates cost 40 s. Where a test takes 10 s, the tier is 6 candidates. `survived-so-far` means the mutant passed its first tier (32 candidates or 60 s), and the pass's summary says so; the run marks each such mutant (`lived` in `strong-mutation.json`), as a tier ended by its time has fewer than 32 candidates.
+
 ## 4.29.13
 
 **Changed**

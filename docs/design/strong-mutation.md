@@ -1915,6 +1915,33 @@ earlier release's passes); fewer than 20 kills say nothing. A mutant that
 needs a server started with it (`serverWide`) has a first tier too: its
 round alone runs the tier, not every candidate.
 
+**By time as well as count.** A first tier also ends once its candidates'
+measured time reaches 60 s, holding four candidates however slow they are,
+whichever of its count and its time comes first. In an area of the same suite
+whose tests take 6 to 14 s each (an integration's publishing and a site's
+analysis, 1,743 mutants), two rounds of 8 jobs of about 400 s decided 367
+mutants: 852 more were resuming, each having passed about 6 candidates (5,252
+in all), and none had reached a 32-candidate tier, three or four rounds more
+just to say `survived so far` of them. Kills come from the cheap and likely
+candidates first: of 3,972 kills of the suite, each placed in its mutant's
+order with the time of its candidates up to and with its killer, half came
+within 2.8 s, 75% within 10 s, 90% within 26 s and 95% within 61 s. A tier of
+32 candidates holds 93.7% of them; 32 candidates or 60 s holds 93.4% (and 30 s,
+91.4%), and costs a mutant 34 s of its tests where 32 candidates cost 40 s,
+over every mutant of the suite to run (420 hours where 498). Where a test
+takes 10 s, the tier is 6 candidates, not 32. The time grows with the run's
+kills as the count does: the tier holds 95% of them by their candidates' time
+too, never less than 60 s.
+
+A tier ended by its time holds fewer than 32 candidates, so `survived so far`
+can no longer be read from how many candidates a mutant passed. The run marks
+each mutant whose progress holds a whole first tier, in `strong-mutation.json`
+as `lived`, an optional field older releases ignore; the mark goes with the
+mutant's progress, and a merge keeps it where the merged progress keeps the
+mutant open. A pass its budget stopped partway through a tier marks nothing.
+A run saved by 4.29.12 or 4.29.13, which kept no marks, reads a mutant that
+passed 32 candidates or more as one that lived through its tier.
+
 **Survived so far.** A mutant its first tier lets live has not survived: the
 driver's `survived` for it is read as the tier's tests having passed with it,
 its progress (Partial progress, above), and it has no verdict. Where the pass
@@ -1941,7 +1968,7 @@ meeting the page's own spec files, which killed 176 of the 317 later. Such a
 mutant is open, as before, and the next pass resumes it. The pass's summary
 says how many there are:
 
-    survived so far 212: lived through some candidates (a first tier holds 32), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs <run> mutants --status survived-so-far)
+    survived so far 212: lived through a first tier (32 candidates or 60 s of their tests' time, whichever comes first), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs <run> mutants --status survived-so-far)
 
 **What it saves.** Read from that suite's plan, a survivor's cost (the time of
 every candidate) against its first tier's, summed over every mutant to run:
