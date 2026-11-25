@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## 4.29.13
+
+**Changed**
+
+- A Playwright strong pass's first tier takes first the tests that killed most of the run's other mutants of the mutant's file: a page component's or a shared service's tier no longer fills with the cheap tests that only render or pass through it. On a dashboard page's component of a large application's e2e suite (572 mutants, about 187 candidates each), a first round left 251 `survived so far`, most of them killed by the page's own spec files past the first 32 candidates. From the suite's kills, with those the first tiers made as the run's history, 58% of the mutants a first tier left to its rest have their killer in the next 32 candidates, against none before; over every kill, a tier of 32 holds 98.8% against 93.4%, and for mutants with 100 or more candidates 89.5% against 56.0%. The run's kills come from its earlier passes and the merged rounds before it, so a run's first round is as before. Measured on three page components of the same suite (3,458 mutants, 61 spec files), a second round decided 408 more mutants after the first's 806, mostly kills (416 to 738), and left 22 `survived so far`.
 
 **Fixed**
 
 - `supercov mutants --shard` continues a run whose command failed only because tests failed, as it continues one whose command passed: it saves into a run made from it and measures nothing. A failed test is no candidate in any run, so the verdicts are the passing tests' alone. Before, one timing-sensitive test failing while a large e2e area was measured (1 of 1,456 Playwright tests, unrelated to the mutated files) made each of the 8 shard jobs that restored the run measure the whole area again, about 8 minutes each, and decide nothing. The shard names what it leaves out (`continuing from run r4, whose command failed: 1 test failed while measuring and is not a candidate: checkout > pays`; `measurement.failedTests` with `--json`). A run whose command failed otherwise -- it ended without an exit status, recorded no test, or exited non-zero with no test failed -- is still not continued; where no run can be, the shard measures and says what kept the newest one out, naming its failed tests. A run whose command passed is still taken first. `docs/design/strong-mutation.md` has the argument.
+- A mutant is `survived-so-far` only once it has passed a first tier's worth of candidates (32). A pass its budget stopped partway through a tier keeps the few candidates each open mutant passed, and those mutants were listed as `survived-so-far` too: on a settings page's component of a large e2e suite, every one of them had passed 1 to 4 of its 135 candidates, and the page's own specs, never run with them, killed 176 of the 317. They are open, as a mutant a budget left is, and the next pass resumes them.
 
 ## 4.29.12
 

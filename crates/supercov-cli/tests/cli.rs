@@ -25715,7 +25715,14 @@ fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
         said.contains("  survived so far 1: lived through some candidates (a first tier holds 32)"),
         "{said}"
     );
-    // The next pass runs the rest alone, and it survives with all 34.
+    // The next pass runs the rest alone, and it survives with all 34, once
+    // the web server the stopped pass started has ended.
+    for _ in 0..100 {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
     let out = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &[roots]);
     let reply = out.json();
     assert_eq!(reply["resumed"]["mutants"], 1, "{reply}");
