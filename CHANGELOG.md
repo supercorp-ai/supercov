@@ -14,6 +14,10 @@
 
 - `tests affected` names changed code no probe of the run measured -- another platform's, a feature the build left off, a `const fn` -- under `unmeasured` (`--json`) and in the text: no test's record can say what it reaches.
 
+**Fixed**
+
+- A Playwright strong pass no longer calls a server mutant `survived` when its code runs only in work a request leaves running after its answer: a cron route that answers at once and leaves its pipeline running (a promise no one awaits, `after()`, a timer), or a poller the server's first request started, in which later requests' batches are polled and read. Such work kept the context of the request that started it, so it ran that attempt's mutant (in a pass, usually none) whichever test waited for it, and the measured run credited it to that one test. A request's work now ends once its response has finished and that event's listeners have run: what it left running is recorded as the server's own work, every test is a candidate, and the mutant runs alone with the server started with it (`ran alone, with the server started with it switched on: its code ran in server work no request was waiting for`). What a request does before it answers is unchanged. A fixture test holds both kinds of work. `docs/design/strong-mutation.md` has the argument.
+
 ## 4.29.11
 
 **Changed**

@@ -24451,6 +24451,151 @@ fn mutants_test_kills_server_mutants_tests_reach_without_a_page() {
     );
 }
 
+/// `mutants test` over Playwright tests that drive a pipeline through a cron
+/// route, which answers at once and leaves the work running: each test posts
+/// to the route, carrying its name as any request does, and polls until its
+/// job is done. A mock batch server, a process of its own, plays the provider
+/// the work sends batches to and polls. One kind of work is sent, polled and
+/// read after the response, in the request's own continuation; the other is
+/// read by one poller the process's first call started, so every later
+/// call's batch is finished in a continuation an earlier request began. Each
+/// way's mutant is killed by the tests that wait for it, though no request's
+/// mutant reaches the poller: such work runs with the server started with
+/// the mutant.
+#[cfg(unix)]
+#[test]
+fn mutants_test_kills_server_mutants_work_after_a_response_reaches() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let free = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let (port, batches) = (free(), free());
+    let project = Project::empty("strong-playwright-after-response");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-after-response", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // The provider: a batch is in progress for its first two polls, then
+    // done, its output its input plus one.
+    project.write(
+        "support/batches.js",
+        "import http from \"node:http\";\nconst batches = new Map();\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/ready\") return response.end(\"ready\");\n  if (request.method === \"POST\" && path === \"/batches\") {\n    let body = \"\";\n    request.on(\"data\", (chunk) => (body += chunk)).on(\"end\", () => {\n      const id = `batch-${batches.size + 1}`;\n      batches.set(id, { input: JSON.parse(body).input, polls: 0 });\n      response.end(JSON.stringify({ id }));\n    });\n    return;\n  }\n  const batch = batches.get(path.slice(\"/batches/\".length));\n  batch.polls += 1;\n  response.end(JSON.stringify(batch.polls > 2 ? { status: \"completed\", output: batch.input + 1 } : { status: \"in_progress\" }));\n}).listen(Number(process.env.BATCH_PORT));\n",
+    );
+    // The cron route answers before the work is done.
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { pipeline } from \"./pipeline.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  const job = url.searchParams.get(\"job\");\n  if (url.pathname === \"/ready\") return response.end(\"ready\");\n  if (request.method === \"POST\" && url.pathname === \"/cron\") {\n    pipeline[url.searchParams.get(\"how\")](job, Number(url.searchParams.get(\"q\")));\n    response.statusCode = 202;\n    return response.end(\"accepted\");\n  }\n  response.end(String(pipeline.result(job) ?? \"pending\"));\n}).listen(Number(process.env.PORT));\n",
+    );
+    // The pipeline: the work after the response, and one poller for the
+    // process, which the first call starts.
+    project.write(
+        "support/pipeline.js",
+        "import { afterResponse, byPoller } from \"../server/finish.js\";\nconst provider = `http://127.0.0.1:${process.env.BATCH_PORT}/batches`;\nconst results = new Map();\nconst waiting = new Map();\nlet poller;\nconst sleep = (ms) => new Promise((done) => setTimeout(done, ms));\nasync function submit(input) {\n  const response = await fetch(provider, { method: \"POST\", body: JSON.stringify({ input }) });\n  return (await response.json()).id;\n}\nasync function retrieve(id) {\n  return (await fetch(`${provider}/${id}`)).json();\n}\nasync function poll() {\n  for (;;) {\n    for (const [job, submitted] of waiting) {\n      const batch = await retrieve(await submitted);\n      if (batch.status === \"completed\") {\n        waiting.delete(job);\n        results.set(job, byPoller(batch.output));\n      }\n    }\n    await sleep(20);\n  }\n}\nexport const pipeline = {\n  afterResponse(job, q) {\n    void (async () => {\n      const id = await submit(q);\n      for (;;) {\n        const batch = await retrieve(id);\n        if (batch.status === \"completed\") return results.set(job, afterResponse(batch.output));\n        await sleep(20);\n      }\n    })();\n  },\n  nextCall(job, q) {\n    waiting.set(job, submit(q));\n    poller ??= poll();\n  },\n  result(job) {\n    return results.get(job);\n  },\n};\n",
+    );
+    // What each way does with a finished batch: the code under test.
+    project.write(
+        "server/finish.js",
+        "export function afterResponse(output) {\n  return output * 2;\n}\nexport function byPoller(output) {\n  return output * 3;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: [\n    {{ command: \"node support/batches.js\", url: \"http://127.0.0.1:{batches}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ BATCH_PORT: \"{batches}\" }} }},\n    {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", BATCH_PORT: \"{batches}\" }} }},\n  ],\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/pipeline.spec.js",
+        concat!(
+            "import { test, expect } from \"@playwright/test\";\n",
+            "async function run(request, how, job, q) {\n",
+            "  const posted = await request.post(`/cron?how=${how}&job=${job}&q=${q}`);\n",
+            "  expect(posted.status()).toBe(202);\n",
+            "  await expect.poll(async () => (await request.get(`/status?job=${job}`)).text(), { timeout: 5000 }).not.toBe(\"pending\");\n",
+            "  return (await request.get(`/status?job=${job}`)).text();\n",
+            "}\n",
+            "test(\"a job read after the response\", async ({ request }) => {\n",
+            "  expect(await run(request, \"afterResponse\", `after-${Math.random()}`, 5)).toBe(\"12\");\n",
+            "});\n",
+            "test(\"the first job the poller reads\", async ({ request }) => {\n",
+            "  expect(await run(request, \"nextCall\", `first-${Math.random()}`, 5)).toBe(\"18\");\n",
+            "});\n",
+            "test(\"a later job the same poller reads\", async ({ request }) => {\n",
+            "  expect(await run(request, \"nextCall\", `later-${Math.random()}`, 6)).toBe(\"21\");\n",
+            "});\n",
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a pipeline a cron route leaves running");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    let strong = |line: u32| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("server/finish.js:{line}:"))
+                    && id.ends_with(":ArithmeticOperator:/")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{line}\n{context}");
+        found[0]["strong"].clone()
+    };
+    // Read after the response, and by the poller an earlier call started:
+    // each is killed, with the server started with it, since its work went
+    // on after its request was answered.
+    for (line, way) in [(2, "after the response"), (5, "by the poller")] {
+        let verdict = strong(line);
+        assert_eq!(verdict["status"], "killed", "{way}\n{context}");
+        assert!(
+            verdict["reason"].as_str().is_some_and(|reason| reason.contains(
+                "ran alone, with the server started with it switched on: its code ran in server work no request was waiting for"
+            )),
+            "{way}\n{context}"
+        );
+    }
+}
+
 /// A Playwright mutant attempt is stopped at its time limit, its test's
 /// baseline x 1.5 + 5 s: a mutant that keeps an element from appearing ends
 /// there as a `timeout`, though its test clicks with no timeout of its own
