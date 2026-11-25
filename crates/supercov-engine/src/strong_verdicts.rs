@@ -426,6 +426,13 @@ mod tests {
         assert!(!settles(&verdict("error")));
         assert_eq!(left("page"), [4]);
         assert_eq!(left("alone"), [3]);
+        // A plan with no mutant that resumes takes nothing off.
+        let mut none = StrongPlan {
+            mutant_set: "set".into(),
+            tests: Vec::new(),
+            mutants: Vec::new(),
+        };
+        assert!(resume(&mut none, &passed).is_empty());
         // The plan says how many each passed before: the driver takes a
         // mutant that lived through a candidate as unlikely to fail.
         let before = |id: &str| {
