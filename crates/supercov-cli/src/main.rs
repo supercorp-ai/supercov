@@ -3333,14 +3333,9 @@ fn execute_coverage_query(
     // The strong verdicts a pass saved: the mutants listing shows each, and
     // the summary their score.
     if matches!(request.command.as_str(), "mutants" | "summary") {
-        let saved = mutants_test_command::read_saved(run);
-        if !saved.is_empty() {
-            request.mutants.strong = Some(
-                saved
-                    .into_iter()
-                    .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data")))
-                    .collect(),
-            );
+        let shown = mutants_test_command::read_shown(run);
+        if !shown.is_empty() {
+            request.mutants.strong = Some(shown);
         }
     }
     let mut diff_inputs = None;

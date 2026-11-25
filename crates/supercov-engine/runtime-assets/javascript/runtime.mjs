@@ -322,6 +322,37 @@ var _a6;
 var serverPhaseStorage = (_a6 = serverPhaseStorages.get(runtimeInstance)) != null ? _a6 : createServerPhaseStorage();
 if (serverPhaseStorage)
   serverPhaseStorages.set(runtimeInstance, serverPhaseStorage);
+// A request's work, until its response has finished: what an attempt's
+// request set off and left running after it was answered -- a promise no one
+// awaits, a poller a first request started that later requests' work runs
+// in -- keeps the request's context, and ran as that test's long after the
+// test, or any request of it, waited for it. Such work is no test's: it is
+// recorded as work no request named, and a strong pass switches no
+// request's mutant on there, so it runs with the server started with it
+// (docs/design/strong-mutation.md). A context carries its request's
+// lifetime under this key, which spreads copy and JSON leaves out.
+var REQUEST_LIFETIME = Symbol.for("supercov.requestLifetime");
+function answered(context) {
+  const lifetime = context[REQUEST_LIFETIME];
+  return lifetime !== void 0 && lifetime.answered;
+}
+// The request's lifetime, made by whichever copy of the runtime sees the
+// request first. It ends once the response has finished (or its connection
+// closed) and the listeners of that event have run: what they start goes
+// on after it, and is no longer the request's.
+function requestLifetime(request, response) {
+  let lifetime = request[REQUEST_LIFETIME];
+  if (lifetime !== void 0)
+    return lifetime;
+  lifetime = { answered: false };
+  Object.defineProperty(request, REQUEST_LIFETIME, { __proto__: null, value: lifetime, configurable: true });
+  const answer = () => queueMicrotask(() => {
+    lifetime.answered = true;
+  });
+  for (const event of ["finish", "close"])
+    response.once(event, answer);
+  return lifetime;
+}
 function probeV2ContextKey(context) {
   var _a8, _b;
   const phase = (_a8 = context.phaseId) != null ? _a8 : "unscoped";
@@ -366,13 +397,18 @@ function activateProbeV2Key(key, force = false) {
 // The async hook activates the current request's context before every
 // callback the server runs, and building its key and looking it up was most of
 // a Next server's time in the hook. A request's context object is never
-// changed once made, and its key is made of it alone, so each keeps the epoch
-// it was given until the epochs are cleared.
+// changed once made but for its request's lifetime, and its key is made of it
+// alone, so each keeps the epoch it was given until the epochs are cleared or
+// its request is answered.
 // Every copy of the runtime in a process shares one state, and the hook is the
 // first copy's, so the cache and its generation live on that state too: a
 // reset from another copy has to reach them.
 var emptyProbeV2Context = Object.freeze({});
 function activateProbeV2Context(context) {
+  // What a request left running after its answer is no request's: only its
+  // lifetime changes once the context is made, and is looked at first.
+  if (answered(context))
+    context = emptyProbeV2Context;
   // Work no request owns is keyed by the test running when it runs, which
   // changes under the same context: only a request's context keeps its epoch.
   if (!context.scope)
@@ -1449,7 +1485,7 @@ function appendServer(record) {
     // Work done while handling a request that named no test -- a webhook a
     // mock server sends -- says so, with the request's number.
     const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
-    const unscopedRequest = !scope && stored && stored.request ? { request: stored.request } : {};
+    const unscopedRequest = !scope && stored && stored.request && !answered(stored) ? { request: stored.request } : {};
     const serialized = __spreadValues(__spreadValues(__spreadValues({}, record), scope ? { scope } : {}), unscopedRequest);
     if (scope && state.bufferedAttempts.has(attemptKey(scope))) {
       const key = attemptKey(scope);
@@ -1500,7 +1536,7 @@ function environmentRequestContext() {
 function currentRequestContext() {
   const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
   if (stored !== void 0) {
-    if (stored.scope || stored.phaseId)
+    if ((stored.scope || stored.phaseId) && !answered(stored))
       return stored;
     return runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ ? { scope: runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ } : {};
   }
@@ -1519,15 +1555,15 @@ function activateCoverageScope(scope) {
 }
 function coverageCarrier() {
   const context = currentRequestContext();
-  return __spreadValues(__spreadValues({
+  return __spreadValues(__spreadValues(__spreadValues({
     version: 1
-  }, context.scope ? { scope: context.scope } : {}), context.phaseId ? { phaseId: context.phaseId } : {});
+  }, context.scope ? { scope: context.scope } : {}), context.phaseId ? { phaseId: context.phaseId } : {}), context[REQUEST_LIFETIME] ? { [REQUEST_LIFETIME]: context[REQUEST_LIFETIME] } : {});
 }
 function withCoverageCarrier(carrier, callback) {
   const decoded = typeof carrier === "string" ? decodeCoverageCarrier(carrier) : carrier;
   if (!serverPhaseStorage || !decoded)
     return callback();
-  const context = __spreadValues(__spreadValues({}, decoded.scope ? { scope: decoded.scope } : {}), decoded.phaseId ? { phaseId: decoded.phaseId } : {});
+  const context = __spreadValues(__spreadValues(__spreadValues({}, decoded.scope ? { scope: decoded.scope } : {}), decoded.phaseId ? { phaseId: decoded.phaseId } : {}), decoded[REQUEST_LIFETIME] ? { [REQUEST_LIFETIME]: decoded[REQUEST_LIFETIME] } : {});
   return serverPhaseStorage.run(context, () => withProbeV2Context(context, callback));
 }
 function assertionPhaseState(scope) {
@@ -2129,6 +2165,9 @@ function installNodeRequestPropagation() {
     // the report credits its work to the test running when it came.
     if (incoming && serverPhaseStorage && !(context && (context.scope || context.phaseId)))
       context = { request: nextUnscopedRequest() };
+    // Until its response has finished.
+    if (incoming && context && request && typeof request === "object" && response && typeof response.once === "function")
+      context = __spreadValues(__spreadValues({}, context), { [REQUEST_LIFETIME]: requestLifetime(request, response) });
     // Node emits a request's body and its response's events outside the
     // handler's context, so a handler that reads the body -- `req.on('end')`
     // -- ran as no test's. The request and response carry it with them.
@@ -2188,6 +2227,9 @@ function withRequestPhase(handler, event) {
     const context = __spreadValues(__spreadValues({}, ((_a8 = requestContext == null ? void 0 : requestContext.scope) != null ? _a8 : inheritedContext.scope) ? { scope: (_b = requestContext == null ? void 0 : requestContext.scope) != null ? _b : inheritedContext.scope } : {}), ((_c = requestContext == null ? void 0 : requestContext.phaseId) != null ? _c : inheritedContext.phaseId) ? { phaseId: (_d = requestContext == null ? void 0 : requestContext.phaseId) != null ? _d : inheritedContext.phaseId } : {});
     if (requestContext !== void 0 && !context.scope)
       context.request = nextUnscopedRequest();
+    const lifetime = requestContext !== void 0 ? args.map((argument) => argument && typeof argument === "object" ? argument[REQUEST_LIFETIME] : void 0).find((found) => found !== void 0) : void 0;
+    if (lifetime !== void 0)
+      context[REQUEST_LIFETIME] = lifetime;
     const invoke = () => {
       if (event === "connection" && context.scope && args[0] &&
           typeof args[0] === "object" && typeof args[0].emit === "function")

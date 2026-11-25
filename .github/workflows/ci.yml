@@ -98,7 +98,9 @@ jobs:
           step: restore
       - run: npm ci
       # The affected tests, and every test of a file the change touched (a
-      # test new since the map is in one): a nextest profile of them alone.
+      # test new since the map is in one): a nextest profile of them alone,
+      # named by --profile, as NEXTEST_PROFILE would reach the nextest a test
+      # starts in its own fixture, which has no such profile.
       - if: env.AFFECTED == 'true'
         uses: actions/download-artifact@v5
         with:
@@ -107,9 +109,8 @@ jobs:
         run: |
           cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
           node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "NEXTEST_PROFILE=affected" >> "$GITHUB_ENV"
       # Formatting and clippy are the same on every Node: the lint job's.
-      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass --partition hash:${{ matrix.part }}/${{ env.AFFECTED == 'true' && 1 || 2 }}
+      - run: cargo nextest run --workspace ${{ env.AFFECTED == 'true' && '--profile affected' || '' }} --no-fail-fast --no-tests=pass --partition hash:${{ matrix.part }}/${{ env.AFFECTED == 'true' && 1 || 2 }}
       # Doctests, which nextest does not run, and the tooling checks: with
       # the first half.
       - if: matrix.part == 1

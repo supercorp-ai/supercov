@@ -411,6 +411,27 @@ left have no verdict, for the next pass, and the summary says how many. A
 pass that spent its budget before deciding any mutant is not one that could
 run none.
 
+The stop is the progress loop's: once a second it checks the budget, says so
+when it is spent (`[supercov] budget spent, 452 s into the pass: stopping
+it; ...`), signals the command, and ends the process 8 s later if the pass
+has not ended. That holds only while the loop runs, and a CI job's time limit
+counts everything after it too. So a thread that does nothing else ends the
+process 45 s past the budget, whatever holds it up (the loop itself, the
+work after the pass), saying so; the verdicts were saved into the run as they
+came. A budget measuring spent already arms no such deadline: that pass runs
+nothing and says so. A sharded e2e pass on 4.29.11 ran 130 s past its
+budget on every job of an area, killed by the job's 10-minute limit with
+nothing saved, and no log line said whether the budget's stop had come. With
+the line, the same area's job said `budget spent, 396 s into the pass` and
+its pass ended 0.8 s later (`ran 95 mutant(s) in 396772 ms`): the stop
+reaches a harness that starts each slot's `playwright test` in a process
+group of its own, as the supervisor signals the command's group and the
+group of each of its descendants, then kills them 5 s later. A fixture holds
+that shape (two such slots, a spread serial file, a harness that ignores the
+termination and waits for its slots, a 25 s budget, run as a continuation
+shard): the command ends about 1 s after its budget. What held the 4.29.11
+jobs is not known; the deadline above bounds it.
+
 **The time left.** The progress line's estimate is the plan's: the estimated
 cost of the mutants left, at the pace of the cost decided so far over the
 time it took. Counting mutants, the pass above said "37 of 2460 ... about
@@ -1368,8 +1389,9 @@ timeout; 130 kills became timeouts, 253 stayed kills.
 **Run alone, the server started with the mutant.** That per-request
 switching is exact only where nothing one request does reaches another, and
 a server keeps what its top level made. So the plan marks a mutant
-`serverWide` where a server ran its code in work no request named (start-up,
-timers: `background`), at a server module's top level (`module-level`), or
+`serverWide` where a server ran its code in work no request named or waited
+for (start-up, timers, what a request left running after its answer:
+`background`), at a server module's top level (`module-level`), or
 for a request that named no test, credited by time (`by-time`). Such a
 mutant is not queued: the engine starts the command again for it, alone, with
 `SUPERCOV_ACTIVE_MUTANT` set in every process, and its verdict's reason says
@@ -1407,6 +1429,42 @@ survived before 4.29.10. The strong build already marks such a switch
 ran (`serverRan`), and the driver runs a `static` one of those alone
 (`module-level`). A `static` mutant only a page ran stays per attempt: a
 page loads its modules after the attempt's init script has named the mutant.
+
+**Work a request leaves running.** A request's scope stays with its async
+work, and its mutant with it. That is exact for what the request does before
+its answer. But a server may answer first and go on: a cron route that
+answers `202` and leaves its pipeline running (a promise no one awaits,
+`after()`, a timer), or a coordinator whose one poller the process's first
+request started, in which every later request's batches are polled and read.
+Such work kept the context of the request that set it off: the poller ran as
+the first request's test, with that attempt's mutant, for as long as the
+server lived. A later test that waited for its own batch there never had its
+mutant reach the poller's code, and the measured run credited that code to
+the first test alone; its first runs in a pass have no mutant, so the poller
+ran none, and the mutant survived though every test that waits for a batch
+kills it. A fixture test
+(`mutants_test_kills_server_mutants_work_after_a_response_reaches`) holds
+both: a job read after its response, in its request's own continuation, and
+jobs a poller reads that an earlier request started.
+
+So a request's work ends with its answer: once its response has finished (or
+its connection closed) and the listeners of that event have run, what it left
+running is no request's. The runtime keeps the request's lifetime in each
+context made for it, which spreads and carriers copy and no header or
+environment variable serializes. Work under an answered context is recorded
+as the server's own (no scope, no request's number: background, as a timer's
+is), every test is its candidate, and the plan marks the mutant `background`:
+it runs alone with the server started with it, where every attempt names that
+mutant and the process runs it in work no request names. In a main round, a
+request's switch gives such work the process's mutant, none. What a request
+does before its answer is unchanged, a body read and a page streamed as the
+response goes out among it, and so is what a response's own `finish`
+listeners do in their turn.
+
+What it costs: a mutant in code that runs only after an answer (a pipeline a
+route leaves running, a job a webhook starts) runs alone against every test
+of the run, where per request it ran against the tests that reached it. What
+a request awaits before it answers costs nothing more.
 
 Each further round a driver asks for (a `restart` record in the results: one
 mutant alone, a serial round, the rest of what did not finish, the main
@@ -1730,6 +1788,104 @@ in a pass long enough for all of them. With progress kept, each pass adds to
 what the last reached: a mutant with 15 candidates, four of which poll for
 10 s, runs its cheap ones once and the slow ones in whichever later passes
 reach them.
+
+## A first tier, then the rest
+
+A survivor costs every candidate it has, and a kill rarely needs more than
+its first few. On a large application's e2e suite (1,703 Playwright tests,
+55,565 mutants to run, 11.9 million candidate runs), code every test runs --
+an auth middleware, a dashboard layout, a server module's top level -- gives
+a mutant hundreds to 1,600 candidates, against 14 at the median. Its
+survivors-to-be held each pass: in one late round, 89% of the attempt time
+went to mutants still undecided at its end, and areas of that code were left
+out of the pass for what they cost.
+
+**Where kills come from.** The 3,448 kills that suite's merged reports hold,
+each placed in its mutant's candidate order (the order below, read from the
+whole suite's plan):
+
+| a mutant's candidates up to | 1 | 2 | 4 | 8 | 16 | 32 | 37 | 64 | 128 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| kills there or before | 27.0% | 43.9% | 62.6% | 78.1% | 88.5% | 93.5% | 95.0% | 97.8% | 98.7% |
+
+A candidate's chance to kill a mutant still alive falls with its place: 12.5%
+at the first, 7% at the fourth, about 2% from the 10th to the 20th, under 1%
+from the 50th, 0.16% past the 100th. And it falls with whose evidence made it a
+candidate: of the 3,448 kills, 3,434 came from a test whose own evidence ran
+the mutant's code (it infected it, could not tell, read its value) and 14 from
+one that only may have caused it to run (work no test was credited with, a
+module its file loaded), though those were 62% of the suite's candidate runs.
+
+**The order.** A Playwright mutant's candidates are taken in that order:
+those with their own evidence first, then the others; within each, cheapest
+to a kill first, as the driver orders them (a test's time over how likely it
+is to kill, one that infected it four times likelier).
+
+**The first tier.** Where a mutant has more candidates than a first tier
+holds, a pass runs it first against its first tier alone, in a round of its
+own, every such mutant with the rest of the pass's mutants, the cheapest
+first by what that round costs them. A first tier holds 32 candidates, or
+more where the run's own kills say: each kill of the run is placed in its
+mutant's order, and the tier holds 95% of them. A first tier's kills are
+never past its end, so the size only grows, from kills the rest made (or an
+earlier release's passes); fewer than 20 kills say nothing. A mutant that
+needs a server started with it (`serverWide`) has a first tier too: its
+round alone runs the tier, not every candidate.
+
+**Survived so far.** A mutant its first tier lets live has not survived: the
+driver's `survived` for it is read as the tier's tests having passed with it,
+its progress (Partial progress, above), and it has no verdict. Where the pass
+has the time, the next round runs it against the rest, from there, and it
+ends `killed` or `survived` as before. Where the pass stops first (its
+budget, a job's limit), the run keeps it so, and the next pass resumes it.
+A mutant that needs a server started with it resumes too, in the same run:
+its progress comes only from its rounds alone, where its server started with
+it, so a candidate that passed there passes again. Another run's plan may
+not start a server with it, so that progress is not carried after an edit or
+merged.
+
+A run's listings show such a mutant as `survived-so-far`, with how many
+candidates it passed (`tests`): `mutants --status survived` lists it beside
+the survivors, said as such, `--status survived-so-far` lists those alone,
+and the summary counts them apart. It is not in the mutation score, which
+counts verdicts, and `--fail-on survived` does not count it: it is undecided,
+as a mutant a budget left is. The pass's summary says how many there are:
+
+    survived so far 212: lived through some candidates (a first tier holds 32), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs <run> mutants --status survived-so-far)
+
+**What it saves.** Read from that suite's plan, a survivor's cost (the time of
+every candidate) against its first tier's, summed over every mutant to run:
+
+| mutants | every candidate | a first tier of 32 |
+| --- | --- | --- |
+| run with a request's switch | 2,849 h | 441 h |
+| a server module's top level | 3,261 h | 62 h |
+| for requests no test named | 746 h | 8 h |
+| in a server's background work | 397 h | 3 h |
+| all | 7,253 h | 513 h |
+
+So a pass decides every kill within the first 32 candidates (93.5% of them),
+and gives every other mutant `survived so far`, for about a fourteenth of
+what deciding every survivor costs. A mutant of the auth middleware (66
+mutants, about 1,170 candidates each) costs about 39 minutes of test time to
+survive, and its first tier about 7 seconds; a dashboard layout's and an
+onboarding checklist's, 46 and 43 minutes against 11 and 16 seconds. What waits is the 6.5% of kills
+past the tier (5% of them past a tier sized to the run's kills): mostly
+mutants of code every test runs, and webhook code that only requests no test
+named reach (13 kills, 1,153rd to 1,549th in their order). Triage can start on
+the `survived-so-far` mutants: they are the survivors of the likeliest
+killers.
+
+**Not built, from the same data.** Taking one candidate of each spec file
+before a second of any (diversity by file) placed the same kills later, not
+earlier: at most 34.9% by the second candidate against 43.9%, and 31.7 h of
+test time to the kills against 20.0 h (an upper bound: an earlier candidate in
+that order might kill too, which the data cannot say). Grouping by the route a
+test enters by and the points it hit in the mutant's function needs each
+test's hits beside the plan, which a plan does not hold. Infection already
+decides each candidate (a test whose recorded values could not differ is
+none); the candidates of most cost are those with no evidence of their own,
+which have no values to compare.
 
 ## After an edit: verdicts no change could move
 

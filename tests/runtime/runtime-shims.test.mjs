@@ -753,6 +753,116 @@ test("a loopback request that loses its carrier is retained as background eviden
   }
 });
 
+// What a request sets off and leaves running after its answer -- a promise
+// no one awaits, a poller the first request started that later requests' work
+// runs in -- keeps the request's async context. It is no test's: its hits are
+// background evidence, and a strong pass's per-request switch gives it the
+// process's mutant, not the one the answered request named
+// (docs/design/strong-mutation.md, "Work a request leaves running").
+test("work a request leaves running after its answer is no test's, and runs the process's mutant", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-after-answer-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import http from "node:http";
+          const runtime = await import(${JSON.stringify(runtime)});
+          const scope = (attempt) => ({
+            version: 1,
+            runId: "run-after-answer",
+            workerId: "worker-1",
+            testId: "test-" + attempt,
+            testKey: "test-" + attempt,
+            retry: 0,
+            attemptId: "attempt-" + attempt,
+            mutant: "src/a.js#3",
+          });
+          const slot = runtime.strongSlot("src/a.js");
+          const seen = [];
+          const later = [];
+          let poller;
+          const handler = runtime.withRequestPhase((request, response) => {
+            runtime.coverageHit("in-request");
+            seen.push(["in-request", slot.a]);
+            // The first request starts a poller; the request's own work is
+            // left running after the answer.
+            poller ??= setInterval(() => later.push(slot.a), 5);
+            setTimeout(() => {
+              runtime.coverageHit("after-answer");
+              seen.push(["after-answer", slot.a]);
+            }, 30);
+            response.end("ok");
+          });
+          const server = http.createServer(handler);
+          await new Promise((done) => server.listen(0, "127.0.0.1", done));
+          const port = server.address().port;
+          const send = (attempt) => new Promise((done, fail) => {
+            const headers = runtime.withCoverageCarrier({ version: 1, scope: scope(attempt) }, () => runtime.coverageContextHeaders());
+            http.get({ host: "127.0.0.1", port, path: "/", headers }, (result) => {
+              result.resume();
+              result.on("end", done);
+            }).on("error", fail);
+          });
+          await send("one");
+          await new Promise((done) => setTimeout(done, 60));
+          later.length = 0;
+          await send("two");
+          await new Promise((done) => setTimeout(done, 60));
+          clearInterval(poller);
+          await new Promise((done) => server.close(done));
+          console.log(JSON.stringify({ seen, later: [...new Set(later)] }));
+        `,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-after-answer",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: root,
+          // The server a strong pass starts with a mutant switched on.
+          SUPERCOV_ACTIVE_MUTANT: "src/a.js#7",
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const { seen, later } = JSON.parse(child.stdout.trim());
+    // The request's own work runs its mutant; what it left running, and the
+    // poller the first request started while the second's ran, the process's.
+    assert.deepEqual(seen, [
+      ["in-request", 3],
+      ["after-answer", 7],
+      ["in-request", 3],
+      ["after-answer", 7],
+    ]);
+    assert.deepEqual(later, [7]);
+    const records = (directory) =>
+      readdirSync(directory)
+        .filter((file) => file.endsWith(".jsonl"))
+        .flatMap((file) =>
+          readFileSync(resolve(directory, file), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line)),
+        );
+    const runDirectory = resolve(root, "run-after-answer");
+    const scoped = records(resolve(runDirectory, "attempts"));
+    assert.ok(scoped.some((record) => record.id === "in-request"), JSON.stringify(scoped));
+    assert.ok(!scoped.some((record) => record.id === "after-answer"), JSON.stringify(scoped));
+    // Work no request named, and no request's number: the server's own.
+    const background = records(resolve(runDirectory, "background"));
+    const after = background.filter((record) => record.id === "after-answer");
+    assert.ok(after.length > 0, JSON.stringify(background));
+    assert.ok(after.every((record) => record.scope === undefined && record.request === undefined));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("instrumentation stack cleanup keeps the user's first frame", async () => {
   const runtime = await import("../../runtime/javascript/runtime.mjs");
   const error = new Error("assertion failed");
