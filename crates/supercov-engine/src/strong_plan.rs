@@ -578,14 +578,16 @@ fn test_windows(
         .iter()
         .filter(|raw| role_of(raw) == "test")
         .filter_map(|raw| {
-            let test = *test_index.get(raw.test_id.as_ref().unwrap_or(&raw.test))?;
+            // Every test record was indexed by this id above.
+            let test = test_index[raw.test_id.as_ref().unwrap_or(&raw.test)];
+            // Its phases, from the first's start to the last's end.
             let phases = || {
                 let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
                 let end = raw
                     .phases
                     .iter()
                     .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
-                    .max()?;
+                    .fold(start, i64::max);
                 Some([start, end])
             };
             let [start, end] = raw.span.or_else(phases)?;
@@ -600,21 +602,20 @@ fn test_windows(
 /// them fell while no test ran: work no test was running for may be any
 /// test's to see, and the server's whole start too.
 fn running_at(windows: &[(i64, i64, usize)], moments: &[i64]) -> Option<Vec<usize>> {
-    let mut tests = Vec::new();
-    for &at in moments {
-        // Windows are sorted by start: those after `at` cannot hold it.
-        let started = windows.partition_point(|(start, _, _)| *start <= at);
-        let before = tests.len();
-        tests.extend(
-            windows[..started]
+    let mut tests = moments
+        .iter()
+        .map(|&at| {
+            // Windows are sorted by start: those after `at` cannot hold it.
+            let started = windows.partition_point(|(start, _, _)| *start <= at);
+            let running = windows[..started]
                 .iter()
                 .filter(|(_, end, _)| *end >= at)
-                .map(|(_, _, test)| *test),
-        );
-        if tests.len() == before {
-            return None;
-        }
-    }
+                .map(|(_, _, test)| *test)
+                .collect::<Vec<_>>();
+            (!running.is_empty()).then_some(running)
+        })
+        .collect::<Option<Vec<_>>>()?
+        .concat();
     tests.sort_unstable();
     tests.dedup();
     Some(tests)
@@ -1182,11 +1183,9 @@ impl Selecting<'_> {
                         .as_ref()
                         .and_then(|requests| self.during_requests(mutant, own, requests));
                     match during {
-                        Some(tests) => {
-                            for test in tests {
-                                take(test, CandidateReason::Unattributed);
-                            }
-                        }
+                        Some(tests) => tests
+                            .into_iter()
+                            .for_each(|test| take(test, CandidateReason::Unattributed)),
                         None => {
                             for test in 0..self.tests.len() {
                                 take(test, CandidateReason::Unattributed);
@@ -1474,7 +1473,22 @@ mod tests {
             at("gap", during, Some(250)),
             // At 350: only c ran, its time its phases (it has no span).
             at("late", during, Some(350)),
+            // A request, and a hit event of the runner's own process.
+            at("evented", during, Some(150)),
         ];
+        background.runtime[0].events = vec![
+            serde_json::from_value(serde_json::json!({
+                "type": "hit", "id": "evented", "timestampMs": 150, "environment": "node"
+            }))
+            .unwrap(),
+        ];
+        // A record of no test with no snapshot of its own, only a server's.
+        let mut served = record("served", "background", None, &[]);
+        served.runtime.clear();
+        served.server = vec![at("hook", during, Some(160))];
+        // A test that kept no time: no request falls in it.
+        let mut untimed = browser("e", [0, 0]);
+        untimed.span = None;
         let mut c = browser("c", [0, 0]);
         c.span = None;
         c.phases = vec![
@@ -1486,13 +1500,15 @@ mod tests {
         ];
         let raw_results = vec![
             background,
+            served,
             browser("a", [100, 200]),
             browser("b", [120, 220]),
             c,
             browser("d", [400, 500]),
+            untimed,
         ];
         let mut mutants = [
-            "hook", "between", "start", "untimed", "runner", "gap", "late",
+            "hook", "between", "start", "untimed", "runner", "gap", "late", "evented",
         ]
         .into_iter()
         .map(|point| mutant(serde_json::json!({"id": point, "statement": point})))
@@ -1513,8 +1529,16 @@ mod tests {
         };
         assert_eq!(names("hook"), ["a", "b", "d"]);
         assert_eq!(names("late"), ["c"]);
-        let every = ["a", "b", "c", "d"];
-        for id in ["between", "start", "untimed", "runner", "gap", "pointless"] {
+        let every = ["a", "b", "c", "d", "e"];
+        for id in [
+            "between",
+            "start",
+            "untimed",
+            "runner",
+            "gap",
+            "pointless",
+            "evented",
+        ] {
             assert_eq!(names(id), every, "{id}");
         }
     }
