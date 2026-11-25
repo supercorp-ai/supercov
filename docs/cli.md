@@ -549,7 +549,11 @@ phpunit`). See `docs/design/strong-mutation.md`,
   run of its own even on an unchanged checkout, so a job never saves into a
   run it restored, which every job of its round holds a copy of. There it
   makes that run from the newest restored run whose command passed, without
-  measuring again, and keeps every verdict the restored runs hold.
+  measuring again, and keeps every verdict the restored runs hold. A run whose
+  command failed only because tests failed is made into one too, where none
+  passed: a failed test is no candidate, and the shard says which it leaves
+  out. A run whose command failed otherwise (no test failed, or no exit
+  status) is not, and the shard measures, saying what kept that run out.
 - `--critical <glob>` (repeatable): every mutant there must be killed or
   accepted, or the command fails.
 - `--fail-on survived,timeout,no-coverage,error`: fail on any asked mutant with

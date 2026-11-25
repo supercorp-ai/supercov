@@ -1789,6 +1789,61 @@ what the last reached: a mutant with 15 candidates, four of which poll for
 10 s, runs its cheap ones once and the slow ones in whichever later passes
 reach them.
 
+## Continuing a run whose tests failed
+
+A shard saves its verdicts into a run of its own, made on an unchanged
+checkout from a restored run rather than measured again
+(`docs/design/mutants.md`, "Strong verdicts" under "Merged runs"). Until this
+release that run had to be one whose command passed. On a large application's
+e2e area, the measuring job's 1,456 Playwright tests had one timing-sensitive
+test fail, unrelated to the mutated files; its command exited 1, and each of
+the 8 shard jobs that restored the run measured the whole area again (about 8
+minutes each), spent its budget on it, and decided nothing.
+
+A failed test's evidence is already not trusted: a test is a candidate only
+where every attempt of it passed in the measured run (`runnable`), in any run
+a pass plans from, whether it was measured by the job or restored. So the
+verdicts a shard reaches from such a run are the passing tests' alone, as
+they would be had the shard measured it itself with the same test failing,
+and measuring again would record the same evidence for every test that
+passed. What the exit status cannot say is whether something other than the
+failed tests also went wrong. A command can fail outside its tests -- a crash
+before or between them, a global setup or teardown, a reporter, the runner
+interrupted -- and may have left tests unrun or evidence unwritten, whose
+mutants a pass would then find with fewer candidates than they have.
+
+So a run whose command did not pass is continued only where the failure is
+explained by tests that failed, read from its own records:
+
+- **It exited with a status.** A command that ended without one (a signal)
+  was cut short, whatever its tests did.
+- **It recorded tests.** No test recorded is no evidence to continue from.
+- **A test failed.** An attempt failed or timed out, or passed where it was
+  expected to fail (`test.fail()`): what a runner exits non-zero for. A
+  skipped, interrupted or unfinished test, a flaky one that passed in the end,
+  and an expected failure that failed are none: a command that exited
+  non-zero with only these failed for another reason.
+
+A run whose command passed is still taken first, where one is, since its
+plan has every test for a candidate; failing that, the newest that
+qualifies. The shard says which tests it leaves out (`continuing from run
+r4, whose command failed: 1 test failed while measuring and is not a
+candidate: checkout > pays`), `--json` gives them as
+`measurement.failedTests`, and the pass's answer still says that the run's
+command failed and that its verdicts cannot gate, as for a run the shard
+measured with a test failing. Where no run qualifies, the shard measures and
+says what kept the newest such run out (`run r4's command exited 1, though
+none of its 1456 test(s) failed: it failed for another reason, which may have
+left tests unrun`, or `run r4's command ended without an exit status (1 test
+failed while measuring and is not a candidate: checkout > pays)`).
+
+A test that failed only because it ran slowly is still no candidate in the
+rounds continued from that run, though it might pass now: its mutants are
+decided by the other tests, or left without coverage where it alone ran
+them. Measuring again to win it back would cost each shard the whole
+measurement, for one test's worth of candidates; a later measurement (after
+an edit, or a new round measured on purpose) takes it back.
+
 ## A first tier, then the rest
 
 A survivor costs every candidate it has, and a kill rarely needs more than
@@ -1817,9 +1872,37 @@ one that only may have caused it to run (work no test was credited with, a
 module its file loaded), though those were 62% of the suite's candidate runs.
 
 **The order.** A Playwright mutant's candidates are taken in that order:
-those with their own evidence first, then the others; within each, cheapest
-to a kill first, as the driver orders them (a test's time over how likely it
-is to kill, one that infected it four times likelier).
+those with their own evidence first, then the others; within each, the tests
+that killed most of the run's other mutants of its file first, then cheapest
+to a kill, as the driver orders them (a test's time over how likely it is to
+kill, one that infected it four times likelier).
+
+A page component's or a shared service's first tier used to fill with the
+tests that only render or pass through its file -- a layout's, every
+dashboard test's, cheap and infecting -- while the tests that exercise it
+came later. On a dashboard page's component of the same suite (572 mutants,
+about 187 candidates each), a first round left 251 `survived so far`, and
+triage found most of them killed by the page's own spec files, past the
+first 32; every kill the round made there came from three spec files. A test
+that killed one mutant of a file exercises that file: its kills are the run's
+evidence of it. So the run's kills, saved verdicts with the test that made
+each, say for each file which tests killed its mutants and how many, and a
+mutant's tier takes those first, the most kills first. The first round of a
+run has none; each later pass over the run, and each round of a pass split
+across jobs and merged, has the kills before it.
+
+Measured on the suite's kills (3,878, each with the test that made it): of
+the 255 a first tier of 32 would leave to its rest, with the kills inside
+the first tiers as the run's history, 58% have their killer among the next
+32 candidates in this order (the median killer 10th), against none before
+(the median 53rd). Over every kill, with the run's other kills of the file
+as its history, 98.8% fall in a tier of 32 against 93.4%, and those of
+mutants with 100 or more candidates 89.5% against 56.0%. The tier's size is
+still read from the order without killers, where a kill's own count would put
+it first. The tests' coverage of the mutant's file was measured too, as the
+points of the file each test ran in the record that says which test ran which
+file: no better than the order before (94.0% against 93.4%), as most tests
+of a page run the same few points there.
 
 **The first tier.** Where a mutant has more candidates than a first tier
 holds, a pass runs it first against its first tier alone, in a round of its
@@ -1849,7 +1932,14 @@ candidates it passed (`tests`): `mutants --status survived` lists it beside
 the survivors, said as such, `--status survived-so-far` lists those alone,
 and the summary counts them apart. It is not in the mutation score, which
 counts verdicts, and `--fail-on survived` does not count it: it is undecided,
-as a mutant a budget left is. The pass's summary says how many there are:
+as a mutant a budget left is. Only a mutant that passed a first tier's worth
+of candidates (32) is `survived-so-far`: a pass its budget stops partway
+through a tier records the few candidates each open mutant passed, and 4.29.12
+listed those too. On a settings page's component of that suite, every
+`survived-so-far` mutant had passed 1 to 4 of its 135 candidates, never
+meeting the page's own spec files, which killed 176 of the 317 later. Such a
+mutant is open, as before, and the next pass resumes it. The pass's summary
+says how many there are:
 
     survived so far 212: lived through some candidates (a first tier holds 32), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs <run> mutants --status survived-so-far)
 

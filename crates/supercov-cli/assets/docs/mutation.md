@@ -108,8 +108,12 @@ mutants the tests let survive.
   its own, so that each job's share is saved into a run no other job writes:
   made from the newest run of the checkout whose command passed, without
   measuring again (`not measuring: the checkout is unchanged since run r4, so
-  this shard saves its verdicts into run r9, made from it`), or measured where
-  there is none (see [A pass split across jobs](#a-pass-split-across-jobs)).
+  this shard saves its verdicts into run r9, made from it`), or, where none
+  passed, from the newest whose command failed only because tests failed,
+  which are no candidates (`continuing from run r4, whose command failed: 1
+  test failed while measuring and is not a candidate: checkout > pays`), or
+  measured where there is none, saying why (see
+  [A pass split across jobs](#a-pass-split-across-jobs)).
   An earlier run measured on the same files, byte for byte, keeps every
   verdict a pass reached, whatever the two measurements recorded: a test
   whose path depends on the time, or that failed in one of them, moves no
@@ -349,8 +353,9 @@ merge ([CLI reference](cli.md#combine-shards)).
 - **Another round.** On the commit the restored runs measured, each job saves
   into a run of its own: `supercov mutants --shard` never saves into a run it
   restored, of which every job of the round holds a copy. It makes that run
-  from the newest restored run whose command passed and that recorded its
-  mutants' values, without measuring again: the run holds that run's evidence
+  from the newest restored run that recorded its mutants' values and whose
+  command passed, or failed only in tests that failed, without measuring
+  again: the run holds that run's evidence
   under an id of its own. It keeps every verdict a pass reached that the
   restored runs hold (`1317 verdict(s) kept from runs r8, r7, r6, r5: the
   checkout is unchanged since them`), and the shares are of what is left.
