@@ -133,7 +133,9 @@ for both`.
 The markdown and HTML reports fold them into a section of their own, apart
 from the survivors. A file that does not compile (a syntax Supercov's parser
 does not take) is named, and its mutants run as before:
-`could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js`.
+`could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js`. So is a file
+whose mutants would take longer to compile than to run, such as a
+generated file with thousands of mutants.
 
 ### How this differs from coverage
 

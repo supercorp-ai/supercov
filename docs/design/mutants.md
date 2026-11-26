@@ -536,6 +536,12 @@ Anything short of an exact match runs as before: a file that does not
 parse or compile (named on the standard error), a mutant whose node is not
 found, a transform that reports an error.
 
+Each compile is of the whole file, so the work is a file's size times its
+mutants. A pass compiles at most 512 MiB of source, the cheapest files
+first: a few seconds on a few cores. A file past that (a generated one,
+thousands of mutants in a hundred kilobytes) is named on the standard error
+and its mutants run as before.
+
 #### Duplicates
 
 Two mutants of one file whose compiled outputs are the same are one

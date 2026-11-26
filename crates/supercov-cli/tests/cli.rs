@@ -23208,7 +23208,7 @@ fn mutants_that_compile_to_the_same_code_are_decided_once_or_not_run() {
     assert_eq!(
         reply["sameCode"],
         serde_json::json!({"equivalent": 3, "equivalentToRun": 3, "duplicates": 1,
-            "savedMs": reply["sameCode"]["savedMs"], "notCompiled": []}),
+            "savedMs": reply["sameCode"]["savedMs"], "notCompiled": [], "tooLarge": []}),
         "{reply}\n{said}"
     );
     assert!(

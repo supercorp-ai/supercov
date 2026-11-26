@@ -65,7 +65,18 @@ pub struct SameCode {
     /// The files whose original did not compile (or parse): their mutants
     /// run as before.
     pub not_compiled: Vec<String>,
+    /// The files whose mutants were not compared because compiling each of
+    /// them would have passed `COMPILED_BYTES`: their mutants run as before.
+    pub too_large: Vec<String>,
 }
+
+/// How much source a pass compiles to compare mutants, at most: each
+/// mutant's file once per mutant, the smallest costs first. Each compile is
+/// of the whole file, so the work grows with a file's size times its
+/// mutants; half a gigabyte is a few seconds on a few cores, and a file
+/// past it (a generated one, thousands of mutants in hundreds of kilobytes)
+/// costs more to compare than its duplicates save.
+const COMPILED_BYTES: usize = 512 << 20;
 
 /// `decide_by_compiled_code` for a stored run: a file is compared only where
 /// its source under `root` has the bytes the run measured, by its source
@@ -107,6 +118,16 @@ pub fn decide_by_compiled_code(
     settled: &BTreeMap<String, Verdict>,
     source_of: impl Fn(&str) -> Option<String> + Sync,
 ) -> SameCode {
+    decide_within(plan, settled, source_of, COMPILED_BYTES)
+}
+
+/// `decide_by_compiled_code`, compiling at most `budget` bytes of source.
+fn decide_within(
+    plan: &mut StrongPlan,
+    settled: &BTreeMap<String, Verdict>,
+    source_of: impl Fn(&str) -> Option<String> + Sync,
+    budget: usize,
+) -> SameCode {
     let shared = |id: &String| {
         settled
             .get(id)
@@ -146,6 +167,18 @@ pub fn decide_by_compiled_code(
             Some((file.to_owned(), source, mutants))
         })
         .collect::<Vec<_>>();
+    // The cheapest files first, as many as the budget holds.
+    let mut files = files;
+    files.sort_by_key(|(_, source, mutants)| (mutants.len() + 1) * source.len());
+    let mut spent = 0;
+    files.retain(|(file, source, mutants)| {
+        spent += (mutants.len() + 1) * source.len();
+        if spent > budget {
+            same.too_large.push(file.clone());
+        }
+        spent <= budget
+    });
+    same.too_large.sort();
     // One job per compile -- each file's original, then each mutant -- so
     // the work spreads over every core however it falls across files.
     let jobs = files
@@ -558,6 +591,36 @@ mod tests {
                     "src/a.js:1:22-3:2:BlockStatement:{}".to_owned()
                 ),
             ])
+        );
+    }
+
+    #[test]
+    fn files_past_the_budget_are_not_compared_and_say_so() {
+        let small = "export function f(a) {\n  if (a) { g(); }\n}\n";
+        let large = format!("{small}export const pad = \"{}\";\n", "x".repeat(400));
+        let mut plan = plan_of("src/a.js", small);
+        plan.mutants.extend(plan_of("src/b.js", &large).mutants);
+        let before = plan.clone();
+        let sources = |file: &str| match file {
+            "src/a.js" => Some(small.to_owned()),
+            _ => Some(large.clone()),
+        };
+        // Room for the small file alone: the large one is left whole.
+        let same = decide_within(&mut plan, &BTreeMap::new(), sources, 2_000);
+        assert_eq!(same.too_large, ["src/b.js"]);
+        assert!(same.duplicates.keys().all(|id| id.starts_with("src/a.js:")));
+        assert!(!same.duplicates.is_empty());
+        assert!(plan.mutants.iter().any(|mutant| mutant.file == "src/b.js"));
+        assert_eq!(
+            plan.mutants
+                .iter()
+                .filter(|mutant| mutant.file == "src/b.js")
+                .count(),
+            before
+                .mutants
+                .iter()
+                .filter(|mutant| mutant.file == "src/b.js")
+                .count()
         );
     }
 

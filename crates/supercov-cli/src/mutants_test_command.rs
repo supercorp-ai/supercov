@@ -1199,6 +1199,7 @@ fn same_code_json(same: &supercov_engine::js_compiled_equivalence::SameCode) -> 
         "duplicates": same.duplicates.len(),
         "savedMs": same.saved_ms,
         "notCompiled": same.not_compiled,
+        "tooLarge": same.too_large,
     })
 }
 
@@ -1241,6 +1242,20 @@ fn same_code_said(same: &Value) -> Vec<String> {
     {
         said.push(format!(
             "could not compile {} file(s) to compare their mutants' code, so their mutants run as before: {}",
+            files.len(),
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(files) = same["tooLarge"]
+        .as_array()
+        .filter(|files| !files.is_empty())
+    {
+        said.push(format!(
+            "did not compare the mutants of {} file(s), as compiling each of them would cost more than it saves, so their mutants run as before: {}",
             files.len(),
             files
                 .iter()
@@ -4119,16 +4134,17 @@ mod same_code_tests {
             duplicates: std::collections::BTreeMap::from([("d".into(), "k".into())]),
             saved_ms: 12_300,
             not_compiled: vec!["src/legacy.js".into()],
+            too_large: vec!["src/generated.js".into()],
         };
         let json = same_code_json(&same);
         assert_eq!(
             json,
             json!({"equivalent": 3, "equivalentToRun": 2, "duplicates": 1, "savedMs": 12_300,
-                "notCompiled": ["src/legacy.js"]})
+                "notCompiled": ["src/legacy.js"], "tooLarge": ["src/generated.js"]})
         );
         assert_eq!(
             same_code_text(&json),
-            "  3 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 2 of them would have run and did not\n  1 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict\n  about 13 s of test time saved by not running them\n  could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js\n"
+            "  3 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 2 of them would have run and did not\n  1 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict\n  about 13 s of test time saved by not running them\n  could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js\n  did not compare the mutants of 1 file(s), as compiling each of them would cost more than it saves, so their mutants run as before: src/generated.js\n"
         );
         // Equivalent ones the plan had decided anyway: nothing saved.
         let decided = SameCode {
