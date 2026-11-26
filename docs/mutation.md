@@ -505,7 +505,9 @@ no mutants shows none of this.
   on. Nothing needs setting. Each timeout's verdict says what it waited on and
   where, for example `stopped at 2.5 s of its 6.5 s time limit, ..., waiting
   on Locator.click (#save) at tests/save.spec.ts:12:20`, and the summary says
-  how much time ending them early saved.
+  how much time ending them early saved. A worker is kept after a mutant
+  fails its test, so the next test does not wait for a new worker and
+  browser; a test that fails without any mutant still gets a new one.
   `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) changes the
   1.5: a suite whose tests' times vary widely between runs may want 2 or 3.
   A mutant tries its candidates cheapest to a kill first (a test's time over

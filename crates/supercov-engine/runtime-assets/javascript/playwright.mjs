@@ -20,7 +20,7 @@ import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
-import { PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, ownDeadline, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchStall } from "./playwrightStrong.mjs";
+import { PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -2071,7 +2071,10 @@ const instrumentedFixtures = {
                 }
                 finally {
                     strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true, ...stallDetails(stall) });
-                    restartWorker = ranInWorker(strong, scope.attemptId) && testInfo.status === "passed";
+                    const ranHere = ranInWorker(strong, scope.attemptId);
+                    restartWorker = ranHere && testInfo.status === "passed";
+                    if (keepsWorker(strong, ranHere, testInfo.status))
+                        testInfo.expectedStatus = testInfo.status;
                     await timed("controller.dispose", () => controller.dispose());
                     timingCount("fixture.testTeardown", performance.now() - teardownStarted);
                     timingReport(testInfo.title);

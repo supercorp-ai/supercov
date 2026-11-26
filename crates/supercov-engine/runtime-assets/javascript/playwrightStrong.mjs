@@ -9,10 +9,11 @@
 // disk that every worker and every invocation of the pass share. A mutant
 // goes from candidate to candidate as copies take it, and stops at its first
 // kill; nothing waits for a stage to end, and no worker restarts for a
-// mutant. A test's first run in each invocation is a control, with no
-// mutant: the pass's baseline the first time; and after a kill, the test's
-// next run is one too, the check that it still passes without the mutant on
-// the same server, which confirms the kill. A harness may start several
+// mutant, nor after one fails its test (`keepsWorker`). A test's first run
+// in each invocation is a control, with no mutant: the pass's baseline the
+// first time; and after a kill, the test's next run is one too, the check
+// that it still passes without the mutant on the same server, which
+// confirms the kill. A harness may start several
 // invocations at once, each with a share of the tests; they share the pass's
 // files and decide the same way.
 //
@@ -1800,6 +1801,25 @@ export function ranInWorker(claimed, attemptId) {
         return false;
     const strong = globalThis[Symbol.for("supercov.strongMutation")];
     return Boolean(strong?.requestHits?.get?.(`${attemptId}\0${claimed.mutant}`));
+}
+
+/**
+ * Whether a mutant attempt that failed or ran out of time keeps its worker
+ * for the next copy: Playwright ends a worker after a test fails, to start
+ * the next test in a new one with a new browser, and on a large app's e2e
+ * suite a failed attempt was one in seven. The failure is the mutant's, in
+ * the app it was switched on in, and the worker's process ran none of it
+ * (`ranInWorker`), so the worker is as before. The attempt is marked as
+ * expected to end so (`expectedStatus`), which Playwright reads after the
+ * test's fixtures are torn down; its verdict is read from its status, as
+ * before. A control that fails (no mutant) still ends its worker, and so
+ * does an attempt whose mutant ran in the worker's own process. A kill is
+ * confirmed by its test's next control on the same server, as before: a
+ * worker the failure did leave unfit fails that control, and puts the kill
+ * in doubt.
+ */
+export function keepsWorker(claimed, ranHere, status) {
+    return claimed?.kind === "mutant" && !ranHere && (status === "failed" || status === "timedOut");
 }
 
 /**
