@@ -20,7 +20,7 @@ import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
-import { PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchStall } from "./playwrightStrong.mjs";
+import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -265,6 +265,8 @@ class CoveragePhaseController {
     pageRegistrations = new WeakMap();
     scriptUpdate = Promise.resolve();
     proxyCache = new WeakMap();
+    // Each proxy's Playwright object: calls made on it are not the test's.
+    proxyTargets = new WeakMap();
     runtimeSnapshots;
     // Contexts whose creation the collector did not observe: it does not know
     // what `extraHTTPHeaders` their owner configured, so it must not rewrite
@@ -304,14 +306,16 @@ class CoveragePhaseController {
     workerEvidenceMissing = false;
     // A strong attempt's: the test's default timeouts (`watchWaits`), the
     // calls it made on Playwright's objects that have not settled, each with
-    // when its own timeout ends it, the newest of them, and since when its
-    // pages have sent and answered no request (`stall`).
+    // when its own timeout ends it, the newest of them, since when its pages
+    // have sent and answered no request (`stall`), and the requests they sent
+    // that are not answered yet (`pageWork`).
     waitTimeouts;
     waits = new Set();
     newestWait;
     testCalledAt;
     matcherSite;
     quietSince = Date.now();
+    unanswered = new Set();
     disposed = false;
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
@@ -643,6 +647,9 @@ class CoveragePhaseController {
             parts.push(`(${activatePageMutant})(${JSON.stringify(mutant === "-"
                 ? { file: null, index: -1, marker: PAGE_TIMEOUT_MARKER }
                 : { file: mutant.slice(0, at), index: Number(mutant.slice(at + 1)), marker: PAGE_TIMEOUT_MARKER })});`);
+            // What the document has yet to do, for a stalled attempt's
+            // watch: before the page's own scripts set a timer.
+            parts.push(`(${watchPageWork})();`);
         }
         parts.push(`(${announceAttempt})(${JSON.stringify({
             attemptId: this.scope.attemptId,
@@ -685,10 +692,15 @@ class CoveragePhaseController {
         // A strong attempt's pages are busy while they send or have
         // answered a request: not stalled.
         if (this.waitTimeouts) {
-            const busy = () => {
+            const sent = (request) => {
                 this.quietSince = Date.now();
+                this.unanswered.add(request);
             };
-            listeners.push(["request", busy], ["requestfinished", busy], ["requestfailed", busy]);
+            const answered = (request) => {
+                this.quietSince = Date.now();
+                this.unanswered.delete(request);
+            };
+            listeners.push(["request", sent], ["requestfinished", answered], ["requestfailed", answered]);
         }
         for (const [event, listener] of listeners)
             context.on(event, listener);
@@ -847,6 +859,23 @@ class CoveragePhaseController {
         const now = this.waitTimeouts[kind];
         this.waitTimeouts[kind] = now > 0 ? Math.min(now, ms) : ms;
     }
+    /**
+     * What the test's pages could still do that may end a stalled wait
+     * before `limitAt` (`pendingBefore`), asked of every frame of every page
+     * at once.
+     */
+    async pageWork(limitAt) {
+        // The pages themselves, not the test's view of them: a question
+        // asked through that would be a call of the test's, its newest.
+        const pages = this.allPages().map((page) => this.proxyTargets.get(page) ?? page).filter((page) => !page.isClosed());
+        const asked = pages.flatMap((page) => page.frames().map(async (frame) => {
+            const answer = await bounded(internally(page, () => frame.evaluate(() => globalThis[Symbol.for("supercov.pageWork")]?.() ?? null)).catch(() => PAGE_GONE), PAGE_ANSWER_MS);
+            return { url: frame.url(), answer: answer === WORKER_TIMED_OUT ? PAGE_BUSY : answer };
+        }));
+        const frames = await Promise.all(asked);
+        const workers = pages.reduce((sum, page) => sum + page.workers().length, 0);
+        return pendingBefore({ frames, requests: this.unanswered.size, workers, limitAt, now: Date.now() });
+    }
     /** What a strong attempt is stalled on before `limitAt`, if it is, and what it waits on now. */
     stall(limitAt) {
         const newest = this.newestWait;
@@ -941,6 +970,7 @@ class CoveragePhaseController {
             },
         });
         this.proxyCache.set(target, proxy);
+        this.proxyTargets.set(proxy, target);
         // Playwright's built-in `page` fixture is created through the wrapped
         // worker-scoped browser. The test-scoped fixture sees that proxy again;
         // treating our own proxy as a fresh target would nest wrappers, emit two
@@ -2030,7 +2060,7 @@ const instrumentedFixtures = {
             // state in it: the next test gets a new worker.
             let restartWorker = false;
             // A mutant attempt that stalls ends there, a timeout.
-            const stall = watchStall(testInfo, strong, (limitAt) => controller.stall(limitAt));
+            const stall = watchStall(testInfo, strong, (limitAt) => controller.stall(limitAt), (limitAt) => controller.pageWork(limitAt));
             try {
                 await use();
             }

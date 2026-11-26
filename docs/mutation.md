@@ -576,9 +576,14 @@ no mutants shows none of this.
   ends sooner, a `timeout` too, once it has stalled: its test's own code has
   run for longer than any run of the test that passed (baseline × 1.5 + 1 s)
   and waits on a Playwright call that cannot end by its own timeout before the
-  limit, its pages quiet for a second. An `expect` that gives up before the
-  limit still fails the test, a kill, and a page still sending requests runs
-  on. Nothing needs setting. Each timeout's verdict says what it waited on and
+  limit, its pages quiet for a second with nothing left in them that could
+  end the wait before the limit: no timer, animation frame or ending
+  animation due before it, no request unanswered, no WebSocket open, no
+  worker. An `expect` that gives up before the limit still fails the test, a
+  kill; a page still sending requests runs on; and so does one that would
+  poll again on a timer before the limit, to its limit, where a later poll
+  may answer the wait (a timeout there says it `ran to its limit to
+  confirm`, and the summary counts those). Nothing needs setting. Each timeout's verdict says what it waited on and
   where, for example `stopped at 2.5 s of its 6.5 s time limit, ..., waiting
   on Locator.click (#save) at tests/save.spec.ts:12:20`, and the summary says
   how much time ending them early saved. A worker is kept after a mutant

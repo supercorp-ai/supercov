@@ -106,6 +106,10 @@ const TIME_LIMIT_REASON: &str = "ran past its time limit";
 /// How a verdict whose attempt stalled before its time limit begins: ended
 /// there as a timeout (`playwrightStrong.mjs`, `watchStall`).
 const STALLED_REASON: &str = "stopped at ";
+/// What a timeout's reason says where its attempt stalled while its pages
+/// could still end the wait (a timer due, a request unanswered), and ran on
+/// to its limit (`playwrightStrong.mjs`, `CONFIRMED_AT_LIMIT`).
+const CONFIRMED_REASON: &str = "it ran to its limit to confirm";
 
 /// The time a timeout that stalled did not wait, from its reason: `stopped
 /// at 2.5 s of its 6.5 s time limit, ...` saved 4 s. `None` for any other
@@ -1037,21 +1041,17 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
             "firstTier": {"candidates": first_tier.candidates, "seconds": first_tier.ms / 1000},
         });
     }
-    let timeouts_saying = |start: &str| {
+    let timeouts_saying = |said: &dyn Fn(&str) -> bool| {
         asked
             .iter()
             .filter_map(|(id, _)| verdicts.get(id))
             .filter(|verdict| verdict.status == "timeout")
-            .filter(|verdict| {
-                verdict
-                    .reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.starts_with(start))
-            })
+            .filter(|verdict| verdict.reason.as_deref().is_some_and(said))
             .count()
     };
-    let limited = timeouts_saying(TIME_LIMIT_REASON);
-    let stalled = timeouts_saying(STALLED_REASON);
+    let limited = timeouts_saying(&|reason| reason.starts_with(TIME_LIMIT_REASON));
+    let stalled = timeouts_saying(&|reason| reason.starts_with(STALLED_REASON));
+    let confirmed = timeouts_saying(&|reason| reason.contains(CONFIRMED_REASON));
     // What ending them where they stalled saved: each one's limit less the
     // time it ran, as its reason says.
     let saved_ms = asked
@@ -1062,7 +1062,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .sum::<u64>();
     if limited + stalled > 0 {
         data["timeLimit"] = json!({"factor": factor, "constantMs": 5000, "timedOut": limited,
-            "stalled": stalled, "stalledSavedMs": saved_ms});
+            "stalled": stalled, "stalledSavedMs": saved_ms, "confirmedAtLimit": confirmed});
     }
     if !carried.from.is_empty() || !carried.not_kept.is_empty() {
         data["carried"] = carried_json(&carried);
@@ -1522,6 +1522,14 @@ fn plan_text(data: &Value) -> String {
                 "  {limited} timeout(s) ran past their time limit: {}x the test's baseline + {} s\n",
                 data["timeLimit"]["factor"],
                 data["timeLimit"]["constantMs"].as_u64().unwrap_or(0) / 1000
+            ));
+        }
+        if let Some(confirmed) = data["timeLimit"]["confirmedAtLimit"]
+            .as_u64()
+            .filter(|n| *n > 0)
+        {
+            extra.push_str(&format!(
+                "  {confirmed} of them confirmed by running to the limit: they stalled where their pages could still end the wait (a timer due, a request unanswered)\n"
             ));
         }
         if let Some(stalled) = data["timeLimit"]["stalled"].as_u64().filter(|n| *n > 0) {
@@ -4050,6 +4058,16 @@ mod tests {
                 "  7 timeout(s) ran past their time limit: 1.5x the test's baseline + 5 s\n"
             ) && !limited.contains("stalled"),
             "{limited}"
+        );
+        // Of them, those that stalled where their pages could still end the
+        // wait, and ran on to the limit.
+        let confirmed = plan_text(&json!({"run": "r1", "summary": summary,
+            "timeLimit": {"factor": 1.5, "constantMs": 5000, "timedOut": 7, "stalled": 0, "confirmedAtLimit": 2}}));
+        assert!(
+            confirmed.contains(
+                "  7 timeout(s) ran past their time limit: 1.5x the test's baseline + 5 s\n  2 of them confirmed by running to the limit: they stalled where their pages could still end the wait (a timer due, a request unanswered)\n"
+            ),
+            "{confirmed}"
         );
         // Timeouts that stalled before their limit, and none at it.
         let stalled = plan_text(&json!({"run": "r1", "summary": summary,

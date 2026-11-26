@@ -51,9 +51,14 @@
 // time a run of its test that passed took (its baseline × the factor + 1 s),
 // waiting on a Playwright call that cannot end by its own timeout before the
 // limit (a click with no timeout, an `expect` given 15 s), with its pages
-// quiet (no request sent or answered for a second). Nothing it waits on can
-// make it fail before the limit, and no passing run took that long: the limit
-// would end it as a `timeout` all the same, later.
+// quiet (no request sent or answered for a second) and nothing left in them
+// that could end the wait before the limit (`pendingBefore`): no timer,
+// animation frame or ending animation due before it, no request unanswered,
+// no open WebSocket, no worker. Nothing it waits on can make it fail before
+// the limit, nothing the page has yet to do can make it pass, and no passing
+// run took that long: the limit would end it as a `timeout` all the same,
+// later. Where the page could still end the wait (it polls on a timer), the
+// attempt runs to its limit: its verdict is whatever that run gives.
 //
 // This module holds what the config, the fixture (playwright.mjs) and the
 // reporter (playwrightStrongReporter.mjs) share.
@@ -71,6 +76,12 @@ const STALL_CONSTANT_MS = 1_000;
 const QUIET_MS = 1_000;
 // How often a stalled attempt is looked for.
 const STALL_POLL_MS = 100;
+// How long a page has to say what it has yet to do; one that cannot answer is
+// busy.
+export const PAGE_ANSWER_MS = 1_000;
+// How soon a stall the page could still end, with nothing due at a known
+// time (a request unanswered, a socket open), is looked at again.
+const DOUBT_RETRY_MS = 500;
 // Playwright's calls that wait for a navigation, under its navigation timeout.
 const NAVIGATIONS = new Set(["goto", "reload", "goBack", "goForward", "waitForURL", "waitForNavigation", "waitForLoadState"]);
 // An API request's own timeout where nothing sets one (Playwright's default).
@@ -208,16 +219,24 @@ export function limitOf(baselineMs, factor) {
     return Math.ceil(baselineMs * factor + TIMEOUT_CONSTANT_MS);
 }
 
+/** What a timeout's reason says where the attempt ran to its limit past a stall its pages could have ended. */
+export const CONFIRMED_AT_LIMIT = "it ran to its limit to confirm";
+
 /** What a verdict says of an attempt that ran out of its time limit, or stalled before it. */
 function limitReason(attempt) {
     const seconds = (ms) => `${(ms / 1000).toFixed(1)} s`;
     const waiting = attempt.waitingOn ? `, waiting on ${attempt.waitingOn}` : "";
     if (attempt.stalledAtMs !== undefined)
-        return `stopped at ${seconds(attempt.stalledAtMs)} of its ${seconds(attempt.limitMs)} time limit, past every run of the test that passed (${attempt.timeoutFactor} × its ${seconds(attempt.baselineMs)} baseline + ${STALL_CONSTANT_MS / 1000} s), its pages quiet${waiting}, which cannot end before the limit`;
+        return `stopped at ${seconds(attempt.stalledAtMs)} of its ${seconds(attempt.limitMs)} time limit, past every run of the test that passed (${attempt.timeoutFactor} × its ${seconds(attempt.baselineMs)} baseline + ${STALL_CONSTANT_MS / 1000} s), its pages quiet with nothing due before the limit${waiting}, which cannot end before the limit`;
     const why = attempt.limitMs < limitOf(attempt.baselineMs, attempt.timeoutFactor)
         ? "the test's own timeout"
         : `${attempt.timeoutFactor} × its ${seconds(attempt.baselineMs)} baseline + ${TIMEOUT_CONSTANT_MS / 1000} s`;
-    return `ran past its time limit of ${seconds(attempt.limitMs)} (${why})${waiting}`;
+    // It stalled where its pages could still end the wait: the limit, not
+    // the stall, decided it.
+    const confirmed = attempt.doubtedAtMs !== undefined
+        ? `; it stalled at ${seconds(attempt.doubtedAtMs)}, with ${attempt.doubtedBy} that could still end the wait, so ${CONFIRMED_AT_LIMIT}`
+        : "";
+    return `ran past its time limit of ${seconds(attempt.limitMs)} (${why})${waiting}${confirmed}`;
 }
 
 /**
@@ -274,6 +293,160 @@ export function stalledOn({ waits, newest, limitAt, quietSince, now }) {
     return newest;
 }
 
+/**
+ * What a page could still do that may end a wait before `limitAt`, as one
+ * phrase, and when to ask again (`retryAt`); `undefined` where nothing can.
+ * `frames` is each frame's answer to `watchPageWork`'s query: its earliest
+ * due timer, animation frame or ending animation (`due`, ms since the epoch,
+ * or null) and its open sockets; `null` where the frame has no watch (an
+ * empty one, `about:blank`, has nothing to run), `PAGE_BUSY` where it did not
+ * answer in time, `PAGE_GONE` where its document went away meanwhile.
+ * `requests` are those sent and not yet answered, `workers` the page workers
+ * running.
+ */
+export function pendingBefore({ frames, requests, workers, limitAt, now }) {
+    const again = { retryAt: now + DOUBT_RETRY_MS };
+    if (requests > 0)
+        return { because: `${requests} unanswered request(s)`, ...again };
+    if (workers > 0)
+        return { because: `${workers} worker(s) running in its pages`, ...again };
+    let due = Infinity;
+    for (const { url, answer } of frames) {
+        if (answer === PAGE_BUSY)
+            return { because: "a page that did not answer", ...again };
+        if (answer === PAGE_GONE)
+            return { because: "a page loading a new document", ...again };
+        if (answer === null || answer === undefined) {
+            if (url === "about:blank" || url === "")
+                continue;
+            return { because: `a frame with no watch on its timers (${url})`, ...again };
+        }
+        if (answer.sockets > 0)
+            return { because: `${answer.sockets} open WebSocket(s)`, ...again };
+        if (typeof answer.due === "number")
+            due = Math.min(due, answer.due);
+    }
+    if (due < limitAt)
+        return { because: `a timer due in ${(Math.max(0, due - now) / 1000).toFixed(1)} s`, retryAt: Math.max(due, now) + STALL_POLL_MS };
+    return undefined;
+}
+/** A frame that did not answer in time. */
+export const PAGE_BUSY = "busy";
+/** A frame whose document went away while it was asked. */
+export const PAGE_GONE = "gone";
+
+/**
+ * Keeps what a document has yet to do that could change it: its timers,
+ * animation frames and idle callbacks, its WebSockets; an init script,
+ * before the page's own scripts. `globalThis[Symbol.for("supercov.pageWork")]()`
+ * answers with the earliest of them due (a running animation that ends
+ * counts at its end; media that plays, now) and the sockets open. The page's
+ * functions keep their behaviour: each call goes to the browser's own, with
+ * what it was given.
+ */
+export function watchPageWork() {
+    const watchKey = Symbol.for("supercov.pageWork");
+    if (globalThis[watchKey])
+        return;
+    const timers = new Map();
+    const frames = new Set();
+    const sockets = new Set();
+    const own = {};
+    for (const name of ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "cancelAnimationFrame", "requestIdleCallback", "cancelIdleCallback"])
+        own[name] = globalThis[name];
+    const forget = (id) => timers.delete(id);
+    const timer = (kind) => function (handler, delay, ...rest) {
+        const ms = Math.max(0, Number(delay) || 0);
+        const entry = { at: Date.now() + ms, every: kind === "setInterval" ? ms : undefined, loose: typeof handler !== "function" };
+        let id;
+        const run = entry.loose || entry.every !== undefined
+            ? handler
+            : function (...args) {
+                forget(id);
+                return handler.apply(this, args);
+            };
+        id = own[kind].call(globalThis, run, delay, ...rest);
+        timers.set(id, entry);
+        return id;
+    };
+    globalThis.setTimeout = timer("setTimeout");
+    globalThis.setInterval = timer("setInterval");
+    // The browser's ids are one pool: either clears either.
+    for (const name of ["clearTimeout", "clearInterval"]) {
+        globalThis[name] = function (id) {
+            forget(id);
+            return own[name].call(globalThis, id);
+        };
+    }
+    const callback = (request, cancel, kind) => {
+        if (typeof own[request] !== "function")
+            return;
+        globalThis[request] = function (handler, ...rest) {
+            let id;
+            const run = typeof handler === "function"
+                ? function (...args) {
+                    frames.delete(`${kind}${id}`);
+                    return handler.apply(this, args);
+                }
+                : handler;
+            id = own[request].call(globalThis, run, ...rest);
+            frames.add(`${kind}${id}`);
+            return id;
+        };
+        globalThis[cancel] = function (id) {
+            frames.delete(`${kind}${id}`);
+            return own[cancel].call(globalThis, id);
+        };
+    };
+    callback("requestAnimationFrame", "cancelAnimationFrame", "frame");
+    callback("requestIdleCallback", "cancelIdleCallback", "idle");
+    if (typeof globalThis.WebSocket === "function") {
+        globalThis.WebSocket = new Proxy(globalThis.WebSocket, {
+            construct(target, args, newTarget) {
+                const socket = Reflect.construct(target, args, newTarget);
+                sockets.add(socket);
+                socket.addEventListener("close", () => sockets.delete(socket));
+                return socket;
+            },
+        });
+    }
+    Object.defineProperty(globalThis, watchKey, {
+        configurable: true,
+        value: () => {
+            const now = Date.now();
+            let due = frames.size > 0 ? now : Infinity;
+            for (const [id, entry] of timers) {
+                if (entry.every !== undefined)
+                    due = Math.min(due, entry.at > now || entry.every === 0 ? Math.max(entry.at, now) : entry.at + Math.ceil((now - entry.at) / entry.every) * entry.every);
+                // A string's timer is not seen to run: past its time by a
+                // second, it ran.
+                else if (entry.loose && entry.at < now - 1_000)
+                    timers.delete(id);
+                else
+                    due = Math.min(due, Math.max(entry.at, now));
+            }
+            const document = globalThis.document;
+            for (const animation of document?.getAnimations?.() ?? []) {
+                const timing = animation.playState === "running" ? animation.effect?.getComputedTiming?.() : undefined;
+                if (timing && Number.isFinite(timing.endTime))
+                    due = Math.min(due, now + Math.max(0, timing.endTime - (Number(timing.localTime) || 0)) / (Math.abs(animation.playbackRate) || 1));
+            }
+            for (const media of document?.querySelectorAll?.("video, audio") ?? []) {
+                if (!media.paused && !media.ended)
+                    due = now;
+            }
+            let open = 0;
+            for (const socket of sockets) {
+                if (socket.readyState === 3)
+                    sockets.delete(socket);
+                else
+                    open += 1;
+            }
+            return { due: Number.isFinite(due) ? due : null, sockets: open };
+        },
+    });
+}
+
 /** When, from its start, a mutant attempt has outlasted every passing run of its test. */
 export function stallWindowOf(baselineMs, factor) {
     return Math.ceil(baselineMs * factor + STALL_CONSTANT_MS);
@@ -282,40 +455,67 @@ export function stallWindowOf(baselineMs, factor) {
 /**
  * Ends a mutant attempt as a timeout once it has stalled (`stalledOn`, asked
  * of `look(limitAt)` every tenth of a second from the end of its window, which
- * counts from the first call the test's own code made, `since`):
- * its test's timeout is set to what it has already run. The watch says when
- * it did so and on what (`stalled`), and, where it went on to its limit, what
- * it last waited on (`waiting`). `stop()` ends the watch.
+ * counts from the first call the test's own code made, `since`), and nothing
+ * its pages have yet to do could end the wait before the limit (`doubt(limitAt)`,
+ * `pendingBefore`'s answer): its test's timeout is set to what it has already
+ * run. A stall its pages could still end is looked at again when that is due,
+ * and meanwhile the attempt goes on. The watch says when it stopped and on
+ * what (`stalled`), when it first stalled where its pages could still end the
+ * wait and why (`doubted`), and, where it went on to its limit, what it last
+ * waited on (`waiting`). `stop()` ends the watch.
  */
-export function watchStall(testInfo, claimed, look) {
+export function watchStall(testInfo, claimed, look, doubt) {
     if (claimed?.kind !== "mutant")
         return undefined;
     const from = claimed.startedAt + stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
     if (from >= claimed.limitAt)
         return undefined;
     const windowMs = stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
-    const watch = { stalled: undefined, waiting: undefined, timer: undefined };
+    const watch = { stalled: undefined, doubted: undefined, waiting: undefined, timer: undefined, stopped: false };
+    // A test whose body has ended (it failed, ran out of time, or its
+    // fixtures are being torn down: Playwright sets its duration then) waits
+    // on nothing of its own: what its teardown closes is not what it waited
+    // on.
+    const ended = () => watch.stopped || testInfo.status !== "passed" || testInfo.duration > 0;
+    const later = (ms) => {
+        watch.timer = setTimeout(check, Math.max(STALL_POLL_MS, ms));
+    };
     const check = () => {
-        // A test whose body has ended (it failed, ran out of time, or its
-        // fixtures are being torn down: Playwright sets its duration then)
-        // waits on nothing of its own: what its teardown closes is not what
-        // it waited on.
-        if (testInfo.status !== "passed" || testInfo.duration > 0)
+        if (ended())
             return;
         const { stalled, waiting, since } = look(claimed.limitAt);
         watch.waiting = waiting;
         // The window counts from the test's first call of its own, not from
         // its claim: setting up its page in a new worker on a loaded machine
         // took seconds, which no baseline holds.
-        if (stalled && Date.now() >= since + windowMs) {
-            watch.stalled = { atMs: Date.now() - claimed.startedAt, waitingOn: stalled };
-            testInfo.setTimeout(Math.max(1, Date.now() - claimed.claimedAt));
+        const pastWindow = Date.now() >= since + windowMs;
+        if (!stalled || !pastWindow) {
+            later(STALL_POLL_MS);
             return;
         }
-        watch.timer = setTimeout(check, STALL_POLL_MS);
+        doubt(claimed.limitAt).then((pending) => {
+            if (ended())
+                return;
+            if (pending) {
+                watch.doubted ??= { atMs: Date.now() - claimed.startedAt, waitingOn: stalled };
+                watch.doubted.because = pending.because;
+                later(pending.retryAt - Date.now());
+                return;
+            }
+            // Still stalled on the same call, once its pages answered.
+            if (look(claimed.limitAt).stalled !== stalled) {
+                later(STALL_POLL_MS);
+                return;
+            }
+            watch.stalled = { atMs: Date.now() - claimed.startedAt, waitingOn: stalled };
+            testInfo.setTimeout(Math.max(1, Date.now() - claimed.claimedAt));
+        }, () => later(STALL_POLL_MS));
     };
     watch.timer = setTimeout(check, Math.max(0, from - Date.now()));
-    watch.stop = () => clearTimeout(watch.timer);
+    watch.stop = () => {
+        watch.stopped = true;
+        clearTimeout(watch.timer);
+    };
     return watch;
 }
 
@@ -323,7 +523,8 @@ export function watchStall(testInfo, claimed, look) {
 export function stallDetails(watch) {
     if (watch?.stalled)
         return { stalledAtMs: watch.stalled.atMs, waitingOn: watch.stalled.waitingOn };
-    return watch?.waiting ? { waitingOn: watch.waiting } : {};
+    const doubted = watch?.doubted ? { doubtedAtMs: watch.doubted.atMs, doubtedBy: watch.doubted.because } : {};
+    return { ...(watch?.waiting ? { waitingOn: watch.waiting } : {}), ...doubted };
 }
 
 /**

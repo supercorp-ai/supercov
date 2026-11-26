@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeCall, ownDeadline, stallDetails, stalledOn, stallWindowOf, watchStall } from "../../runtime/javascript/playwrightStrong.mjs";
+import vm from "node:vm";
+import { CONFIRMED_AT_LIMIT, PAGE_BUSY, PAGE_GONE, describeCall, ownDeadline, pendingBefore, stallDetails, stalledOn, stallWindowOf, watchPageWork, watchStall } from "../../runtime/javascript/playwrightStrong.mjs";
 
 const timeouts = { action: 0, navigation: 0, expect: 5_000, toPass: 0 };
 const deadline = (method, args, extra = {}) => ownDeadline({ method, args, startedAt: 1_000, request: false, timeouts, ...extra });
@@ -78,29 +79,31 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   const now = Date.now();
   const claim = (extra) => ({ kind: "mutant", startedAt: now, claimedAt: now - 5, baselineMs: 1, timeoutFactor: 1, limitAt: now + 60_000, ...extra });
   const running = (extra = {}) => ({ status: "passed", duration: 0, ...extra });
+  // Nothing its pages have yet to do.
+  const idle = async () => undefined;
   // A control, and an attempt whose own timeout ends it before its window, are not watched.
-  assert.equal(watchStall({}, { kind: "control" }, () => ({})), undefined);
+  assert.equal(watchStall({}, { kind: "control" }, () => ({}), idle), undefined);
   // A test that has already ended is looked at no more.
   // A test that has already ended, or whose body has (its fixtures being
   // torn down), is looked at no more.
   for (const info of [running({ status: "timedOut" }), running({ duration: 900 })]) {
-    const ended = watchStall(info, claim(), () => assert.fail("looked at"));
+    const ended = watchStall(info, claim(), () => assert.fail("looked at"), idle);
     await new Promise((done) => setTimeout(done, 1_100));
     ended.stop();
     assert.deepEqual(stallDetails(ended), {});
   }
   // Stalled, but the test's own first call was too recent: the window
   // counts from it, so it goes on, waiting.
-  const recent = watchStall(running({ setTimeout: () => assert.fail("not past its window") }), claim(), () => ({ stalled: "Locator.click (#a)", waiting: "Locator.click (#a)", since: Date.now() }));
+  const recent = watchStall(running({ setTimeout: () => assert.fail("not past its window") }), claim(), () => ({ stalled: "Locator.click (#a)", waiting: "Locator.click (#a)", since: Date.now() }), idle);
   await new Promise((done) => setTimeout(done, 1_150));
   recent.stop();
   assert.deepEqual(stallDetails(recent), { waitingOn: "Locator.click (#a)" });
   // No call of its own yet: never stalled.
-  const unstarted = watchStall(running({ setTimeout: () => assert.fail("no call of its own") }), claim(), () => ({ stalled: "x", waiting: "x" }));
+  const unstarted = watchStall(running({ setTimeout: () => assert.fail("no call of its own") }), claim(), () => ({ stalled: "x", waiting: "x" }), idle);
   await new Promise((done) => setTimeout(done, 1_150));
   unstarted.stop();
-  assert.equal(watchStall({}, undefined, () => ({})), undefined);
-  assert.equal(watchStall({}, claim({ limitAt: now + 500 }), () => ({})), undefined);
+  assert.equal(watchStall({}, undefined, () => ({}), idle), undefined);
+  assert.equal(watchStall({}, claim({ limitAt: now + 500 }), () => ({}), idle), undefined);
   // Waiting, then stalled: its test's timeout is set to the time it has run.
   const since = now - 5_000;
   const looks = [{ waiting: "Locator.click (#a)", since }, { stalled: "Locator.click (#a)", waiting: "Locator.click (#a)", since }];
@@ -109,16 +112,17 @@ test("a stall watch ends a stalled mutant attempt as a timeout, and says what it
   const stalled = await new Promise((done) => {
     const watch = watchStall({ ...running(), setTimeout: (ms) => { set = ms; done(watch); } }, claim(), (limitAt) => {
       asked.push(limitAt);
-      return looks.shift();
-    });
+      return looks.shift() ?? { stalled: "Locator.click (#a)", waiting: "Locator.click (#a)", since };
+    }, idle);
   });
-  assert.deepEqual(asked, [now + 60_000, now + 60_000]);
+  // Looked at again once its pages said they have nothing left to do.
+  assert.deepEqual(asked, [now + 60_000, now + 60_000, now + 60_000]);
   assert.ok(set >= 5, `${set}`);
   assert.equal(stalled.stalled.waitingOn, "Locator.click (#a)");
   assert.ok(stalled.stalled.atMs >= 1_000, `${stalled.stalled.atMs}`);
   assert.deepEqual(stallDetails(stalled), { stalledAtMs: stalled.stalled.atMs, waitingOn: "Locator.click (#a)" });
   // Never stalled: what it last waited on, until stopped.
-  const waiting = watchStall({ ...running(), setTimeout: () => assert.fail("not stalled") }, claim(), () => ({ waiting: "Page.waitForURL" }));
+  const waiting = watchStall({ ...running(), setTimeout: () => assert.fail("not stalled") }, claim(), () => ({ waiting: "Page.waitForURL" }), idle);
   await new Promise((done) => setTimeout(done, 1_150));
   waiting.stop();
   assert.deepEqual(stallDetails(waiting), { waitingOn: "Page.waitForURL" });
@@ -136,4 +140,218 @@ test("a mutant's own failure keeps its worker; a control's, or a mutant that ran
   assert.equal(keepsWorker(mutant, true, "failed"), false);
   assert.equal(keepsWorker({ kind: "control" }, false, "failed"), false);
   assert.equal(keepsWorker(undefined, false, "failed"), false);
+});
+
+test("what a page could still do before the limit puts a stall in doubt", () => {
+  const at = { requests: 0, workers: 0, limitAt: 20_000, now: 10_000 };
+  const frame = (answer, url = "http://app/") => ({ url, answer });
+  // Nothing it has yet to do, or nothing before the limit.
+  assert.equal(pendingBefore({ ...at, frames: [] }), undefined);
+  assert.equal(pendingBefore({ ...at, frames: [frame({ due: null, sockets: 0 })] }), undefined);
+  assert.equal(pendingBefore({ ...at, frames: [frame({ due: 20_000, sockets: 0 })] }), undefined);
+  // An empty frame runs nothing.
+  assert.equal(pendingBefore({ ...at, frames: [frame(null, "about:blank"), frame(undefined, "")] }), undefined);
+  // A timer due before the limit: looked at again once it is due.
+  assert.deepEqual(pendingBefore({ ...at, frames: [frame({ due: 18_000, sockets: 0 }), frame({ due: 12_500, sockets: 0 })] }), { because: "a timer due in 2.5 s", retryAt: 12_600 });
+  assert.deepEqual(pendingBefore({ ...at, frames: [frame({ due: 9_000, sockets: 0 })] }), { because: "a timer due in 0.0 s", retryAt: 10_100 });
+  // What it cannot say when it ends.
+  const again = 10_500;
+  assert.deepEqual(pendingBefore({ ...at, requests: 2, frames: [] }), { because: "2 unanswered request(s)", retryAt: again });
+  assert.deepEqual(pendingBefore({ ...at, workers: 1, frames: [] }), { because: "1 worker(s) running in its pages", retryAt: again });
+  assert.deepEqual(pendingBefore({ ...at, frames: [frame(PAGE_BUSY)] }), { because: "a page that did not answer", retryAt: again });
+  assert.deepEqual(pendingBefore({ ...at, frames: [frame(PAGE_GONE)] }), { because: "a page loading a new document", retryAt: again });
+  assert.deepEqual(pendingBefore({ ...at, frames: [frame(null, "http://ads/")] }), { because: "a frame with no watch on its timers (http://ads/)", retryAt: again });
+  assert.deepEqual(pendingBefore({ ...at, frames: [frame({ due: null, sockets: 1 })] }), { because: "1 open WebSocket(s)", retryAt: again });
+});
+
+/** A document's globals, the browser's functions recorded. */
+function page({ idle = true, socket = true, document } = {}) {
+  let next = 0;
+  const scheduled = new Map();
+  const add = (handler, rest) => {
+    next += 1;
+    scheduled.set(next, { handler, rest });
+    return next;
+  };
+  const schedule = (handler, _delay, ...rest) => add(handler, rest);
+  const frame = (handler) => add(handler, []);
+  const cancel = (id) => scheduled.delete(id);
+  const globals = {
+    setTimeout: schedule,
+    setInterval: schedule,
+    clearTimeout: cancel,
+    clearInterval: cancel,
+    requestAnimationFrame: frame,
+    cancelAnimationFrame: cancel,
+    ...(idle ? { requestIdleCallback: frame, cancelIdleCallback: cancel } : {}),
+    ...(socket
+      ? {
+          WebSocket: class WebSocket {
+            readyState = 1;
+            listeners = [];
+            constructor(url) {
+              this.url = url;
+            }
+            addEventListener(_, listener) {
+              this.listeners.push(listener);
+            }
+            close() {
+              this.readyState = 3;
+              for (const listener of this.listeners) listener();
+            }
+          },
+        }
+      : {}),
+    ...(document ? { document } : {}),
+  };
+  const context = vm.createContext(globals);
+  vm.runInContext(`(${watchPageWork})()`, context);
+  const fire = (id, self) => {
+    const { handler, rest } = scheduled.get(id);
+    scheduled.delete(id);
+    return handler.apply(self, rest);
+  };
+  return { context, run: (code) => vm.runInContext(code, context), // A plain object of this realm.
+    work: () => ({ ...context[Symbol.for("supercov.pageWork")]() }), fire, scheduled };
+}
+
+test("a page's watch keeps the timers, frames and sockets it has yet to run", async () => {
+  const { context, run, work, fire, scheduled } = page();
+  assert.deepEqual(work(), { due: null, sockets: 0 });
+  // Installed once: a second script leaves the first.
+  const wrapped = context.setTimeout;
+  run(`(${watchPageWork})()`);
+  assert.equal(context.setTimeout, wrapped);
+  // A timeout: due at its time, forgotten once it ran, with what it was given.
+  const before = Date.now();
+  const timeout = run("setTimeout(function (value) { globalThis.ran = [String(this), value]; return 7; }, 5000, 'given')");
+  assert.ok(work().due >= before + 5_000 && work().due <= Date.now() + 5_000);
+  assert.equal(fire(timeout, "self"), 7);
+  assert.deepEqual([...context.ran], ["self", "given"]);
+  assert.deepEqual(work(), { due: null, sockets: 0 });
+  // Cleared by either clear, which the browser hears too.
+  for (const clear of ["clearTimeout", "clearInterval"]) {
+    const id = run("setTimeout(() => {}, 100)");
+    run(`${clear}(${id})`);
+    assert.equal(scheduled.has(id), false);
+    assert.equal(work().due, null);
+  }
+  // An interval: its next time, from when it was set.
+  const interval = run("setInterval(() => {}, 1)");
+  await new Promise((done) => setTimeout(done, 20));
+  const due = work().due;
+  assert.ok(due >= Date.now() && due <= Date.now() + 1, `${due}`);
+  run(`clearInterval(${interval})`);
+  run("setInterval(() => {}, 0)");
+  assert.ok(work().due <= Date.now());
+  run(`clearInterval(${interval + 1})`);
+  assert.equal(work().due, null);
+  // A string's timer: due until a second past its time.
+  run("setTimeout('void 0', 0)");
+  assert.ok(work().due <= Date.now());
+  await new Promise((done) => setTimeout(done, 1_050));
+  assert.equal(work().due, null);
+  // An animation frame and an idle callback: due now, until they run.
+  for (const [request, cancelled] of [["requestAnimationFrame", "cancelAnimationFrame"], ["requestIdleCallback", "cancelIdleCallback"]]) {
+    const id = run(`${request}(function (time) { globalThis.frame = [String(this), time]; })`);
+    assert.ok(work().due <= Date.now());
+    fire(id, "self");
+    assert.deepEqual([...context.frame], ["self", undefined]);
+    assert.equal(work().due, null);
+    const other = run(`${request}(() => {})`);
+    run(`${cancelled}(${other})`);
+    assert.equal(work().due, null);
+  }
+  // A handler that is not a function is the browser's to refuse.
+  const refused = run("requestAnimationFrame('not a function')");
+  assert.ok(work().due <= Date.now());
+  run(`cancelAnimationFrame(${refused})`);
+  assert.equal(work().due, null);
+  // A socket, while it is open; it is still the browser's constructor.
+  const sockets = run("[new WebSocket('ws://app/a'), new WebSocket('ws://app/b')]");
+  assert.ok(run("new WebSocket('ws://app/c') instanceof WebSocket"));
+  assert.equal(sockets[0].url, "ws://app/a");
+  assert.equal(work().sockets, 3);
+  sockets[0].close();
+  sockets[1].readyState = 3;
+  assert.equal(work().sockets, 1);
+});
+
+test("a page's watch counts its running animations by their end, and its playing media now", () => {
+  const animations = [
+    { playState: "running", playbackRate: 2, effect: { getComputedTiming: () => ({ endTime: 1_000, localTime: 400 }) } },
+    { playState: "running", playbackRate: 0, effect: { getComputedTiming: () => ({ endTime: 3_000, localTime: undefined }) } },
+    // A spinner, one paused, one with no effect: never due.
+    { playState: "running", playbackRate: 1, effect: { getComputedTiming: () => ({ endTime: Infinity, localTime: 0 }) } },
+    { playState: "paused", playbackRate: 1, effect: { getComputedTiming: () => ({ endTime: 10, localTime: 0 }) } },
+    { playState: "running", playbackRate: 1, effect: null },
+  ];
+  const media = [{ paused: true, ended: false }, { paused: false, ended: true }];
+  const { work } = page({ document: { getAnimations: () => animations, querySelectorAll: () => media } });
+  const before = Date.now();
+  const due = work().due;
+  assert.ok(due >= before + 300 && due <= Date.now() + 300, `${due - before}`);
+  media.push({ paused: false, ended: false });
+  assert.ok(work().due <= Date.now());
+  // A document with neither, and a page with no idle callbacks or sockets.
+  assert.deepEqual(page({ idle: false, socket: false, document: {} }).work(), { due: null, sockets: 0 });
+});
+
+test("a stall its pages could still end goes on, and ends once they could not", async () => {
+  const now = Date.now();
+  const claim = { kind: "mutant", startedAt: now, claimedAt: now - 5, baselineMs: 1, timeoutFactor: 1, limitAt: now + 60_000 };
+  const stalledLook = () => ({ stalled: "Page.waitForResponse", waiting: "Page.waitForResponse", since: now - 5_000 });
+  // A timer due, then nothing: it ends at the second look.
+  const doubts = [{ because: "a timer due in 0.1 s", retryAt: Date.now() }];
+  let set;
+  const ended = await new Promise((done) => {
+    const watch = watchStall({ status: "passed", duration: 0, setTimeout: (ms) => { set = ms; done(watch); } }, claim, stalledLook, async () => doubts.shift());
+  });
+  assert.ok(set >= 5);
+  assert.equal(ended.doubted.because, "a timer due in 0.1 s");
+  assert.deepEqual(stallDetails(ended), { stalledAtMs: ended.stalled.atMs, waitingOn: "Page.waitForResponse" });
+  // Always something to do: it goes on to its limit, and says why.
+  const doubted = watchStall({ status: "passed", duration: 0, setTimeout: () => assert.fail("in doubt") }, claim, stalledLook, async () => ({ because: "1 unanswered request(s)", retryAt: Date.now() + 100 }));
+  await new Promise((done) => setTimeout(done, 1_250));
+  doubted.stop();
+  const details = stallDetails(doubted);
+  assert.equal(details.waitingOn, "Page.waitForResponse");
+  assert.equal(details.doubtedBy, "1 unanswered request(s)");
+  assert.ok(details.doubtedAtMs >= 0);
+  // Its pages answered after the call returned, the test ended, or the
+  // watch stopped: nothing is ended.
+  const calls = [stalledLook(), { waiting: "Page.click" }];
+  const moved = watchStall({ status: "passed", duration: 0, setTimeout: () => assert.fail("moved on") }, claim, () => calls.shift() ?? { waiting: "Page.click" }, async () => undefined);
+  const info = { status: "passed", duration: 0, setTimeout: () => assert.fail("ended") };
+  const finished = watchStall(info, claim, stalledLook, async () => {
+    info.duration = 10;
+    return undefined;
+  });
+  let answer;
+  const stopping = watchStall({ status: "passed", duration: 0, setTimeout: () => assert.fail("stopped") }, claim, stalledLook, () => new Promise((done) => {
+    answer = done;
+  }));
+  // A page whose question failed is asked again.
+  let failures = 0;
+  const failing = watchStall({ status: "passed", duration: 0, setTimeout: () => assert.fail("failed") }, claim, stalledLook, async () => {
+    failures += 1;
+    throw new Error("closed");
+  });
+  await new Promise((done) => setTimeout(done, 1_300));
+  stopping.stop();
+  answer(undefined);
+  await new Promise((done) => setTimeout(done, 50));
+  for (const watch of [moved, finished, failing]) watch.stop();
+  assert.ok(failures >= 2, `${failures}`);
+  assert.equal(stopping.stalled, undefined);
+});
+
+test("a timeout's reason says it ran to its limit past a stall its pages could have ended", async () => {
+  const { verdictOf } = await import("../../runtime/javascript/playwrightStrong.mjs");
+  const attempt = { outcome: "timed-out", limitMs: 16_300, baselineMs: 7_500, timeoutFactor: 1.5, waitingOn: "Page.waitForResponse at a.spec.ts:9:27" };
+  assert.equal(verdictOf(attempt).reason, "ran past its time limit of 16.3 s (1.5 × its 7.5 s baseline + 5 s), waiting on Page.waitForResponse at a.spec.ts:9:27");
+  assert.equal(
+    verdictOf({ ...attempt, doubtedAtMs: 12_400, doubtedBy: "a timer due in 0.1 s" }).reason,
+    `ran past its time limit of 16.3 s (1.5 × its 7.5 s baseline + 5 s), waiting on Page.waitForResponse at a.spec.ts:9:27; it stalled at 12.4 s, with a timer due in 0.1 s that could still end the wait, so ${CONFIRMED_AT_LIMIT}`,
+  );
 });
