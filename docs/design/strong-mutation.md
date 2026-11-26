@@ -1563,7 +1563,12 @@ Each further round a driver asks for (a `restart` record in the results: one
 mutant alone, a serial round, the rest of what did not finish, the main
 round's mutants past one invocation's copies) is a new invocation of the
 command, its output in a log beside the results, run in turn until none asks
-for more. A `rest` round that decides nothing makes what it left an `error`.
+for more. A `rest` round that decides nothing runs what it left one test at a
+time (a `serial` round): side by side, a worker with nothing it could take yet
+ran through a test's copies while another worker's attempt ran, and on a
+loaded runner a round ended with a mutant every candidate kills still waiting
+for its tests, twice, and it was an `error`. What a later round that decides
+nothing leaves is an `error`.
 
 A mutant's candidates are the attempts its weak verdict names, as in Vitest.
 Candidates under another runner (a Vitest test of the same run) are not run

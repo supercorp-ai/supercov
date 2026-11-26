@@ -1667,6 +1667,7 @@ export const WHY = {
     "module-level": "it is a server module's top-level code",
     "by-time": "its code ran for a request that named no test",
     "unfinished": "not every candidate test ran in the shared pass",
+    "unfinished-twice": "not every candidate test ran in two rounds of tests side by side",
     "confirm": "a test killed it beside other mutants' attempts",
     "doubt": "the test that killed it failed without it too, on the same server",
     "unreached": "its candidates passed on the shared server, yet no attempt of theirs ran it there: the requests that reached its code did not carry their test's mutant",

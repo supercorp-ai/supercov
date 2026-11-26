@@ -474,9 +474,20 @@ export default class SupercovPlaywrightStrongReporter {
         // signal stopped leaves its mutants without a verdict, for the next
         // pass (a confirmation round stopped before its first test made two
         // mutants of a 60 s pass `error`s).
+        // A `rest` round's mutant runs one test at a time first: beside one
+        // another, a worker with nothing it could take yet ran through a
+        // test's copies while another worker's attempt ran, and the round
+        // ended with mutants still waiting for that test. One whose every
+        // candidate kills it (a test that fails without it is left out)
+        // was an `error` on a loaded runner. One at a time, no copy is spent
+        // so; what a serial round leaves is the `error`.
         if (kind !== "main" && !decided && !stopped) {
-            for (const job of rest)
-                write({ id: job.id, status: "error", reason: "its tests did not finish, in two rounds", tests: 0, durationMs: 0 });
+            for (const job of rest) {
+                if (kind === "rest")
+                    serial.push({ ...job, reason: "unfinished-twice" });
+                else
+                    write({ id: job.id, status: "error", reason: "its tests did not finish, in two rounds", tests: 0, durationMs: 0 });
+            }
             rest.splice(0, rest.length);
         }
         // A mutant run alone with the whole command started with it, whose
