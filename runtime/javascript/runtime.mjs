@@ -181,6 +181,7 @@ for (const name of [
   "__SUPERCOV_BUFFER_FLUSHERS__",
   "__SUPERCOV_CHILD_PATCHED__",
   "__SUPERCOV_COLUMNS_SNAPSHOT__",
+  "__SUPERCOV_WHOLE_COLUMNS__",
   "__SUPERCOV_COMPACT_SNAPSHOT__",
   "__SUPERCOV_COVERAGE_SNAPSHOT__",
   "__SUPERCOV_DIRECT_RUNTIME__",
@@ -600,6 +601,7 @@ function coverageSnapshotColumns() {
   };
 }
 function resetCoverage(testId2) {
+  pushedEvidence = { generation: pushedEvidence.generation + 1, events: 0, hits: 0 };
   state.decisions.clear();
   state.hits.clear();
   state.eventLog = emptyEventLog();
@@ -701,7 +703,83 @@ runtimeGlobal.__SUPERCOV_COMPACT_SNAPSHOT__ = compactSnapshotText;
 // event became an object, then a row, and the collector made each an object
 // again and then a column: on a page of 30,000 events, 26 ms at the end of
 // each test against 7.
-runtimeGlobal.__SUPERCOV_COLUMNS_SNAPSHOT__ = () => JSON.stringify(coverageSnapshotColumns());
+runtimeGlobal.__SUPERCOV_COLUMNS_SNAPSHOT__ = () => pushedEvidence.events > 0 || pushedEvidence.hits > 0 ? JSON.stringify(evidenceTail()) : JSON.stringify(coverageSnapshotColumns());
+// A page's evidence, handed to the Playwright collector while the page is
+// idle, as Playwright's own tracing streams its snapshots: the events and hits
+// recorded since the last hand-over, through the binding a leaving document
+// uses (`__supercovLeaving`), unawaited. At the end of a test the collector
+// then reads only what came after the last batch (evidenceTail), which was
+// most of what each test waited for at its end: on a large app, 290 KB a test
+// built, sent and parsed on the test's own time. Batches name this document
+// and its reset generation; a batch the collector did not keep in full, or a
+// document it has none of, is read whole, as before.
+// Named when it first hands something over: a page that never does reads no
+// clock for it.
+var evidenceDocumentName;
+function evidenceDocument() {
+  if (evidenceDocumentName === void 0)
+    evidenceDocumentName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return evidenceDocumentName;
+}
+var pushedEvidence = { generation: 0, events: 0, hits: 0 };
+var evidencePushScheduled = false;
+function scheduleEvidencePush() {
+  if (evidencePushScheduled || typeof runtimeGlobal.__supercovLeaving !== "function")
+    return;
+  evidencePushScheduled = true;
+  const later = typeof runtimeGlobal.requestIdleCallback === "function" ? (work) => runtimeGlobal.requestIdleCallback(work) : (work) => setTimeout(work, 0);
+  later(pushEvidence);
+}
+function eventRows(from) {
+  const log = state.eventLog;
+  const rows = [];
+  for (let position = from; position < log.id.length; position += 1)
+    rows.push([log.type[position], log.id[position], log.vector[position], log.timestampMs[position], log.phaseId[position], log.environment[position]]);
+  return rows;
+}
+function hitsFrom(from) {
+  const hits = [];
+  let index = 0;
+  for (const id of state.hits) {
+    if (index >= from)
+      hits.push(id);
+    index += 1;
+  }
+  return hits;
+}
+function pushEvidence() {
+  evidencePushScheduled = false;
+  try {
+    const events = state.eventLog.id.length;
+    const hits = state.hits.size;
+    if (events === pushedEvidence.events && hits === pushedEvidence.hits)
+      return;
+    const batch = { supercovBatch: 1, document: evidenceDocument(), generation: pushedEvidence.generation, events: pushedEvidence.events, hits: pushedEvidence.hits, eventRows: eventRows(pushedEvidence.events), hitIds: hitsFrom(pushedEvidence.hits) };
+    runtimeGlobal.__supercovLeaving(JSON.stringify(batch));
+    pushedEvidence = { generation: pushedEvidence.generation, events, hits };
+  } catch (e) {
+  }
+}
+// What the collector has not had of this document's evidence, and the rest
+// of it whole: decisions, logicals and comparisons are small and change in
+// place.
+function evidenceTail() {
+  return {
+    supercovTail: 1,
+    document: evidenceDocument(),
+    generation: pushedEvidence.generation,
+    events: pushedEvidence.events,
+    hits: pushedEvidence.hits,
+    eventRows: eventRows(pushedEvidence.events),
+    hitIds: hitsFrom(pushedEvidence.hits),
+    decisions: decisionSnapshot(),
+    logicals: logicalSnapshot(),
+    ...(state.comparisons.size ? { comparisons: comparisonSnapshot() } : {})
+  };
+}
+// The whole snapshot as columns, for a collector that has not kept this
+// document's batches.
+runtimeGlobal.__SUPERCOV_WHOLE_COLUMNS__ = () => JSON.stringify(coverageSnapshotColumns());
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
 // A dedicated worker blocked in `Atomics.wait` runs no evaluation, so the
 // test runner could not read its evidence and reported the test as a lower
@@ -2472,6 +2550,8 @@ function recordBrowserEvent(type, id, vector, timestampMs, phaseId, environment)
   if (!recordEvent(state, type, id, vector, timestampMs, phaseId, environment))
     return false;
   workerEvidenceChanged();
+  if (isBrowser)
+    scheduleEvidencePush();
   return true;
 }
 // A hit is recorded once per context, as a statement probe's is: selections,
