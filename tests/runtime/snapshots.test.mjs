@@ -89,3 +89,45 @@ test("comparison outcomes are kept, each once per probe, and left out when there
   ]);
   assert.equal("comparisons" in mergeSnapshots([{ hits: ["a"] }]), false);
 });
+
+test("a snapshot read as columns is what the collector made of a compact one, and its events come back for a merge", async () => {
+  const runtime = await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href);
+  const { columnarEvents, eventsOfColumns } = await import("../../runtime/javascript/snapshots.mjs");
+  const columns = () => JSON.parse(globalThis.__SUPERCOV_COLUMNS_SNAPSHOT__());
+  // What the collector stored before: the compact text expanded, then as columns.
+  const before = () => columnarEvents(expandSnapshot(JSON.parse(globalThis.__SUPERCOV_COMPACT_SNAPSHOT__(globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__()))));
+  runtime.enableRuntimeSnapshotEvidence();
+  runtime.resetCoverage();
+  // Nothing recorded: no columns, an empty list of events.
+  assert.equal(JSON.stringify(columns()), JSON.stringify(before()));
+  assert.equal(JSON.stringify(eventsOfColumns(columns())), JSON.stringify(globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__()));
+  const file = runtime.registerProbeV2({ key: "00000000000000cc", points: 3, decisionWidths: [2], defaultCount: 0, selectionPoints: [3, 0], selectionTrees: [] });
+  const previous = globalThis.__SUPERCOV_PHASE_ID__;
+  try {
+    runtime.coverageHit("outside-a-phase");
+    globalThis.__SUPERCOV_PHASE_ID__ = "attempt:phase:1";
+    runtime.activateCoverageScope();
+    file.hit(0);
+    file.hit(1);
+    runtime.mcdcEndV2(file, 0, 1 + 2 + 3, false);
+    runtime.compareV2("f.ts:1:2", 1, 2, "<");
+    globalThis.__SUPERCOV_PHASE_ID__ = "attempt:phase:2";
+    runtime.activateCoverageScope();
+    file.hit(0);
+    runtime.mcdcEndV2(file, 0, 1 + 1, true);
+  } finally {
+    globalThis.__SUPERCOV_PHASE_ID__ = previous;
+  }
+  const read = columns();
+  assert.ok(read.eventColumns.id.length >= 5, JSON.stringify(read));
+  assert.equal(JSON.stringify(read), JSON.stringify(before()));
+  // The events as the runtime built them, which a merge with a document that
+  // left reads.
+  const objects = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__();
+  assert.equal(JSON.stringify(eventsOfColumns(read).events), JSON.stringify(objects.events));
+  assert.equal(JSON.stringify(mergeSnapshots([eventsOfColumns(read)])), JSON.stringify(mergeSnapshots([objects])));
+  // Anything without columns passes through.
+  assert.equal(eventsOfColumns(objects), objects);
+  assert.equal(eventsOfColumns(undefined), undefined);
+  runtime.resetCoverage();
+});

@@ -72,6 +72,65 @@ compare a cold package, browser, build, or VM cache with a warm one. Supercov
 never runs the test command a second time automatically because suites may write
 data, call paid services, or be intentionally non-repeatable.
 
+### Where a browser suite's time goes
+
+A Next.js app's Playwright suite (170 tests on one worker, against a
+production build the suite builds itself, on a 4-CPU runner) takes 12 to 13%
+longer measured than plain when run whole. Each part was timed plain and
+measured on the same machine, an eighth of the suite at a time, which adds up
+to 8%; the rest is the open contexts below:
+
+| Part | Plain | Measured | Why |
+| --- | --- | --- | --- |
+| Supercov's start, before the build | 0.7 s | 1.5 s | Copying the project and instrumenting its sources |
+| `next build` | 52 s | 57 s (+9.5%) | The build compiles the instrumented sources: probes, and source maps that keep stack traces on the author's lines |
+| Server start to the first test | 3.6 s | 5.0 s | The runtime's preload in each process, and a larger server bundle |
+| Tests | 255 s | 272 s (+6.4%) | See below |
+| After the tests | 0.3 s | 1.6 s | Reading the evidence (0.25 s) and publishing the run (0.35 s), and closing the collector |
+
+Most of what the tests add is waiting, not Supercov's own code:
+
+- **Each action tells the browser its phase first.** A click, a fill or a
+  navigation waits for one round trip to every page of the test, about 6 ms
+  on such a runner (822 actions: about 5 s). The page has to know the phase
+  before the action's effects reach it, or the work it does would be credited
+  to the step before. An assertion sends the same message without waiting.
+- **Pages run instrumented code.** The browser does more work for each page
+  the app renders.
+- **A context the suite leaves open is the next tests' as well.** Its pages
+  are told each phase and read at the end of each test, in case they still
+  run code: a suite that opens contexts and never closes them pays a little
+  more with each one. On the suite above, the same test cost about 120 ms more
+  late in a whole run than at the start of a run of an eighth of it.
+
+The server records every test's first hits in each phase as lines of JSON. It
+writes them through a file kept open, and builds each line directly, which
+takes about a third of the time it did before. The collector reads each page's
+evidence in the columns it stores, which takes about a quarter of the time.
+
+### Prove a speed-up changes nothing
+
+A change meant to make measurement faster must leave every answer as it was.
+`scripts/speed/answers.mjs` writes down every answer a run gives: its summary
+and every view of it, every file, line (with its tests and phases) and
+decision (with MC/DC vectors and witness pairs), every test, the mutants and
+their candidates, and every record of the evidence. It replaces what differs
+from run to run by its nature (run, attempt and worker ids, times, process
+ids, paths) with stable names. Two runs of a suite that runs the same way each
+time give files equal byte for byte:
+
+```sh
+node scripts/speed/answers.mjs ./old/supercov . "$OLD_RUN" old.json
+node scripts/speed/answers.mjs ./new/supercov . "$NEW_RUN" new.json
+diff old.json new.json
+```
+
+A suite whose timing decides what each phase runs (a page that renders after
+a fetch, a server that answers while the next step starts) differs even
+between two runs of one binary. The `speed` label's benchmark therefore
+compares each binary's two rounds as well as the binaries
+(`--quick` for its large apps), and the counts are read against each other.
+
 ### Python subprocesses
 
 Interpreter count matters as well as test count. Each child initializes the
