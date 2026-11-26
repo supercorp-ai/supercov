@@ -318,6 +318,7 @@ impl DockerProxy {
             open_what_containers_wrote(&self.upstream, &self.shared.settings, copy.uid());
         }
         self.stop.store(true, Ordering::Release);
+        let _ = std::os::unix::net::UnixStream::connect(&self.socket);
         // Always there: only `finish`, which takes the relay, takes it.
         let _ = self.thread.take().map(JoinHandle::join);
         remove_socket(&self.socket);
@@ -345,6 +346,9 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
     // the same way as one stopped later.
     loop {
         match listener.accept() {
+            // `finish` connects once to wake the relay: that connection is
+            // nobody's.
+            Ok(_) if stop.load(Ordering::Acquire) => break,
             Ok((client, _)) => {
                 let _ = client.set_nonblocking(false);
                 let shared = Arc::clone(shared);
@@ -355,12 +359,32 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
                     });
             }
             // Nothing waiting, or a connection that failed before it was
-            // taken: look again shortly.
-            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            // taken: wait for the next one. Looking again every 10 ms woke
+            // the relay a hundred times a second for the whole run, most
+            // runs never using it; `finish` wakes it with a connection, and
+            // the wait ends by itself in case that connection cannot be made.
+            Err(_) => wait_readable(listener, Duration::from_millis(250)),
         }
         if stop.load(Ordering::Acquire) {
             break;
         }
+    }
+}
+
+/// Until `listener` has a connection to take, or `limit` has passed.
+fn wait_readable(listener: &UnixListener, limit: Duration) {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let milliseconds = libc::c_int::try_from(limit.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: one valid pollfd, for the call's length.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+    if ready < 0 {
+        // Interrupted, or a poll that cannot run: never spin.
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
