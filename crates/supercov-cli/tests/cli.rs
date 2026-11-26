@@ -26712,7 +26712,10 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
         .unwrap_or_else(|| panic!("no main pass\n{reply}\n{}", ran.stderr()))
         .clone();
     assert_eq!(main["serialFiles"], 0, "{main}\n{reply}");
-    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{listed}\n{}", ran.stderr());
 }
 
 /// A Playwright plan of thousands of mutants, each with every test a

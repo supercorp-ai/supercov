@@ -1,0 +1,87 @@
+name: Flake proof
+# Runs named tests many times each under CPU load: 15 processes that spin
+# beside them on a 4-processor runner. Which tests, how often and how many
+# jobs share them come from .github/flake-proof.json.
+on:
+  push:
+    branches: [proof/**]
+    paths:
+      - .github/flake-proof.json
+      - .github/workflows/flake-proof.yml
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: plan
+        run: |
+          echo "matrix=$(jq -c '{include: [.tests[] as $t | range(0; .shards) as $s | {test: $t, shard: $s}]}' .github/flake-proof.json)" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: plan
+    name: ${{ matrix.test }} ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - run: npm ci
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx playwright install-deps chromium
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          prefix: apt-chromium-${{ runner.os }}-${{ runner.arch }}-
+      - run: npx playwright install chromium
+      - run: cargo test -p supercov --test "${TEST%%/*}" --no-run
+        env:
+          TEST: ${{ matrix.test }}
+      - name: Run under load
+        env:
+          TEST: ${{ matrix.test }}
+          SUPERCOV_REQUIRE_BROWSER: "1"
+          SUPERCOV_REQUIRE_RUST_WASM: "1"
+        run: |
+          runs=$(jq -r '.runs' .github/flake-proof.json)
+          shards=$(jq -r '.shards' .github/flake-proof.json)
+          hogs=$(jq -r '.hogs' .github/flake-proof.json)
+          mine=$(( (runs + shards - 1) / shards ))
+          for i in $(seq "$hogs"); do (while :; do :; done) & done
+          mkdir -p "$RUNNER_TEMP/out"
+          pass=0; fail=0
+          for i in $(seq "$mine"); do
+            start=$(date +%s)
+            if cargo test -q -p supercov --test "${TEST%%/*}" -- --exact "${TEST#*/}" > "$RUNNER_TEMP/out/$i.log" 2>&1; then
+              pass=$((pass + 1)); echo "run $i: pass ($(( $(date +%s) - start )) s)"
+            else
+              fail=$((fail + 1)); echo "run $i: FAIL ($(( $(date +%s) - start )) s)"
+              grep -A12 "panicked" "$RUNNER_TEMP/out/$i.log" | cut -c1-3000
+            fi
+          done
+          echo "$TEST shard ${{ matrix.shard }}: $pass passed, $fail failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '%s\t%s\t%s\t%s\n' "$TEST" "${{ matrix.shard }}" "$pass" "$fail" > "$RUNNER_TEMP/out/tally.tsv"
+          kill $(jobs -p) 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proof-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
