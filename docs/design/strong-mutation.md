@@ -1124,6 +1124,14 @@ a mutant runs that candidate again in the next pass; an attempt Playwright
 reports as interrupted settles nothing. A kill that ended before the stop,
 waiting only for its control, still stands.
 
+The drivers that judge as they go, Vitest's (`vitestStrongReporter.mjs`) and
+the one of jobs (`strongJobs.mjs`), write no verdict once `stopped-at` is
+there: what they judge then comes from copies and jobs being stopped under
+their tests. A copy whose process the stop ended before the pass's own did
+not finish its file, and the mutant of a test that waits five minutes was
+saved as `killed` on a macOS runner the budget stopped. Its mutant is left
+for the next pass, as one the stop found running is.
+
 **What the pass says as it goes.** Each invocation's runner writes a status
 file (its round, the baselines, attempts and controls so far, the tests
 running and since when, and the work its tests have left), and prints a line
@@ -1589,7 +1597,12 @@ Each further round a driver asks for (a `restart` record in the results: one
 mutant alone, a serial round, the rest of what did not finish, the main
 round's mutants past one invocation's copies) is a new invocation of the
 command, its output in a log beside the results, run in turn until none asks
-for more. A `rest` round that decides nothing makes what it left an `error`.
+for more. A `rest` round that decides nothing runs what it left one test at a
+time (a `serial` round): side by side, a worker with nothing it could take yet
+ran through a test's copies while another worker's attempt ran, and on a
+loaded runner a round ended with a mutant every candidate kills still waiting
+for its tests, twice, and it was an `error`. What a later round that decides
+nothing leaves is an `error`.
 
 A mutant's candidates are the attempts its weak verdict names, as in Vitest.
 Candidates under another runner (a Vitest test of the same run) are not run
@@ -1673,10 +1686,14 @@ time per mutant and its files cheapest first:
   mutant runs again with its file whole (`overturned`).
 - A job's limit is 3× its baseline and 10 s; past it the job's process group
   is stopped, and the mutant is a `timeout` unless a test had already failed.
-  The baselines ran with the machine to themselves, so a job stopped while
-  others ran beside it (which it may only have waited on: the CPU, Cargo's
-  lock on the build directory every job of Rust compiled to wasm builds in)
-  runs again alone first; only one past its limit there is a `timeout`.
+  A stopped job may only have waited: on the jobs beside it (the CPU,
+  Cargo's lock on the build directory every job of Rust compiled to wasm
+  builds in), or on a machine busier than when its baseline ran (other work
+  on it). So it runs again alone, after its tests ran alone without the
+  mutant, with a limit of 3× the slower of that run and its baseline, and
+  10 s; only one past that is a `timeout`. Judged by the baseline alone, a
+  kill and a survivor of a pass over Rust compiled to wasm came back as
+  `timeout`s on a loaded machine.
   A mutant that passed its hit limit (`<results>.timeouts.jsonl`; under
   Browser Mode, sent to node) is a `timeout`.
 - A job that ended without reporting a test its baseline reported (a module

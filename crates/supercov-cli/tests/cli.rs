@@ -30453,6 +30453,55 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
     );
 }
 
+/// A pass told to stop judges nothing from then on: its copies are being
+/// stopped under their tests, and one that ends then says nothing of its
+/// mutant. A pass the budget stopped on a macOS runner saved a mutant whose
+/// test waits five minutes as `killed`. Here the mutant's test stands in for
+/// the stop: it marks the pass as stopping (`stopped-at`, beside its
+/// results, as Supercov does before it signals the command) and its copy's
+/// process exits at once, as one the stop reached before the pass's own
+/// process did. That copy did not finish its file: judged, its mutant was
+/// `killed`; now it has no verdict from this pass.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_ends_once_the_pass_is_stopping_decides_nothing() {
+    let project = vitest_mutants_project("strong-stopping-copy");
+    project.write("src/slow.js", "export const twice = (n) => n * 2;\n");
+    project.write(
+        "test/slow.test.js",
+        "import { writeFileSync } from \"node:fs\";\nimport { dirname, join } from \"node:path\";\nimport { expect, it } from \"vitest\";\nimport { twice } from \"../src/slow.js\";\nit(\"doubles\", () => {\n  const results = process.env.SUPERCOV_STRONG_RESULTS;\n  if (twice(2) !== 4 && results) {\n    writeFileSync(join(dirname(results), \"stopped-at\"), String(Date.now()));\n    process.exit(1);\n  }\n  expect(twice(2)).toBe(4);\n});\n",
+    );
+    project.commit("slow");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/slow.js",
+        "--json",
+    ]);
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let slow = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["id"].as_str().unwrap().starts_with("src/slow.js:"))
+        .collect::<Vec<_>>();
+    assert_eq!(slow.len(), 2, "{listed}");
+    for mutant in slow {
+        assert_ne!(
+            mutant["strong"]["status"],
+            "killed",
+            "{mutant}\n{}",
+            ran.stderr()
+        );
+    }
+}
+
 /// Copies run within the project's own worker limit, each with a pool id
 /// Vitest gave it (1 to `maxWorkers`) that no copy running beside it has: a
 /// setup file that gives each worker its own database by `VITEST_POOL_ID`,

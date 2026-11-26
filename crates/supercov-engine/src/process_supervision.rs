@@ -1823,6 +1823,23 @@ fn groups_apart(processes: &[ProcessSnapshot], own: i32) -> std::collections::BT
         .collect()
 }
 
+/// Waits until `deadline` for `groups`, told to end, to be gone, and then
+/// ends what is left of them with SIGKILL. A command that ended at once on
+/// its signal returned before them: a stopped Playwright pass's web server,
+/// whose process handles the signal (Supercov's own runtime in it writes
+/// what it measured first), outlived the pass on a loaded machine, and the
+/// next pass found its port "already used".
+#[cfg(unix)]
+fn end_groups(groups: &std::collections::BTreeSet<i32>, deadline: Instant) {
+    // SAFETY: signal 0 sends nothing; it asks whether the group has a member.
+    let alive = |group: &&i32| unsafe { libc::kill(-**group, 0) } == 0;
+    while groups.iter().any(|group| alive(&group)) && Instant::now() < deadline {
+        thread::sleep(POLL_INTERVAL);
+    }
+    let left = groups.iter().filter(alive).copied().collect();
+    signal_groups(&left, libc::SIGKILL);
+}
+
 /// Sends `signal` to each of `groups`.
 #[cfg(unix)]
 fn signal_groups(groups: &std::collections::BTreeSet<i32>, signal: i32) {
@@ -2010,6 +2027,12 @@ impl ProcessSupervisor {
                     }
                 };
             if let Some(status) = status {
+                // A command told to end may end before the groups apart
+                // from it that were told too: they still go before this
+                // returns, or a web server's port stays taken.
+                if let Some((terminated_at, _)) = termination {
+                    end_groups(&detached, terminated_at + options.termination_grace);
+                }
                 let (status, signal) = exit_parts(status);
                 // With the terminal lent, Ctrl-C went to the command alone.
                 // A command it ended is a run that was interrupted, as it
@@ -2946,6 +2969,65 @@ mod tests {
             !alive(),
             "the group {pid} started after the signal outlived the command"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A command that ends at once on its signal, while a process group it
+    /// started apart from it (a web server) takes its time over the same
+    /// signal: the group is gone by the time the command's end is returned,
+    /// ended at the grace's end. Before, it outlived the command by its own
+    /// 30 s.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_that_outlasts_a_command_ended_by_its_signal_is_ended_too() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-detached-lingers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                format!(
+                    "trap 'exit 0' TERM; perl -e 'setpgrp(0, 0); $SIG{{TERM}} = \"IGNORE\"; open(my $f, \">\", \"{}\"); print $f $$; close($f); sleep 30' & while :; do sleep 0.1; done",
+                    pid_file.display()
+                )
+                .into(),
+            ],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let options = SupervisionOptions {
+            diagnostic_interval: Duration::from_secs(60),
+            timeout: Some(Duration::from_millis(1_000)),
+            termination_grace: Duration::from_millis(1_000),
+        };
+        let result = supervise_command(&spec, options, &mut Vec::new()).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // Gone, or a zombie no one has reaped yet; SIGKILL takes a moment
+        // to land.
+        let alive = || {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the group {pid} outlived the command");
         let _ = std::fs::remove_dir_all(&root);
     }
 
