@@ -387,3 +387,135 @@ fn an_interrupted_rust_pass_judges_nothing_it_cut_short_and_resumes() {
         );
     }
 }
+
+/// A Rust pass carried across commits keeps the verdicts no change could
+/// move and reaches, at each commit, the verdicts a pass from nothing does.
+/// A test runs from its own function: a function no test's code names is
+/// not in reach, one a mutant may lead a test into is (`audit`), and a trait
+/// implementation's method is reached by its type's name, which `format!`
+/// calls unnamed (`Display::fmt`).
+#[test]
+fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
+    let project = Project::empty("strong-rust-carried");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        concat!(
+            "pub fn refund(sum: u32) -> u32 {\n    if sum > 1000 {\n        audit(sum)\n    } else {\n        sum\n    }\n}\n\n",
+            "pub fn audit(sum: u32) -> u32 {\n    sum\n}\n\n",
+            "pub fn double(v: u32) -> u32 {\n    v * 2\n}\n\n",
+            "pub fn unused(v: u32) -> u32 {\n    v - 1\n}\n\n",
+            "pub struct Money(pub u32);\n\n",
+            "impl std::fmt::Display for Money {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"${}\", self.0)\n    }\n}\n\n",
+            "pub fn label(m: &Money) -> String {\n    format!(\"{m}\")\n}\n",
+        ),
+    );
+    project.write(
+        "tests/t.rs",
+        concat!(
+            "use shop::*;\n\n",
+            "#[test]\nfn refunds() {\n    assert_eq!(refund(20), 20);\n}\n\n",
+            "#[test]\nfn doubles() {\n    assert_eq!(double(2), 4);\n}\n\n",
+            "#[test]\nfn labels() {\n    assert_eq!(label(&Money(3)), \"$3\");\n}\n",
+        ),
+    );
+    project.write(".gitignore", "target\n.supercov\n.supercov-aside\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let pass = || {
+        project
+            .supercov(&["mutants", "--json", "--", "cargo", "test"])
+            .json()
+    };
+    let statuses = |run: &str| {
+        let saved = serde_json::from_str::<Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // A pass from nothing: the store set aside while it runs.
+    let store = project.root.join(".supercov");
+    let aside = project.root.join(".supercov-aside");
+    let fresh = || {
+        std::fs::rename(&store, &aside).unwrap();
+        let reply = pass();
+        let verdicts = statuses(reply["run"].as_str().unwrap());
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::rename(&aside, &store).unwrap();
+        (reply, verdicts)
+    };
+    let first = pass();
+    assert_eq!(first["summary"]["error"], 0, "{first}");
+    let step = |message: &str, kept: Option<u64>, why: &[&str]| {
+        project.commit(message);
+        let carried = pass();
+        let (whole, verdicts) = fresh();
+        assert_eq!(
+            statuses(carried["run"].as_str().unwrap()),
+            verdicts,
+            "{message}: {carried}"
+        );
+        if let Some(kept) = kept {
+            assert_eq!(carried["carried"]["mutants"], kept, "{message}: {carried}");
+            assert!(
+                carried["summary"]["ran"].as_u64() < whole["summary"]["ran"].as_u64(),
+                "{message}: {carried}"
+            );
+        } else {
+            assert!(carried["carried"].is_null(), "{message}: {carried}");
+        }
+        let reasons = carried["carried"]["notKept"]
+            .as_object()
+            .map(|reasons| reasons.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(reasons, why, "{message}: {carried}");
+        carried
+    };
+    // A comment above every function moves its mutants: each verdict is
+    // found by its code.
+    project.write(
+        "src/lib.rs",
+        &format!("// The shop's rules.\n\n{}", project.read("src/lib.rs")),
+    );
+    let moved = step("a comment", Some(9), &[]);
+    assert_eq!(moved["summary"]["ran"], 0, "{moved}");
+    // One function: its own mutants run again, and nothing else, since no
+    // other test's code names it.
+    project.edit("src/lib.rs", "    v * 2\n", "    2 * v\n");
+    step("double", Some(6), &["fileChanged"]);
+    // A function no test runs, which `refund`'s mutants lead `refunds` into:
+    // they run again, and the one that sends it there is killed now.
+    project.edit(
+        "src/lib.rs",
+        "pub fn audit(sum: u32) -> u32 {\n    sum\n",
+        "pub fn audit(sum: u32) -> u32 {\n    sum + 1\n",
+    );
+    let trap = step("audit", Some(6), &["loadsChanged"]);
+    let now = statuses(trap["run"].as_str().unwrap());
+    assert_eq!(
+        now["src/lib.rs:4:12-4:13:BinaryOperator:<"], "killed",
+        "{trap}"
+    );
+    // `Display::fmt`, which no code names: `labels` names `Money`.
+    project.edit("src/lib.rs", "self.0)", "0 + self.0)");
+    step("fmt", Some(6), &["fileChanged", "testReached"]);
+    // A function nothing names: every verdict is kept.
+    project.edit("src/lib.rs", "    v - 1\n", "    v.wrapping_sub(1)\n");
+    let unnamed = step("unused", Some(9), &[]);
+    assert_eq!(unnamed["summary"]["ran"], 0, "{unnamed}");
+    // The build's configuration: nothing is kept.
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\ndebug = 1\n",
+    );
+    step("configuration", None, &[]);
+}

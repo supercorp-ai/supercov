@@ -210,8 +210,10 @@ mutants the tests let survive.
   the mutant switched on, which may be code it never ran without (a function
   no test calls that a mutant sends a test into counts): for a JavaScript or
   TypeScript test run in its runner's process (Jest, Vitest, Mocha, ...),
-  nothing its imports load and its code can name; for a Python or Ruby test,
-  no code its imports load; for any other (a Playwright test, a mutant a
+  nothing its imports load and its code can name; for a Rust test, nothing
+  its own function can name in any Rust file (a trait implementation's
+  method counts where its type is named, as the language calls it
+  unnamed); for a Python or Ruby test, no code its imports load; for any other (a Playwright test, a mutant a
   server starts with), `runs latest tests affected` finds it unaffected and
   no code but tests' changed. The summary says how many verdicts were kept,
   from which runs and commits (`26 verdict(s) kept from run r5 (commit

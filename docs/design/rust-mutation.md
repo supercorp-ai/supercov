@@ -354,6 +354,58 @@ The five viability disagreements, each applied by hand:
 
 None is a mutant one tool kills and the other calls survived.
 
+## After an edit
+
+`supercov mutants` on a new commit keeps the verdicts no change could move
+(`docs/design/strong-mutation.md`, "After an edit"). Up to this release a
+Rust test kept a verdict only where no code but tests' changed: any edit to
+a crate's source ran every mutant again. A Rust test is now bounded by
+names (`strong_reach.rs`), as a JavaScript one is:
+
+- **What it loads.** A test binary links every crate it depends on, so
+  every Rust file the earlier run recorded counts, and every file that
+  changed. A changed file that is not Rust (a fixture a test reads, a file
+  `include_str!` takes) is read whole: any change there reaches the test.
+- **Where it starts.** From its own function (`tests::it_works` in its
+  file), not its whole file: libtest runs that function alone, in a process
+  of its own. A test whose function is not found there (one a macro
+  writes) starts from its whole file.
+- **What reaches.** A function is reached where reached code names it, and
+  a function nested in one where it runs. Modules, implementations and
+  traits hold items and run nothing themselves: an item in one is reached
+  only by its name. A method of a trait implementation is reached by its
+  trait's or its type's name too, since the language calls it unnamed: an
+  operator calls `Add::add`, a value going out of scope `Drop::drop`,
+  `format!` `Display::fmt`, a `for` loop `Iterator::next`, `sort` `Ord::cmp`.
+  A type a test never names has no value in its code: a value of it comes
+  from code that names it, in its signature at least. An implementation's or
+  a trait's header names nothing that runs. A derive's code calls the
+  methods of the types its item names, which those names reach.
+- **What gives up.** An item that carries an attribute other than the
+  compiler's own (`derive`, `inline`, `cfg`, `allow`, `doc`, `repr`, ...) is
+  reached with what holds it: `#[no_mangle]` hands it to code that never
+  names it, and a procedural macro's attribute may register it. A file whose
+  macros build names (`paste!`'s `[<..>]`, `concat_idents!`) gives up the
+  bound wherever it is loaded. A change to a file's top level (a `use`, a
+  `mod`), a new file, and a function added give it up too: an added `fn`
+  may shadow what a glob import brought in. A doctest is bounded as any test
+  outside a runner's process: unaffected, its file's tests too, and no code
+  changed but tests'.
+
+`rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches`
+(`crates/supercov-cli/tests/rust_mutation.rs`) carries a crate across six
+commits and compares each with a pass from nothing on the same commit:
+every verdict the same each time.
+
+| commit | kept | ran |
+| --- | --- | --- |
+| a comment above every function | 9 | 0 |
+| `double`, which one test names | 6 | 3 |
+| `audit`, which only a mutant of `refund` sends a test into | 6 | 3, the survivor now killed |
+| `Display::fmt`, which `format!` calls and no code names | 6 | 3 |
+| a function nothing names | 9 | 0 |
+| `Cargo.toml` | 0 | 9 |
+
 ## nextest
 
 Under `cargo nextest run`, each test runs through nextest, one test per

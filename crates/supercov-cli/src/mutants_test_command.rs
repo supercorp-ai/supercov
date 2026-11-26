@@ -3448,14 +3448,33 @@ impl Reach {
             .flat_map(|mutant| &mutant.candidates)
             .filter_map(|candidate| tests[candidate.test].file.clone())
             .collect::<BTreeSet<_>>();
+        // A Rust test binary links every crate it depends on: what it loads
+        // is every Rust file, and any file that changed, which reaching
+        // reads by names where it is Rust and reads whole otherwise.
+        let rust_loads = supercov_engine::test_loads::Loads {
+            files: self
+                .program
+                .as_ref()
+                .map(|program| program.recorded_files())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|file| file.ends_with(".rs"))
+                .chain(self.changed.iter().cloned())
+                .collect(),
+            ..Default::default()
+        };
         self.loads = files
             .into_iter()
             .map(|file| {
-                let loads = checkout.loads(
-                    &BTreeSet::from([file.clone()]),
-                    ran.runners.as_ref(),
-                    &configurations,
-                );
+                let loads = if file.ends_with(".rs") {
+                    Some(rust_loads.clone())
+                } else {
+                    checkout.loads(
+                        &BTreeSet::from([file.clone()]),
+                        ran.runners.as_ref(),
+                        &configurations,
+                    )
+                };
                 (file, loads)
             })
             .collect();
@@ -3491,7 +3510,10 @@ impl Reach {
             .get(&key.0)
             .and_then(Option::as_ref)
             .filter(|loads| {
+                // A doctest runs the code its comment holds, which no test
+                // file's names say.
                 test.runner != "playwright"
+                    && test.runner != "rustdoc"
                     && mutant.server_wide.is_none()
                     && !self.served.contains(&test.name)
                     && loads.open.is_none()
@@ -3499,7 +3521,15 @@ impl Reach {
                     && loads.includes(&mutant.file)
             });
         let reaches = match (bounded, &self.program) {
-            (Some(loads), Some(program)) => program.reaches_change(&key.0, &loads.files),
+            // A Rust test runs from its own function, named by its path in
+            // its file.
+            (Some(loads), Some(program)) => program.reaches_change_from(
+                &key.0,
+                key.1
+                    .strip_prefix(&format!("{}::", key.0))
+                    .filter(|_| key.0.ends_with(".rs")),
+                &loads.files,
+            ),
             _ => {
                 affected
                     || !self
