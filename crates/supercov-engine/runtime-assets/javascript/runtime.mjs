@@ -1546,16 +1546,15 @@ function cachedAttemptKey(scope) {
   }
   return key;
 }
-// The set a record of a scope with a phase is kept in, and its key there
-// (persistedKey): what serverRecordKey tells apart, told apart.
-function persistedRecordsOf(scope, record) {
+// What an attempt's records are kept apart by (state.persistedServerRecords).
+function persistedOf(scope) {
   const key = cachedAttemptKey(scope);
   let persisted = builtinMapGet.call(state.persistedServerRecords, key);
   if (persisted === void 0) {
     persisted = { hits: /* @__PURE__ */ new Map(), other: /* @__PURE__ */ new Set() };
     builtinMapSet.call(state.persistedServerRecords, key, persisted);
   }
-  return plainHit(record) ? persistedHitsOf(persisted, record.phaseId) : persisted.other;
+  return persisted;
 }
 function persistedHitsOf(persisted, phaseId) {
   let ids = builtinMapGet.call(persisted.hits, phaseId);
@@ -1565,43 +1564,73 @@ function persistedHitsOf(persisted, phaseId) {
   }
   return ids;
 }
+// The set a record of a scope with a phase is kept in, and its key there
+// (persistedKey): what serverRecordKey tells apart, told apart.
+function persistedRecordsOf(scope, record) {
+  const persisted = persistedOf(scope);
+  return plainHit(record) ? persistedHitsOf(persisted, record.phaseId) : persisted.other;
+}
 function plainHit(record) {
   return record.type === "hit" && record.outcome === void 0 && !record.request;
 }
 function persistedKey(record) {
   return plainHit(record) ? record.id : serverRecordKey(record);
 }
-// A first hit of a request naming its test and phase, written as appendServer
-// writes `{ type: "hit", id, timestampMs, phaseId }` -- the same line, byte for
-// byte -- without the objects it builds to get there: a server writes one for
-// every point each phase of each test runs, a Next server's page thousands. A
-// hit any other way (no test, no phase, a buffered attempt, a snapshot-kept
-// run, an attempt file's first line) goes through appendServer.
-function appendServerHit(id, timestampMs, phaseId) {
-  const context = phaseId && !state.runtimeSnapshots ? currentRequestContext() : void 0;
-  const scope = context !== void 0 ? context.scope : void 0;
-  const fs = scope !== void 0 && scope.runId ? getFs() : void 0;
-  const key = fs ? cachedAttemptKey(scope) : void 0;
-  if (key === void 0 || state.bufferedAttempts.size !== 0 && state.bufferedAttempts.has(key)) {
-    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
-    return;
-  }
-  const { directory, path } = scopedEvidenceLocation(scope);
-  if (!scopedPathsWritten.has(path)) {
-    appendServer({ type: "hit", id, timestampMs, phaseId });
-    return;
-  }
-  const persisted = persistedRecordsOf(scope, { type: "hit", id, phaseId });
-  if (builtinSetHas.call(persisted, id))
-    return;
+// Where a record of the current request goes, when it names its test and
+// phase and its attempt's file already has its first line: what appendServer
+// works out with an object or two per record, a server's first hits and
+// decision vectors in every phase of every test, a Next server's page
+// thousands. Anything else -- no test, no phase, a buffered attempt, a
+// snapshot-kept run, an attempt file's first line -- goes through
+// appendServer.
+function scopedRecordTarget(phaseId) {
+  if (!phaseId || state.runtimeSnapshots)
+    return void 0;
+  const scope = currentRequestContext().scope;
+  if (scope === void 0 || !scope.runId || !getFs())
+    return void 0;
+  if (state.bufferedAttempts.size !== 0 && state.bufferedAttempts.has(cachedAttemptKey(scope)))
+    return void 0;
+  const location = scopedEvidenceLocation(scope);
+  return scopedPathsWritten.has(location.path) ? { scope, location } : void 0;
+}
+function enqueueScopedLine(target, line) {
   try {
-    enqueueServerAppend(directory, path, `{"type":"hit","id":${JSON.stringify(id)},"timestampMs":${JSON.stringify(timestampMs)},"phaseId":${JSON.stringify(phaseId)}}\n`, scope.runId);
+    enqueueServerAppend(target.location.directory, target.location.path, line, target.scope.runId);
   } catch (cause) {
     if (cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED")
       throw cause;
-    throw serverTransportError(scope.runId, cause);
+    throw serverTransportError(target.scope.runId, cause);
   }
-  builtinSetAdd.call(persisted, id);
+}
+// A first hit, written as appendServer writes `{ type: "hit", id, timestampMs,
+// phaseId }`: the same line, byte for byte.
+function appendServerHit(id, timestampMs, phaseId) {
+  const target = scopedRecordTarget(phaseId);
+  if (target === void 0) {
+    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
+    return;
+  }
+  const ids = persistedHitsOf(persistedOf(target.scope), phaseId);
+  if (builtinSetHas.call(ids, id))
+    return;
+  enqueueScopedLine(target, `{"type":"hit","id":${JSON.stringify(id)},"timestampMs":${JSON.stringify(timestampMs)},"phaseId":${JSON.stringify(phaseId)}}\n`);
+  builtinSetAdd.call(ids, id);
+}
+// A decision's vector, as appendServer writes it: the record's own keys, in
+// their order.
+function appendServerDecision(record) {
+  const target = scopedRecordTarget(record.phaseId);
+  if (target === void 0) {
+    appendServer(record);
+    return;
+  }
+  const other = persistedOf(target.scope).other;
+  const key = serverRecordKey(record);
+  if (builtinSetHas.call(other, key))
+    return;
+  enqueueScopedLine(target, `${JSON.stringify(record)}\n`);
+  builtinSetAdd.call(other, key);
 }
 function appendServer(record) {
   var _a8, _b, _c, _d;
@@ -3794,7 +3823,7 @@ function mcdcEnd(frame, value) {
   } else if (state.runtimeSnapshots) {
     recordBrowserEvent("decision", decision.id, vector, timestampMs, phaseId, "server");
   } else {
-    appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
+    appendServerDecision(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
   return value;
 }
