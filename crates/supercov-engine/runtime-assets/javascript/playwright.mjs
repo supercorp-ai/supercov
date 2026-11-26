@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepSnapshotText, recordLine } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
@@ -1405,28 +1405,9 @@ function readSnapshot(target) {
         // The page wrote it with JSON.stringify, as the record will: kept,
         // the record takes the text as it came instead of writing it again.
         if (snapshot === parsed && snapshot && typeof snapshot === "object")
-            snapshotTexts.set(snapshot, text);
+            keepSnapshotText(snapshot, text);
         return snapshot;
     });
-}
-/**
- * The text each snapshot was read as, where it is the snapshot's own
- * JSON.stringify: a page's runtime writes it so (runtime.mjs,
- * `__SUPERCOV_COLUMNS_SNAPSHOT__`), and parsing JSON that JSON.stringify
- * wrote and writing it again gives the same text. A test's record holds its
- * pages' snapshots, hundreds of kilobytes on a large frontend, and writing
- * them again was most of what writing the record cost.
- */
-const snapshotTexts = new WeakMap();
-const RECORD_SNAPSHOTS = "\u0000supercov-snapshots\u0000";
-/** `JSON.stringify(record)`, with its `browser` snapshots' kept texts. */
-function recordLine(record) {
-    const snapshots = record.browser;
-    const text = JSON.stringify({ ...record, browser: RECORD_SNAPSHOTS });
-    const placeholder = `"browser":${JSON.stringify(RECORD_SNAPSHOTS)}`;
-    const at = text.indexOf(placeholder);
-    const written = `[${snapshots.map((snapshot) => snapshotTexts.get(snapshot) ?? JSON.stringify(snapshot) ?? "null").join(",")}]`;
-    return `${text.slice(0, at)}"browser":${written}${text.slice(at + placeholder.length)}`;
 }
 let activeController;
 let bridgedAssertionDepth = 0;

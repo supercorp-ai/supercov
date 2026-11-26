@@ -131,3 +131,34 @@ test("a snapshot read as columns is what the collector made of a compact one, an
   assert.equal(eventsOfColumns(undefined), undefined);
   runtime.resetCoverage();
 });
+
+test("a test's record written with its pages' kept texts is its JSON.stringify", async () => {
+  const { keepSnapshotText, recordLine } = await import("../../runtime/javascript/snapshots.mjs");
+  // As a page writes a snapshot of columns: integer keys, escapes, lone
+  // surrogates, numbers of every form, and a string shaped like the record's
+  // own placeholder.
+  const page = {
+    decisions: [{ id: "src/a.ts:3:9", vectors: [{ values: [true, null, false], outcome: true }] }],
+    hits: ["src/a.ts:1:1-1:9", "line\nbreak \"quoted\" \\   \ud800 é"],
+    eventColumns: {
+      types: ["hit", "decision"], phases: ["att:phase:1"], environments: ["browser"],
+      id: [0, 1, "src/a.ts:3:9"], type: [0, 0, 1], phase: [0, -1, 0], environment: [0, 0, 0],
+      t: [1793741378313, -3, 0.5],
+      vector: { 10: { values: [1e21, 1e-7, -1.5], outcome: false }, 2: { values: [true], outcome: true } },
+    },
+    comparisons: [{ id: "c", outcomes: ["lt", "\u0000supercov-snapshots\u0000"] }],
+  };
+  const text = JSON.stringify(page);
+  const read = JSON.parse(text);
+  keepSnapshotText(read, text);
+  const empty = { decisions: [], hits: [], events: [] };
+  const record = {
+    testId: "t1",
+    test: 'title "browser":"\u0000supercov-snapshots\u0000"',
+    phases: [{ id: "p", browser: [] }],
+    browser: [read, empty, read],
+    span: [1, 2],
+  };
+  assert.equal(recordLine(record), JSON.stringify(record));
+  assert.equal(recordLine({ ...record, browser: [] }), JSON.stringify({ ...record, browser: [] }));
+});
