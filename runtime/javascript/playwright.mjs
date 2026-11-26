@@ -1957,7 +1957,38 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
  * thousands of them were most of a test's record. The engine decodes the
  * columns into exactly these events, in this order.
  */
+// A finished test's record, written once the test has handed its worker back:
+// serializing and appending it was the last thing each test waited for. Lines
+// keep their order, every write first writes what waits, and the worker
+// writes what waits before it exits. A strong pass's attempt, and a run that
+// asks for each test's record to be durable, write at once.
+const deferredEvidence = [];
+let deferredEvidenceFlushing = false;
+let deferredEvidenceScheduled = false;
+function flushDeferredEvidence() {
+    deferredEvidenceScheduled = false;
+    if (deferredEvidenceFlushing)
+        return;
+    deferredEvidenceFlushing = true;
+    try {
+        while (deferredEvidence.length > 0)
+            appendEvidenceLine(deferredEvidence.shift()());
+    }
+    finally {
+        deferredEvidenceFlushing = false;
+    }
+}
+function deferEvidenceLine(serialize) {
+    deferredEvidence.push(serialize);
+    if (deferredEvidenceScheduled)
+        return;
+    deferredEvidenceScheduled = true;
+    setImmediate(flushDeferredEvidence);
+}
+process.once("exit", flushDeferredEvidence);
 function appendEvidenceLine(serialized) {
+    if (deferredEvidence.length > 0 && !deferredEvidenceFlushing)
+        flushDeferredEvidence();
     const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
         (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
             ? undefined
@@ -2105,7 +2136,10 @@ const instrumentedFixtures = {
                         browser: browser.map(columnarEvents),
                         span: [startedAtMs, endedAtMs],
                     };
-                    appendEvidenceLine(`${JSON.stringify(payload)}\n`);
+                    if (strong || process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1")
+                        appendEvidenceLine(`${JSON.stringify(payload)}\n`);
+                    else
+                        deferEvidenceLine(() => `${JSON.stringify(payload)}\n`);
                 }
                 finally {
                     strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true, ...stallDetails(stall) });
