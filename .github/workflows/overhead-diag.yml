@@ -1,0 +1,172 @@
+name: Overhead diagnostic
+
+# DIAGNOSTIC ONLY (never merged): where a measured Next.js + Playwright run's
+# extra time goes, by switching parts of Supercov off one at a time.
+
+on:
+  push:
+    branches: [diag/coverage-overhead]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: overhead-diag-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - variant: base
+            ref: d25da687b1362dc99c6ec403470ef8220d5bacba
+          - variant: new
+            ref: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-${{ matrix.variant }}
+      # Line tables and symbols, for the diagnostic pass's native profile.
+      - run: cargo build --profile measure -p supercov
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  measure:
+    needs: build
+    name: ${{ matrix.kind }} ${{ matrix.shard }} ${{ matrix.variants }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # maps: plain and one binary on an eighth, the instrumented sources
+      # with their inline maps, without them, or without the author's text.
+      # control: plain from nothing, plain on the cache the first left, plain
+      # from nothing again. whole: the suite measured once, then merged, for
+      # its evidence, publication and merge.
+      # count: plain and the binary twice each on a sixteenth, with the
+      # instructions every run retires.
+      # large: a sixteenth of the generated app's suite each, plain and the
+      # binary twice each, as sixteen machines of a CI matrix would run it.
+      matrix:
+        include:
+          - { kind: large, shard: 1/16, variants: 'base,new' }
+          - { kind: large, shard: 2/16, variants: 'base,new' }
+          - { kind: large, shard: 3/16, variants: 'base,new' }
+          - { kind: large, shard: 4/16, variants: 'base,new' }
+          - { kind: large, shard: 5/16, variants: 'base,new' }
+          - { kind: large, shard: 6/16, variants: 'base,new' }
+          - { kind: large, shard: 7/16, variants: 'base,new' }
+          - { kind: large, shard: 8/16, variants: 'base,new' }
+          - { kind: large, shard: 9/16, variants: 'base,new' }
+          - { kind: large, shard: 10/16, variants: 'base,new' }
+          - { kind: large, shard: 11/16, variants: 'base,new' }
+          - { kind: large, shard: 12/16, variants: 'base,new' }
+          - { kind: large, shard: 13/16, variants: 'base,new' }
+          - { kind: large, shard: 14/16, variants: 'base,new' }
+          - { kind: large, shard: 15/16, variants: 'base,new' }
+          - { kind: large, shard: 16/16, variants: 'base,new' }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      # Each variant is the new binary with one part of its work off.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/wrap"
+          list=""
+          for variant in $(echo "${{ matrix.variants }}" | tr ',' ' '); do
+            extra=""
+            case "$variant" in
+              new) ;;
+              await-action) extra="SUPERCOV_DIAG_SKIP=await-action" ;;
+              collect) extra="SUPERCOV_DIAG_SKIP=collect" ;;
+              base) ;;
+              timing) extra="SUPERCOV_PHASE_TIMING=1" ;;
+              maps-none) extra="SUPERCOV_DIAG_MAPS=none" ;;
+              maps-nocontent) extra="SUPERCOV_DIAG_MAPS=nocontent" ;;
+              noinstr) extra="SUPERCOV_SOURCE_ROOTS=src/proxy.ts" ;;
+              record-b+s) extra="SUPERCOV_DIAG_SKIP=record-b,record-s" ;;
+              skip-*) extra="SUPERCOV_DIAG_SKIP=${variant#skip-}" ;;
+              *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
+            esac
+            printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "${extra:-SPEED_NOTHING=1}" "$GITHUB_WORKSPACE/binaries/supercov-$([ "$variant" = base ] && echo base || echo new)/supercov" > "$RUNNER_TEMP/wrap/$variant"
+            chmod +x "$RUNNER_TEMP/wrap/$variant"
+            list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
+          done
+          echo "DIAG_BINARIES=$list" >> "$GITHUB_ENV"
+      # Which machine this was: the ratio moves with it.
+      - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
+      - run: npx -y playwright@1.49.1 install-deps chromium
+      - run: |
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" >/dev/null 2>&1 || true
+          sudo sysctl kernel.perf_event_paranoid=1
+          perf=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          if [ -n "$perf" ] && "$perf" stat -e task-clock -x , -- true; then
+            echo "SPEED_PERF=$perf" >> "$GITHUB_ENV"
+          else
+            echo "perf cannot count here: the runs are timed alone"
+          fi
+      # samply, for a native profile of Supercov's own work.
+      # Optional: a download that fails leaves the pass without it.
+      - if: matrix.diagnose == 1
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/samply"
+          # The release binary, or built from crates.io when GitHub's release
+          # downloads fail.
+          curl -fsSL https://github.com/mstange/samply/releases/download/samply-v0.13.1/samply-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C "$RUNNER_TEMP/samply" \
+            || cargo install samply --version 0.13.1 --locked --root "$RUNNER_TEMP/samply"
+          echo "SPEED_SAMPLY=$(find "$RUNNER_TEMP/samply" -name samply -type f | head -1)" >> "$GITHUB_ENV"
+          sudo sysctl kernel.perf_event_paranoid=1
+      - name: Measure
+        timeout-minutes: 9
+        env:
+          SUPERCOV_BINARIES: ${{ env.DIAG_BINARIES }}
+          SPEED_APP: large
+          SPEED_ROUNDS: 2
+          SPEED_REPEAT: 10
+          SPEED_OUTPUT: ${{ runner.temp }}/speed
+          SPEED_DIAGNOSE: 0
+          SPEED_SHARD: ${{ matrix.shard }}
+        run: node scripts/speed-benchmark.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ matrix.kind }}-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/speed/samples.jsonl
+            ${{ runner.temp }}/speed/stamps-*
+            ${{ runner.temp }}/speed/summary.md
+            ${{ runner.temp }}/speed/report-*.json
+            ${{ runner.temp }}/speed/bundles.txt
+            ${{ runner.temp }}/speed/samples/
+            ${{ runner.temp }}/speed/samply-*
+            ${{ runner.temp }}/speed/profile.md
+            ${{ runner.temp }}/speed/profile-top-*.txt
+            ${{ runner.temp }}/speed/profile-processes-*.txt
+            ${{ runner.temp }}/speed/profile-callers-*.txt
+            ${{ runner.temp }}/speed/browser-profile-*
+            ${{ runner.temp }}/speed/logs/
+            ${{ runner.temp }}/speed/results/**/trace.zip
+            ${{ runner.temp }}/speed/evidence-unit/
+          retention-days: 7
