@@ -135,7 +135,9 @@ jobs:
           sudo apt-get install -y -qq "linux-tools-$(uname -r)" >/dev/null 2>&1 || true
           sudo sysctl kernel.perf_event_paranoid=1
           perf=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
-          if [ -n "$perf" ] && "$perf" stat -e instructions:u -x , -- true; then
+          # The benchmark counts instructions where the machine shows its
+          # counters, and CPU time where it does not.
+          if [ -n "$perf" ] && "$perf" stat -e task-clock -x , -- true; then
             echo "SPEED_PERF=$perf" >> "$GITHUB_ENV"
           else
             echo "perf cannot count here: the runs are timed alone"
