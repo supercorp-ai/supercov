@@ -3233,6 +3233,58 @@ mod tests {
         );
     }
 
+    /// A Rust or Ruby helper that only gained functions is changed: Supercov
+    /// cannot tell an addition there from a change, so the tests that may
+    /// load it are affected. A Python helper's added functions reach no test
+    /// written before them. Asking about the Rust or Ruby one made `tests
+    /// affected` panic, and its caller select every test.
+    #[test]
+    fn a_helper_that_only_gained_functions_reaches_its_tests_where_that_is_unknown() {
+        let project = Project::new("helper-gained");
+        let helpers = [
+            ("tests/common/mod.rs", "pub fn setup() -> u8 {\n    1\n}\n"),
+            ("spec/support.rb", "def setup\n  1\nend\n"),
+            ("tests/helpers.py", "def setup():\n    return 1\n"),
+        ];
+        fs::create_dir_all(project.root.join("tests/common")).unwrap();
+        fs::create_dir_all(project.root.join("spec")).unwrap();
+        for (file, text) in helpers {
+            project.write(file, text);
+        }
+        let mut files = vec!["src/app.js", "tests/app.test.js"];
+        files.extend(helpers.iter().map(|(file, _)| *file));
+        let run = project.published(
+            "first",
+            crate::run_store::create_analyzable_test_run,
+            &files,
+        );
+        for ((file, text), (added, reason)) in helpers.into_iter().zip([
+            (
+                "\npub fn more() -> u8 {\n    2\n}\n",
+                Some("tests/common/mod.rs changed: top level; added more (line 5) (a file tests may load)"),
+            ),
+            (
+                "\ndef more\n  2\nend\n",
+                Some("spec/support.rb changed: top level; added more (line 5) (a file tests may load)"),
+            ),
+            ("\n\ndef more():\n    return 2\n", None),
+        ]) {
+            project.write(file, &format!("{text}{added}"));
+            let report = project.affected(&run);
+            match reason {
+                Some(reason) => {
+                    assert_eq!(bucket(&report, "affected"), ["test"], "{file}: {report}");
+                    assert_eq!(report["affected"][0]["reasons"], json!([reason]), "{report}");
+                }
+                None => {
+                    assert!(bucket(&report, "affected").is_empty(), "{file}: {report}");
+                    assert_eq!(bucket(&report, "unaffected"), ["test"], "{report}");
+                }
+            }
+            project.write(file, text);
+        }
+    }
+
     #[test]
     fn a_rust_file_s_module_path_is_its_path_in_its_crate() {
         assert_eq!(rust_module_path("crates/a/src/lib.rs"), "");
