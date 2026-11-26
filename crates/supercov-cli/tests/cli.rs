@@ -24766,6 +24766,112 @@ fn mutants_test_kills_server_mutants_work_after_a_response_reaches() {
     }
 }
 
+/// `mutants test` over a Playwright test whose server hands its work to one
+/// worker process, which the first request that needs it starts: the worker
+/// carries that request's attempt, as a child process does, and does every
+/// later request's work as that attempt's. In a strong pass that attempt is
+/// the test's first run, with no mutant, so no attempt's mutant reaches the
+/// worker, and every candidate passes. Such a survivor, which its candidates
+/// reached when measured and none of its attempts ran, is in doubt: it runs
+/// again alone, with the server started with it switched on, and is killed,
+/// and the pass says so.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_alone_a_survivor_no_attempt_ran() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-unreached");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-unreached", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { fork } from \"node:child_process\";\nlet worker;\nconst waiting = new Map();\nlet next = 0;\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/ready\") return response.end(\"ready\");\n  // One worker for the process, started by the first request that needs it.\n  if (!worker) {\n    worker = fork(new URL(\"./worker.js\", import.meta.url));\n    worker.on(\"message\", ({ id, value }) => waiting.get(id)(value));\n  }\n  const id = next++;\n  waiting.set(id, (value) => response.end(String(value)));\n  worker.send({ id, q: Number(url.searchParams.get(\"q\")) });\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "support/worker.js",
+        "import { double } from \"../server/compute.js\";\nprocess.on(\"message\", ({ id, q }) => process.send({ id, value: double(q) }));\n",
+    );
+    project.write(
+        "server/compute.js",
+        "export function double(q) {\n  return q * 2;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: [{{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }}],\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/compute.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"the worker doubles\", async ({ request }) => {\n  expect(await (await request.get(\"/work?q=5\")).text()).toBe(\"10\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a server that hands its work to one worker");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let context = format!("{}\n{said}", serde_json::to_string_pretty(mutants).unwrap());
+    let divided = mutants
+        .iter()
+        .find(|mutant| {
+            mutant["id"]
+                .as_str()
+                .unwrap()
+                .ends_with(":ArithmeticOperator:/")
+        })
+        .unwrap_or_else(|| panic!("{context}"));
+    assert_eq!(divided["strong"]["status"], "killed", "{context}");
+    assert!(
+        divided["strong"]["reason"].as_str().is_some_and(|reason| reason.contains(
+            "ran alone, with the server started with it switched on: its candidates passed on the shared server, yet no attempt of theirs ran it there"
+        )),
+        "{context}"
+    );
+    contains_all(
+        &said,
+        &[
+            "[supercov] warning: 2 mutant(s) lived through every candidate test on the shared server, though no attempt ran them there",
+            "Each runs again alone, with the server started with it switched on: server/compute.js:",
+            "[supercov] warning: 1 mutant(s) the shared server let live were killed alone, with the server started with them switched on; their verdicts are the kills: server/compute.js:2:",
+        ],
+    );
+}
+
 /// A Playwright mutant attempt is stopped at its time limit, its test's
 /// baseline x 1.5 + 5 s: a mutant that keeps an element from appearing ends
 /// there as a `timeout`, though its test clicks with no timeout of its own

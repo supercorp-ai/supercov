@@ -2214,10 +2214,20 @@ function installNodeRequestPropagation() {
 }
 installNodeRequestPropagation();
 
+// The context of a request this process is serving, made as it came in
+// (`owningRequest`): it carries the request's lifetime.
+function servedRequestContext(context) {
+  return context !== void 0 && context[REQUEST_LIFETIME] !== void 0 ? context : void 0;
+}
 function withRequestPhase(handler, event) {
   if (!serverPhaseStorage)
     return handler;
-  const registeredContext = currentRequestContext();
+  // A handler wrapped while a request was being served -- a route module a
+  // framework loads on its first request, as Next.js does -- belongs to no
+  // test: that request was one attempt's, and every later request naming no
+  // test (a webhook from a mock) ran as that attempt's, in a strong pass with
+  // its mutant rather than the one of the test that set the request off.
+  const registeredContext = servedRequestContext(serverPhaseStorage.getStore()) ? {} : currentRequestContext();
   return function coverageRequestPhase(...args) {
     var _a8, _b, _c, _d;
     const requestContext = args.map((argument) => requestCoverageContext(argument)).find((context2) => context2 !== void 0);
@@ -2227,7 +2237,14 @@ function withRequestPhase(handler, event) {
     const context = __spreadValues(__spreadValues({}, ((_a8 = requestContext == null ? void 0 : requestContext.scope) != null ? _a8 : inheritedContext.scope) ? { scope: (_b = requestContext == null ? void 0 : requestContext.scope) != null ? _b : inheritedContext.scope } : {}), ((_c = requestContext == null ? void 0 : requestContext.phaseId) != null ? _c : inheritedContext.phaseId) ? { phaseId: (_d = requestContext == null ? void 0 : requestContext.phaseId) != null ? _d : inheritedContext.phaseId } : {});
     if (requestContext !== void 0 && !context.scope)
       context.request = nextUnscopedRequest();
-    const lifetime = requestContext !== void 0 ? args.map((argument) => argument && typeof argument === "object" ? argument[REQUEST_LIFETIME] : void 0).find((found) => found !== void 0) : void 0;
+    let lifetime = requestContext !== void 0 ? args.map((argument) => argument && typeof argument === "object" ? argument[REQUEST_LIFETIME] : void 0).find((found) => found !== void 0) : void 0;
+    // A framework's own request object -- the web `Request` a Next.js route
+    // handler is given -- carries no lifetime, and work the handler left
+    // running after the answer (`after()`) stayed the request's. The request
+    // being served, whose context the handler is called in, has it.
+    const served = servedRequestContext(serverPhaseStorage.getStore());
+    if (lifetime === void 0 && requestContext !== void 0 && served !== void 0 && (context.scope ? served.scope !== void 0 && served.scope.attemptId === context.scope.attemptId : served.scope === void 0))
+      lifetime = served[REQUEST_LIFETIME];
     if (lifetime !== void 0)
       context[REQUEST_LIFETIME] = lifetime;
     const invoke = () => {
@@ -3098,6 +3115,8 @@ function strongHit() {
       const key = `${attemptId}\0${mutant.key}`;
       const hits = (strong.requestHits.get(key) || 0) + 1;
       strong.requestHits.set(key, hits);
+      if (hits === 1)
+        noteRequestHit(mutant.key, attemptId);
       if (hits > strong.limit) {
         noteMutantTimeout(mutant.file, mutant.index, attemptId);
         throw new MutantTimeoutError(mutant.file, mutant.index, hits);
@@ -3111,6 +3130,22 @@ function strongHit() {
   }
   if (strong.hits === 1)
     noteEverywhereHit(strong);
+}
+// An attempt's own mutant ran here, in work one of its requests set off: the
+// pass trusts a survivor of a shared server only where an attempt of it ran
+// it (playwrightStrongReporter.mjs). A mutant its candidates reached when
+// measured, which none of its attempts ran, ran where the request's switch
+// never reached; it runs again alone, with the server started with it.
+function noteRequestHit(mutant, attemptId) {
+  try {
+    if (isBrowser || typeof process === "undefined" || !process.env)
+      return;
+    const results = process.env["SUPERCOV_STRONG_RESULTS"];
+    const fs = results ? getFs() : void 0;
+    if (fs)
+      fs.appendFileSync(`${results}.reached.jsonl`, JSON.stringify({ attemptId, mutant }) + "\n");
+  } catch (e) {
+  }
 }
 // A process started with a mutant switched on everywhere, in a round where
 // each Playwright invocation runs one mutant of its own (its runner set

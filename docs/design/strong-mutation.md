@@ -1466,6 +1466,46 @@ route leaves running, a job a webhook starts) runs alone against every test
 of the run, where per request it ran against the tests that reached it. What
 a request awaits before it answers costs nothing more.
 
+**A route a framework loads, and calls with its own request.** Next.js loads a
+route's module while it serves the first request to the route, and calls the
+route's handler with a web `Request` of its own. The handler is wrapped as
+its module loads (`withRequestPhase`), and the wrapper kept the context it
+was wrapped in as the handler's owner, for a server a test starts in its own
+process, whose untagged requests are that test's. Wrapped while a request was
+served, that owner was the loading request's attempt: every later request
+that named no test (a webhook a mock payment provider sends) ran as that
+attempt's, and in a strong pass with its mutant, in a main round the one of
+the test's first run, none. And the web `Request` carries no lifetime, so
+what the handler left running after its answer (`after()`) stayed the
+request's. A webhook route that reports a sale in `after()`, and a test that
+waits for the report, had every mutant of the report survive though the test
+fails with each: the measured run credited the work to the test, and no
+attempt's switch reached it. Now a handler wrapped while a request is served
+(its context carries a lifetime) has no owner, and a handler called with a
+framework's own request takes the lifetime of the request being served, when
+its context names the same attempt (or both name none): the webhook is a
+request no test named, and the work after its answer is the server's own.
+`scripts/next-after-webhook.mjs` holds it, on a Next.js build.
+
+**A survivor no attempt ran.** Each of these was a way for a request's work to
+run with another attempt's mutant, or none, where the plan said the test's
+own requests reached the mutant; a long-lived worker process the first
+request starts, which carries that request's attempt as a child does, is
+another. So a pass checks what it can: a server's switch notes, once an
+attempt, that the attempt's mutant ran (`noteRequestHit`, in
+`<results>.reached.jsonl`). A mutant whose candidates' servers ran its code
+when measured, which lived through every candidate on the shared server and
+which no attempt ran, is not a survivor: the requests that reached its code
+did not carry its mutant. It runs again alone, with the server started with
+it switched on (`unreached`), where every process runs it, and that verdict is
+its own. The pass says so on its output, and again for each such mutant that
+alone kills: a Supercov fault to report, which other survivors may share. A
+mutant its tests run in the browser alone is not checked (a page notes
+nothing); a survivor whose code a candidate's server ran, but which also runs
+where the attempt's switch reaches it, is not either. The check costs an
+alone run for each such survivor, and nothing for the others.
+`mutants_test_runs_alone_a_survivor_no_attempt_ran` holds the worker case.
+
 Each further round a driver asks for (a `restart` record in the results: one
 mutant alone, a serial round, the rest of what did not finish, the main
 round's mutants past one invocation's copies) is a new invocation of the

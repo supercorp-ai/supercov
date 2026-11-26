@@ -316,7 +316,7 @@ function buildPass(pass, root, config) {
     if (job && job.kind !== "main") {
         for (const entry of job.mutants) {
             const all = [...entry.tests, ...(entry.rest ?? [])].filter((id) => tests[id]);
-            mutants.push({ id: entry.id, mutant: entry.mutant, tests: [...new Set(all)], reason: entry.reason });
+            mutants.push({ id: entry.id, mutant: entry.mutant, tests: [...new Set(all)], reason: entry.reason, ...(entry.serverRan ? { serverRan: true } : {}) });
         }
         // A serial round runs one test at a time: what it kills, nothing
         // beside it did.
@@ -397,7 +397,7 @@ function buildPass(pass, root, config) {
                 restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: serverWide });
                 continue;
             }
-            mutants.push({ id: mutant.id, mutant: switched, tests: ordered, infected, ...(mutant.passedBefore ? { passedBefore: mutant.passedBefore } : {}) });
+            mutants.push({ id: mutant.id, mutant: switched, tests: ordered, infected, ...(mutant.passedBefore ? { passedBefore: mutant.passedBefore } : {}), ...(mutant.serverRan ? { serverRan: true } : {}) });
         }
     }
     // What a survivor's verdict says of the candidates it was not run with.
@@ -1480,11 +1480,44 @@ function passedWith(pass, id) {
     return new Set(entries(`${pass.round}/passed/${key(id)}`));
 }
 
+/**
+ * The mutants an attempt ran on its server, in work one of its requests set
+ * off (`noteRequestHit` in runtime.mjs): their switches, `file#index`.
+ */
+export function ranByRequests(pass) {
+    const ran = new Set();
+    const path = `${pass.resultsPath}.reached.jsonl`;
+    if (!existsSync(path))
+        return ran;
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+        try {
+            ran.add(JSON.parse(line).mutant);
+        }
+        catch {
+            // A line a process was still writing, or none.
+        }
+    }
+    return ran;
+}
+
+/**
+ * Whether a survivor of a shared server is in doubt: its candidates' servers
+ * ran its code when measured, and no attempt of it ran it here. The request
+ * that reached its code did not carry the attempt's mutant (`unreached`): its
+ * verdict is the one it gets alone, with the server started with it.
+ */
+export function unreached(kind, entry, ran) {
+    return kind !== "alone" && entry.serverRan === true && !ran.has(entry.mutant);
+}
+
 /** A mutant every candidate test lets live, now that one more passed with it: its verdict. */
 function surviveIfDone(pass, id) {
     if (settled(pass, id) || existsSync(`${pass.round}/confirm/${key(id)}`) || existsSync(`${pass.round}/doubt/${key(id)}`))
         return;
     const entry = mutantOf(pass, id);
+    // The round's judge sends it to run alone.
+    if (unreached(loadWorker(pass).kind, entry, ranByRequests(pass)))
+        return;
     const passed = passedWith(pass, id);
     // Every candidate passed with it: one that failed without it is left to
     // the round's judge, once its controls are all known.
@@ -1503,8 +1536,9 @@ export const WHY = {
     "unfinished": "not every candidate test ran in the shared pass",
     "confirm": "a test killed it beside other mutants' attempts",
     "doubt": "the test that killed it failed without it too, on the same server",
+    "unreached": "its candidates passed on the shared server, yet no attempt of theirs ran it there: the requests that reached its code did not carry their test's mutant",
 };
-export const EVERYWHERE = ["background", "module-level", "by-time"];
+export const EVERYWHERE = ["background", "module-level", "by-time", "unreached"];
 
 /** What a verdict from a later round says of it. */
 export function reasonOf(kind, reason) {
