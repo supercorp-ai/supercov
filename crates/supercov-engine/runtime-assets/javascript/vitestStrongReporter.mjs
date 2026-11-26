@@ -21,7 +21,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { availableParallelism } from "node:os";
-import { relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 
 // A mutant's test, and its copy, get twice StrykerJS's limit: 1.5× the
 // measured time and 5 s, doubled.
@@ -719,7 +719,18 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // Vitest 2 and later pass specifications; Vitest 1, [project, file].
     const fileOf = (spec) => spec.moduleId ?? (Array.isArray(spec) ? spec[1] : spec);
     const specOf = new Map(specs.map((spec) => [toRelative(root, fileOf(spec)), spec]));
-    const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+    // Once the pass is told to stop (Supercov notes when, `stopped-at`
+    // beside the results, before it signals the command), its copies are
+    // stopped under their tests: a copy that ends then says nothing of its
+    // mutant, and no verdict is written. The mutant is left for the next
+    // pass. One judged from a copy the budget stopped on a macOS runner was a
+    // `killed` for a mutant whose test waits five minutes.
+    const stopping = join(dirname(resultsPath), "stopped-at");
+    const write = (record) => {
+        if (record.status !== undefined && existsSync(stopping))
+            return;
+        appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+    };
     const tests = plan.tests;
     const started = Date.now();
     const passCpu = machineCpu();

@@ -20,15 +20,17 @@
 // whose parent was not chosen) runs whole from then on. A kill by a job that
 // ran other tests than its baseline did is confirmed by running the job's
 // tests again without the mutant. A job past 3x its baseline and 10 s is
-// stopped: a timeout, unless a test had already failed. A baseline ran with
-// the machine to itself, and a job that ran beside others may have spent its
-// time waiting on them (the CPU; Cargo's lock on a build directory, where
-// each job builds Rust compiled to wasm): such a job runs again alone, and
-// only one past its limit there is a timeout.
+// stopped: a timeout, unless a test had already failed. A stopped job may
+// only have waited: on the jobs beside it (the CPU; Cargo's lock on a build
+// directory, where each job builds Rust compiled to wasm), or on a machine
+// busier than when its baseline ran (other work on it, beyond the pass's
+// own). So it runs again alone, after its tests ran alone without the
+// mutant, and its limit there is 3x the slower of that run and its
+// baseline, and 10 s: only a job past that is a timeout.
 import { fork, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, constants, cpus } from "node:os";
-import { basename, delimiter, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // A file whose baseline job took at most this long, the start of the command
@@ -386,7 +388,15 @@ function stop(child) {
 
 export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env, graceMs = 10_000, baselineGraceMs = 60_000 }) {
     const started = Date.now();
-    const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+    // Once the pass is told to stop (`stopped-at` beside the results), its
+    // jobs are stopped under their tests: one that ends then says nothing of
+    // its mutant, and no verdict is written (vitestStrongReporter.mjs).
+    const stopping = join(dirname(resultsPath), "stopped-at");
+    const write = (record) => {
+        if (record.status !== undefined && existsSync(stopping))
+            return;
+        appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+    };
     const work = `${resultsPath}.jobs`;
     mkdirSync(work, { recursive: true });
     const tests = plan.tests;
@@ -685,11 +695,16 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             const bail = !whole || [...baseline.statuses.values()].every((status) => status === "passed");
             let result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs, priority });
             const killerIn = (outcome) => [...outcome.statuses].find(([id, status]) => status === "failed" && (chosen === null || chosen.has(id)) && !excluded(id))?.[0];
-            // Past its limit beside other jobs, with nothing failed: it may
-            // only have waited on them, so it runs again alone.
-            if (result.timedOut && result.crowded && !result.mutantTimedOut && killerIn(result) === undefined) {
+            // Past its limit with nothing failed: it may only have waited, on
+            // the jobs beside it or on a machine busier than when its
+            // baseline ran. It runs again alone, its limit from the same
+            // tests without the mutant run alone just before it, at the
+            // machine's speed now.
+            if (result.timedOut && !result.mutantTimedOut && killerIn(result) === undefined) {
                 profile.alone += 1;
-                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs, alone: true });
+                const now = await job({ mutant: null, file: group.file, tests: chosen, bail: false, limitMs: baselineLimit(group.file, chosen), alone: true });
+                const slowest = Math.max(baseline.durationMs, now.durationMs);
+                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs: 3 * slowest + graceMs, alone: true });
             }
             const ran = [...result.statuses].filter(([id, status]) => status !== "skipped" && (chosen === null || chosen.has(id)));
             const killer = killerIn(result);

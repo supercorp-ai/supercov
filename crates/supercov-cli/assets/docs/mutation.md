@@ -233,7 +233,9 @@ mutants the tests let survive.
   of the tests each runs against, so a pass cut short has decided as many as
   it could. `--budget <seconds>` is the whole command's, measuring and
   planning included: once it is spent the pass stops and ends as a finished
-  one, its verdicts saved, so a job ends when its budget says. The summary
+  one, its verdicts saved, so a job ends when its budget says. Nothing is
+  judged once the pass begins to stop: a test the stop cut short says nothing
+  of its mutant, which is left for the next pass. The summary
   says how many mutants it left for the next pass (`budget of 2400 s spent:
   812 mutant(s) left without a verdict, for the next pass`), and, where
   measuring took half the budget or more, what it took (`measuring took 310 s
