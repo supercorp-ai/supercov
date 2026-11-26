@@ -4,7 +4,8 @@ description: >
   Maven's and Gradle's own retries turned up for what is still fetched. Use it
   twice: `step: restore` before the tests, `step: save` after them, before the
   stop-on-failure step (a cancelled job saves nothing). Maven Central refused
-  a plugin with HTTP 429 and failed whole rounds of runs on 2026-11-23.
+  a plugin with HTTP 429 and failed whole rounds of runs on 2026-11-23: Maven
+  and Gradle fetch it from Google's mirror of it.
 inputs:
   step:
     description: "`restore` or `save`."
@@ -75,6 +76,33 @@ runs:
         </settings>
         EOF
         fi
+        # Gradle fetches Central from the same mirror: its builds and their
+        # plugins' artifacts (the plugin portal sends those to Central) went
+        # to Central itself, and a Kotlin test's build got 429 for
+        # kotlin-gradle-plugins-bom on every try on 2026-11-24. Central's
+        # URLs a build names are read as the mirror's, and the mirror comes
+        # before the portal for plugins.
+        mkdir -p ~/.gradle/init.d
+        cat > ~/.gradle/init.d/central-mirror.gradle <<'EOF'
+        def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+        def central = { repository ->
+            repository instanceof MavenArtifactRepository &&
+                ['https://repo.maven.apache.org/maven2', 'https://repo1.maven.org/maven2'].any { repository.url.toString().startsWith(it) }
+        }
+        def mirrored = { repositories -> repositories.configureEach { if (central(it)) it.url = mirror } }
+        beforeSettings { settings ->
+            settings.pluginManagement.repositories {
+                maven { url = mirror }
+                gradlePluginPortal()
+            }
+            mirrored(settings.pluginManagement.repositories)
+            mirrored(settings.dependencyResolutionManagement.repositories)
+        }
+        allprojects {
+            mirrored(buildscript.repositories)
+            mirrored(repositories)
+        }
+        EOF
         # Gradle's retries of a transient failure, with a longer first wait;
         # it doubles from there.
         mkdir -p ~/.gradle

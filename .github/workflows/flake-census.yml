@@ -1,0 +1,34 @@
+name: Flake census
+
+# Each day, the failures of the last day that the same code did not repeat
+# when run again: a job or a run someone reran and saw pass, or another run of
+# the same commit that passed (scripts/flaky-tests.mjs census). Self
+# Coverage's slices retry no test, and a rerun that turns a slice green also
+# hides why it was red: each such failure, with the tests its log names, is
+# added to the open issue labelled `flaky-tests`, so it gets fixed.
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: How many hours back to look
+        default: "24"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - run: node scripts/flaky-tests.mjs census "${{ inputs.hours || '24' }}"
+        env:
+          GH_TOKEN: ${{ github.token }}

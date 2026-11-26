@@ -2,6 +2,10 @@ name: Full Test262 Conformance
 
 on:
   workflow_dispatch:
+  # Run by hand before a release, and each week on main: a gate nothing
+  # runs between releases is found stale here, not when a release needs it.
+  schedule:
+    - cron: "0 4 * * 0"
 
 permissions:
   contents: read

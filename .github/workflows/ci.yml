@@ -111,7 +111,15 @@ jobs:
           cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
           node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
       # Formatting and clippy are the same on every Node: the lint job's.
-      - run: cargo nextest run --workspace ${{ env.AFFECTED == 'true' && '--profile affected' || '' }} --no-fail-fast --no-tests=pass --partition hash:${{ matrix.part }}/${{ env.AFFECTED == 'true' && 1 || 2 }}
+      # A test that fails runs once more: one that then passes is flaky, and
+      # is named (below, and on the tracking issue) rather than failing the
+      # job; one that fails twice fails it, on a release as anywhere.
+      - run: cargo nextest run --workspace ${{ env.AFFECTED == 'true' && '--profile affected' || '' }} --retries 1 --no-fail-fast --no-tests=pass --partition hash:${{ matrix.part }}/${{ env.AFFECTED == 'true' && 1 || 2 }}
+      - if: ${{ !cancelled() }}
+        uses: ./.github/actions/flaky-tests
+        with:
+          job: check (${{ matrix.node }}, ${{ matrix.part }})
+          id: check-${{ matrix.node }}-${{ matrix.part }}
       # Doctests, which nextest does not run, and the tooling checks: with
       # the first half.
       - if: matrix.part == 1
@@ -559,3 +567,28 @@ jobs:
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
+
+  # Not a gate: the tests this run passed only when it ran them again, added
+  # to the open issue labelled `flaky-tests` (scripts/flaky-tests.mjs).
+  # Nothing here fails the run.
+  flaky-tests:
+    needs: check
+    if: ${{ !cancelled() && needs.check.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: flaky-*
+          path: ${{ runner.temp }}/flaky
+      - run: node scripts/flaky-tests.mjs report "$RUNNER_TEMP/flaky"
+        env:
+          GH_TOKEN: ${{ github.token }}
