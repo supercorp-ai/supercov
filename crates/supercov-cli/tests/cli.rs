@@ -5084,11 +5084,7 @@ fn a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("browser-worker-bootstrap");
     std::os::unix::fs::symlink(modules, project.root.join("node_modules")).unwrap();
     project.write(
@@ -24243,11 +24239,7 @@ fn a_web_server_started_in_the_config_s_folder_can_import_playwright() {
         eprintln!("skipping: Playwright is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("playwright-server-in-config-folder");
     project.write(
         "package.json",
@@ -24321,11 +24313,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright");
     project.write(
         "package.json",
@@ -24582,11 +24570,7 @@ fn a_module_level_value_s_mutants_run_against_the_tests_that_read_it() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-module-values");
     project.write(
         "package.json",
@@ -24805,11 +24789,7 @@ fn mutants_test_kills_server_mutants_tests_reach_without_a_page() {
         eprintln!("skipping: Playwright, Chromium or curl is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-outside-pages");
     project.write(
         "package.json",
@@ -25007,13 +24987,7 @@ fn mutants_test_kills_server_mutants_work_after_a_response_reaches() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let free = || {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    };
+    let free = || common::free_port();
     let (port, batches) = (free(), free());
     let project = Project::empty("strong-playwright-after-response");
     project.write(
@@ -25150,11 +25124,7 @@ fn mutants_test_runs_alone_a_survivor_no_attempt_ran() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-unreached");
     project.write(
         "package.json",
@@ -25257,11 +25227,7 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-limit");
     project.write(
         "package.json",
@@ -25510,11 +25476,7 @@ fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-order");
     project.write(
         "package.json",
@@ -25608,7 +25570,9 @@ fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
             .collect::<Vec<_>>()
     };
     // Each mutant of `show` and of the three texts breaks what a fast test
-    // reads: a fast test kills it, at once.
+    // reads: a fast test kills it, and no more than the three fast ones ran
+    // it. (Its time said so too, under three seconds, until a loaded runner
+    // took 3.5 s over one fast kill.)
     let mut fast_kills = Vec::new();
     for line in 1..=6 {
         for mutant in on_line(line) {
@@ -25616,7 +25580,7 @@ fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
             assert_eq!(strong["status"], "killed", "{mutant}\n{context}");
             assert_ne!(strong["killedBy"], slow.as_str(), "{mutant}\n{context}");
             assert!(
-                strong["durationMs"].as_u64() < Some(3_000),
+                (1..=3).contains(&strong["tests"].as_u64().unwrap_or(0)),
                 "{mutant}\n{context}"
             );
             fast_kills.push(mutant["id"].as_str().unwrap().to_owned());
@@ -25692,11 +25656,7 @@ fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-cold");
     project.write(
         "package.json",
@@ -25842,11 +25802,7 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-resume");
     project.write(
         "package.json",
@@ -25982,7 +25938,7 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
             .collect::<std::collections::BTreeSet<_>>();
         // The web server a stopped pass started may take a moment to end.
         for _ in 0..100 {
-            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            if std::net::TcpListener::bind(("127.0.0.1", port.number())).is_ok() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -26128,11 +26084,7 @@ fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-first-tier");
     project.write(
         "package.json",
@@ -26325,7 +26277,7 @@ fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
     // The next pass runs the rest alone, and it survives with all 34, once
     // the web server the stopped pass started has ended.
     for _ in 0..100 {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if std::net::TcpListener::bind(("127.0.0.1", port.number())).is_ok() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -26365,13 +26317,7 @@ fn a_playwright_pass_with_serial_files_stops_at_its_budget() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let ports = [0, 1].map(|_| {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    });
+    let ports = [0, 1].map(|_| common::free_port());
     let project = Project::empty("strong-playwright-budget");
     project.write(
         "package.json",
@@ -26484,13 +26430,7 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let ports = [0, 1].map(|_| {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    });
+    let ports = [0, 1].map(|_| common::free_port());
     let project = Project::empty("strong-playwright-spread");
     project.write(
         "package.json",
@@ -26636,11 +26576,7 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
 #[test]
 fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
     let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-spans");
     project.write(
         "package.json",
@@ -26666,17 +26602,28 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
             "export default {{\n  testDir: \"tests\",\n  fullyParallel: true,\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/?n=1\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
         ),
     );
-    // Each holds its worker a while: the two run at once.
+    // Each holds its worker a while: the two run at once. Measured, each
+    // waits for the other to have started (`MEET`, a folder each notes its
+    // start in): they overlap however late a loaded machine starts the
+    // second worker. With 1.5 s alone, a second worker that started after
+    // the first test had ended left the spans apart.
     project.write(
         "tests/double.spec.js",
-        "import { test, expect } from \"@playwright/test\";\nfor (const n of [2, 3]) {\n  test(`doubles ${n}`, async ({ request }) => {\n    await new Promise((done) => setTimeout(done, 1500));\n    expect(await (await request.get(`/?n=${n}`)).text()).toBe(String(n * 2));\n  });\n}\n",
+        "import { test, expect } from \"@playwright/test\";\nimport { existsSync, writeFileSync } from \"node:fs\";\nimport { join } from \"node:path\";\nconst meet = async (n) => {\n  const folder = process.env.MEET;\n  if (!folder) return;\n  writeFileSync(join(folder, String(n)), \"\");\n  const other = join(folder, String(5 - n));\n  while (!existsSync(other)) await new Promise((done) => setTimeout(done, 20));\n};\nfor (const n of [2, 3]) {\n  test(`doubles ${n}`, async ({ request }) => {\n    await meet(n);\n    await new Promise((done) => setTimeout(done, 1500));\n    expect(await (await request.get(`/?n=${n}`)).text()).toBe(String(n * 2));\n  });\n}\n",
     );
     project.git(&["init", "-q"]);
     project.commit("spans");
     let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    let meet = project.root.with_extension("meet");
+    std::fs::create_dir_all(&meet).unwrap();
+    let meeting = meet.display().to_string();
     project
-        .supercov_with(&["--", "npx", "playwright", "test"], &roots)
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("MEET", meeting.as_str())],
+        )
         .succeeds();
+    let _ = std::fs::remove_dir_all(&meet);
     let plan = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan", "--json"],
@@ -26712,7 +26659,15 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
         .unwrap_or_else(|| panic!("no main pass\n{reply}\n{}", ran.stderr()))
         .clone();
     assert_eq!(main["serialFiles"], 0, "{main}\n{reply}");
-    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    assert_eq!(
+        reply["summary"]["error"],
+        0,
+        "{reply}\n{listed}\n{}",
+        ran.stderr()
+    );
 }
 
 /// A Playwright plan of thousands of mutants, each with every test a
@@ -26732,14 +26687,8 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
 #[test]
 fn a_large_playwright_plan_runs_in_a_small_heap() {
     let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    let listeners = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect::<Vec<_>>();
-    let ports = listeners
-        .iter()
-        .map(|listener| listener.local_addr().unwrap().port().to_string())
-        .collect::<Vec<_>>();
-    drop(listeners);
+    let held = (0..3).map(|_| common::free_port()).collect::<Vec<_>>();
+    let ports = held.iter().map(ToString::to_string).collect::<Vec<_>>();
     let project = Project::empty("strong-playwright-heap");
     project.write(
         "package.json",
