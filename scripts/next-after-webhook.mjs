@@ -71,7 +71,11 @@ try {
   for (const [original, replacement] of [['sale.amount > 0', 'false'], ['sale.amount > 0', 'sale.amount <= 0']]) {
     const mutant = mutants.find((entry) => entry.original === original && entry.replacement === replacement);
     assert.equal(mutant?.strong?.status, 'killed', `${original} -> ${replacement}\n${context}`);
-    assert.match(mutant.strong.reason, /ran alone, with the server started with it switched on: its code ran in server work no request was waiting for/u, context);
+    // A mutant compiling to the same code as another takes that one's verdict; the reason is then the twin's.
+    const twinId = mutant.strong.reason.match(/^same-code-as:(.+)$/u)?.[1];
+    const decided = twinId ? mutants.find((entry) => entry.id === twinId) : mutant;
+    assert.equal(decided?.strong?.status, 'killed', `${original} -> ${replacement} (twin ${twinId})\n${context}`);
+    assert.match(decided.strong.reason, /ran alone, with the server started with it switched on: its code ran in server work no request was waiting for/u, context);
   }
   console.log('[next-after-webhook] a Next.js webhook naming no test, whose route works in after(), has its mutants killed: run alone, with the server started with them');
 } finally {
