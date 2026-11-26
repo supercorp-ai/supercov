@@ -1,34 +1,51 @@
 name: Rust mutation validation
 
-# Supercov's strong pass for Rust against cargo-mutants 27.1.0 on public
-# crates, on the same runner type with the same parallelism: cargo-mutants'
-# outcomes (every mutant, the whole suite) in shards, Supercov's measured run
-# and strong pass per crate, then the agreement and the timings.
+# Supercov's strong pass for Rust against cargo-mutants 27.1.0 on the public
+# crates of benchmarks/mutation/rust/corpus.json, on the same runner type
+# with the same parallelism: cargo-mutants' outcomes (every mutant, the whole
+# suite) in shards, Supercov's `supercov mutants --shard k/n` per crate, its
+# shards merged as a split pass merges them, then the agreement and the
+# times (wall and CPU, from GNU time). Every job ends within 10 minutes.
 
 on:
-  push:
-    branches: [release/mutation-rust]
-    paths:
-      - .github/workflows/mutation-rust.yml
-      - scripts/cargo-mutants-agreement.mjs
   workflow_dispatch:
+    inputs:
+      crates:
+        description: "Space-separated crate names (default: the whole corpus)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
 
 env:
-  # Mutants built and tested at once, by each tool.
+  # Mutants built and tested at once, by each tool: half the runner's CPUs.
   JOBS: 2
-  CORPUS: |
-    strsim https://github.com/rapidfuzz/strsim-rs v0.11.1
-    hex https://github.com/KokaKiwi/rust-hex v0.4.3
-    semver https://github.com/dtolnay/semver 1.0.27
+  CARGO_TERM_COLOR: never
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      truth: ${{ steps.plan.outputs.truth }}
+      supercov: ${{ steps.plan.outputs.supercov }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: plan
+        env:
+          CRATES: ${{ inputs.crates }}
+        run: node benchmarks/mutation/rust/summarize.mjs plan >> "$GITHUB_OUTPUT"
+
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mutation-rust-supercov
       - run: cargo build --release --bin supercov
       - uses: actions/upload-artifact@v4
         with:
@@ -37,124 +54,95 @@ jobs:
 
   truth:
     name: cargo-mutants ${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.shards }}
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { crate: strsim, shard: 0, shards: 4 }
-          - { crate: strsim, shard: 1, shards: 4 }
-          - { crate: strsim, shard: 2, shards: 4 }
-          - { crate: strsim, shard: 3, shards: 4 }
-          - { crate: hex, shard: 0, shards: 2 }
-          - { crate: hex, shard: 1, shards: 2 }
-          - { crate: semver, shard: 0, shards: 4 }
-          - { crate: semver, shard: 1, shards: 4 }
-          - { crate: semver, shard: 2, shards: 4 }
-          - { crate: semver, shard: 3, shards: 4 }
+        include: ${{ fromJSON(needs.plan.outputs.truth) }}
     steps:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.140
       - name: Clone
-        run: |
-          line=$(echo "$CORPUS" | grep "^${{ matrix.crate }} ")
-          set -- $line
-          git clone -q --depth 1 --branch "$3" "$2" project
+        run: git clone -q --depth 1 --branch "${{ matrix.tag }}" "${{ matrix.repo }}" project
       - name: cargo mutants
         working-directory: project
         run: |
-          start=$(date +%s.%N)
-          cargo mutants -j "$JOBS" --no-shuffle --shard ${{ matrix.shard }}/${{ matrix.shards }} --output out || echo "exit $?"
-          end=$(date +%s.%N)
-          echo "{\"crate\":\"${{ matrix.crate }}\",\"shard\":${{ matrix.shard }},\"seconds\":$(echo "$end - $start" | bc)}" > out/timing.json
-          cat out/timing.json
+          mkdir -p ../out
+          # Stopped short of the job's limit, its outcomes so far are kept.
+          /usr/bin/time -v -o ../out/time.txt timeout 500 \
+            cargo mutants -j "$JOBS" --no-shuffle ${{ matrix.args }} \
+            --shard ${{ matrix.index }}/${{ matrix.shards }} --output ../out || echo "exit $?"
+          cat ../out/time.txt | head -12
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: truth-${{ matrix.crate }}-${{ matrix.shard }}
+          name: truth-${{ matrix.crate }}-${{ matrix.index }}
           path: |
-            project/out/mutants.out/outcomes.json
-            project/out/timing.json
+            out/mutants.out/outcomes.json
+            out/time.txt
 
   supercov:
-    name: supercov ${{ matrix.crate }}
-    needs: build
+    name: supercov ${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.shards }}
+    needs: [plan, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        crate: [strsim, hex, semver]
+        include: ${{ fromJSON(needs.plan.outputs.supercov) }}
     steps:
       - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       - uses: actions/download-artifact@v4
         with:
           name: supercov-bin
           path: bin
       - run: chmod +x bin/supercov
       - name: Clone
+        run: git clone -q --depth 1 --branch "${{ matrix.tag }}" "${{ matrix.repo }}" project
+      - name: supercov mutants
+        working-directory: project
         run: |
-          line=$(echo "$CORPUS" | grep "^${{ matrix.crate }} ")
-          set -- $line
-          git clone -q --depth 1 --branch "$3" "$2" project
-      - name: Overhead (plain, measured, measured with value probes; each from a cold build)
-        run: |
-          mkdir -p result
-          t() { local s=$(date +%s.%N); "$@" > /dev/null 2>&1 || echo "exit $? from $*" >&2; echo "$(date +%s.%N) - $s" | bc; }
-          for kind in plain measured probes; do cp -r project $kind; done
-          plain=$(cd plain && t cargo test)
-          measured=$(cd measured && t ../bin/supercov -- cargo test)
-          probes=$(cd probes && SUPERCOV_MUTANTS=1 t ../bin/supercov -- cargo test)
-          echo "{\"crate\":\"${{ matrix.crate }}\",\"plain\":$plain,\"measuredRun\":$measured,\"probedRun\":$probes}" > result/overhead.json
-          cat result/overhead.json
-          (cd measured && ../bin/supercov runs latest mutants --format jsonl --output ../result/weak-plain.jsonl) || true
-          (cd probes && ../bin/supercov runs latest mutants --format jsonl --output ../result/weak-probes.jsonl) || true
-          rm -rf plain measured
-      - name: Strong pass from the probed run
-        working-directory: probes
-        run: |
-          t2=$(date +%s.%N)
-          SUPERCOV_STRONG_JOBS="$JOBS" ../bin/supercov runs latest mutants test --json > ../result/strong.json 2> ../result/strong.log || echo "strong exit $?"
-          t3=$(date +%s.%N)
-          cp .supercov/runs/*/strong-mutation.json ../result/ || true
-          echo "{\"crate\":\"${{ matrix.crate }}\",\"strong\":$(echo "$t3 - $t2" | bc)}" > ../result/timing.json
-          cat ../result/timing.json; tail -20 ../result/strong.log
+          mkdir -p ../out
+          # The budget ends the pass in time; what it leaves would show as
+          # mutants without a verdict.
+          SUPERCOV_STRONG_JOBS="$JOBS" /usr/bin/time -v -o ../out/time.txt \
+            ../bin/supercov mutants --shard ${{ matrix.shard }}/${{ matrix.shards }} --budget 500 --json \
+            -- ${{ matrix.test }} > ../out/strong.json 2> ../out/strong.log || echo "exit $?"
+          head -12 ../out/time.txt; tail -15 ../out/strong.log
+          ../bin/supercov runs latest mutants --format jsonl --output ../out/weak.jsonl || true
+          cp -r .supercov/runs ../out/runs
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: supercov-${{ matrix.crate }}
-          path: result
+          name: supercov-${{ matrix.crate }}-${{ matrix.shard }}
+          include-hidden-files: true
+          path: out
 
   agreement:
     needs: [truth, supercov]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Agreement
-        run: |
-          mkdir -p report
-          for crate in strsim hex semver; do
-            root=work/$crate
-            mkdir -p $root/.supercov/runs/run
-            cp artifacts/supercov-$crate/strong-mutation.json $root/.supercov/runs/run/ || continue
-            outcomes=$(ls artifacts/truth-$crate-*/out/mutants.out/outcomes.json artifacts/truth-$crate-*/mutants.out/outcomes.json 2>/dev/null | sed 's/^/--outcomes /' | tr '\n' ' ')
-            node scripts/cargo-mutants-agreement.mjs --root $root --run run $outcomes --weak artifacts/supercov-$crate/weak-probes.jsonl --json > report/$crate.json || true
-            node scripts/cargo-mutants-agreement.mjs --root $root --run run $outcomes --weak artifacts/supercov-$crate/weak-probes.jsonl | tee report/$crate.txt || true
-            node scripts/cargo-mutants-agreement.mjs --root $root --run run $outcomes --weak artifacts/supercov-$crate/weak-plain.jsonl | grep weak | sed 's/^/plain run /' | tee -a report/$crate.txt || true
-          done
-          cat artifacts/*/timing.json artifacts/*/overhead.json 2>/dev/null | tee report/timings.jsonl
+      - run: chmod +x artifacts/supercov-bin/supercov
+      - name: Merge, join and summarize
+        env:
+          CRATES: ${{ inputs.crates }}
+        run: node benchmarks/mutation/rust/summarize.mjs report artifacts report | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: agreement
           path: report
