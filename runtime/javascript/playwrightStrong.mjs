@@ -46,6 +46,14 @@
 // mutant broke ends there; an attempt that ran out of it is a `timeout`,
 // confirmed as a kill is.
 //
+// Such an attempt ends sooner where it has stalled (`watchStall`): past every
+// time a run of its test that passed took (its baseline × the factor + 1 s),
+// waiting on a Playwright call that cannot end by its own timeout before the
+// limit (a click with no timeout, an `expect` given 15 s), with its pages
+// quiet (no request sent or answered for a second). Nothing it waits on can
+// make it fail before the limit, and no passing run took that long: the limit
+// would end it as a `timeout` all the same, later.
+//
 // This module holds what the config, the fixture (playwright.mjs) and the
 // reporter (playwrightStrongReporter.mjs) share.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -54,6 +62,18 @@ import { basename, dirname, resolve, sep } from "node:path";
 
 const TIMEOUT_FACTOR = 1.5;
 const TIMEOUT_CONSTANT_MS = 5_000;
+// Past its baseline × the factor + this, an attempt has outlasted every run
+// of its test that passed: on a large app's suite, 5,831 attempts that passed
+// took at most 0.5 s past their baseline.
+const STALL_CONSTANT_MS = 1_000;
+// How long an attempt's pages must have sent and answered no request.
+const QUIET_MS = 1_000;
+// How often a stalled attempt is looked for.
+const STALL_POLL_MS = 100;
+// Playwright's calls that wait for a navigation, under its navigation timeout.
+const NAVIGATIONS = new Set(["goto", "reload", "goBack", "goForward", "waitForURL", "waitForNavigation", "waitForLoadState"]);
+// An API request's own timeout where nothing sets one (Playwright's default).
+const REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_DURATION_MS = 1_000;
 // How much likelier to kill a mutant a test is taken to be where its own
 // evidence infected it than where it only reached it: what orders a mutant's
@@ -187,13 +207,122 @@ export function limitOf(baselineMs, factor) {
     return Math.ceil(baselineMs * factor + TIMEOUT_CONSTANT_MS);
 }
 
-/** What a verdict says of an attempt that ran out of its time limit. */
+/** What a verdict says of an attempt that ran out of its time limit, or stalled before it. */
 function limitReason(attempt) {
     const seconds = (ms) => `${(ms / 1000).toFixed(1)} s`;
+    const waiting = attempt.waitingOn ? `, waiting on ${attempt.waitingOn}` : "";
+    if (attempt.stalledAtMs !== undefined)
+        return `stopped at ${seconds(attempt.stalledAtMs)} of its ${seconds(attempt.limitMs)} time limit, past every run of the test that passed (${attempt.timeoutFactor} × its ${seconds(attempt.baselineMs)} baseline + ${STALL_CONSTANT_MS / 1000} s), its pages quiet${waiting}, which cannot end before the limit`;
     const why = attempt.limitMs < limitOf(attempt.baselineMs, attempt.timeoutFactor)
         ? "the test's own timeout"
         : `${attempt.timeoutFactor} × its ${seconds(attempt.baselineMs)} baseline + ${TIMEOUT_CONSTANT_MS / 1000} s`;
-    return `ran past its time limit of ${seconds(attempt.limitMs)} (${why})`;
+    return `ran past its time limit of ${seconds(attempt.limitMs)} (${why})${waiting}`;
+}
+
+/**
+ * When a Playwright call the test made ends by its own timeout, from when it
+ * began: `Infinity` where it has none. `method` is the call, `args` what it
+ * was given; `request` says it is an API request's; `timeouts` are the test's
+ * defaults (`action`, `navigation`; 0 for none). An `expect` on a locator
+ * reaches Playwright as `_expect`, with the timeout it runs under.
+ */
+export function ownDeadline({ method, args, startedAt, request, timeouts }) {
+    const after = (ms) => (ms > 0 ? startedAt + ms : Infinity);
+    if (method === "waitForTimeout")
+        return startedAt + (Number(args[0]) || 0);
+    const options = [...args].reverse().find((arg) => arg !== null && typeof arg === "object" && typeof arg.timeout === "number");
+    if (options)
+        return after(options.timeout);
+    if (request)
+        return after(timeouts.action > 0 ? Math.min(timeouts.action, REQUEST_TIMEOUT_MS) : REQUEST_TIMEOUT_MS);
+    if (NAVIGATIONS.has(method))
+        return after(timeouts.navigation || timeouts.action);
+    return after(timeouts.action);
+}
+
+/**
+ * A Playwright call as a timeout's reason names it (a bundled
+ * Playwright's `_Locator` is a `Locator`): `Locator.click (#save)`, `expect(#save) to.be.visible`, `expect to.have.url`,
+ * `Page.waitForURL`.
+ */
+export function describeCall(object, method, args) {
+    const selector = typeof object?._selector === "string" ? object._selector : undefined;
+    const said = method === "_expect"
+        ? `expect${selector ? `(${selector})` : ""} ${args[0]}`
+        : `${(object?.constructor?.name ?? "Playwright").replace(/^_+/, "")}.${method}${selector ? ` (${selector})` : ""}`;
+    return said.length > 160 ? `${said.slice(0, 159)}…` : said;
+}
+
+/**
+ * The call a stalled attempt waits on, or `undefined`: the newest Playwright
+ * call, one the test's own code made, has not returned, no call still running can end by its
+ * own timeout before `limitAt`, and its pages have been quiet since
+ * `quietSince` for a second.
+ */
+export function stalledOn({ waits, newest, limitAt, quietSince, now }) {
+    // The newest call is the test's own (a fixture's setup, such as a new
+    // page, is no wait of the test's).
+    if (!newest || !waits.has(newest) || !newest.fromTest)
+        return undefined;
+    if (now - quietSince < QUIET_MS)
+        return undefined;
+    for (const wait of waits) {
+        if (wait.deadline < limitAt)
+            return undefined;
+    }
+    return newest;
+}
+
+/** When, from its start, a mutant attempt has outlasted every passing run of its test. */
+export function stallWindowOf(baselineMs, factor) {
+    return Math.ceil(baselineMs * factor + STALL_CONSTANT_MS);
+}
+
+/**
+ * Ends a mutant attempt as a timeout once it has stalled (`stalledOn`, asked
+ * of `look(limitAt)` every tenth of a second from the end of its window, which
+ * counts from the first call the test's own code made, `since`):
+ * its test's timeout is set to what it has already run. The watch says when
+ * it did so and on what (`stalled`), and, where it went on to its limit, what
+ * it last waited on (`waiting`). `stop()` ends the watch.
+ */
+export function watchStall(testInfo, claimed, look) {
+    if (claimed?.kind !== "mutant")
+        return undefined;
+    const from = claimed.startedAt + stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
+    if (from >= claimed.limitAt)
+        return undefined;
+    const windowMs = stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
+    const watch = { stalled: undefined, waiting: undefined, timer: undefined };
+    const check = () => {
+        // A test whose body has ended (it failed, ran out of time, or its
+        // fixtures are being torn down: Playwright sets its duration then)
+        // waits on nothing of its own: what its teardown closes is not what
+        // it waited on.
+        if (testInfo.status !== "passed" || testInfo.duration > 0)
+            return;
+        const { stalled, waiting, since } = look(claimed.limitAt);
+        watch.waiting = waiting;
+        // The window counts from the test's first call of its own, not from
+        // its claim: setting up its page in a new worker on a loaded machine
+        // took seconds, which no baseline holds.
+        if (stalled && Date.now() >= since + windowMs) {
+            watch.stalled = { atMs: Date.now() - claimed.startedAt, waitingOn: stalled };
+            testInfo.setTimeout(Math.max(1, Date.now() - claimed.claimedAt));
+            return;
+        }
+        watch.timer = setTimeout(check, STALL_POLL_MS);
+    };
+    watch.timer = setTimeout(check, Math.max(0, from - Date.now()));
+    watch.stop = () => clearTimeout(watch.timer);
+    return watch;
+}
+
+/** What a stall watch adds to its attempt's end. */
+export function stallDetails(watch) {
+    if (watch?.stalled)
+        return { stalledAtMs: watch.stalled.atMs, waitingOn: watch.stalled.waitingOn };
+    return watch?.waiting ? { waitingOn: watch.waiting } : {};
 }
 
 /**
@@ -1412,6 +1541,7 @@ export async function strongClaim(testInfo) {
     else if (configured > 0)
         testInfo.setTimeout(Date.now() - started + configured);
     const { running, beside } = startRunning(pass, testInfo.testId, attempt.mutant);
+    const startedAt = Date.now();
     const claimed = {
         original,
         title: test.title,
@@ -1421,8 +1551,10 @@ export async function strongClaim(testInfo) {
         kind: attempt.kind,
         id: attempt.id,
         mutant: attempt.mutant,
-        ...(attempt.kind === "mutant" ? { baselineMs: attempt.baselineMs, limitMs: attempt.limitMs, timeoutFactor: attempt.timeoutFactor, ...(attempt.cold ? { cold: true } : {}) } : {}),
-        startedAt: Date.now(),
+        // A mutant's: when its limit ends it, and when its claim began,
+        // which the test's timeout counts from (`watchStall`).
+        ...(attempt.kind === "mutant" ? { baselineMs: attempt.baselineMs, limitMs: attempt.limitMs, timeoutFactor: attempt.timeoutFactor, limitAt: startedAt + attempt.limitMs, claimedAt: started, ...(attempt.cold ? { cold: true } : {}) } : {}),
+        startedAt,
         lock,
         running,
         besideAtStart: beside,

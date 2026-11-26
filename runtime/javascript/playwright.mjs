@@ -20,7 +20,7 @@ import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
-import { PAGE_TIMEOUT_MARKER, activatePageMutant, installCopies, ranInWorker, strongClaim, strongFinish } from "./playwrightStrong.mjs";
+import { PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, ownDeadline, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -189,6 +189,10 @@ const ACTION_METHODS = new Set([
     "type",
     "uncheck",
 ]);
+// The calls that open and close a test's browser contexts and pages, as
+// Playwright's own fixtures make them while setting a test up and tearing
+// it down: no wait of the test's, and not where its own time starts.
+const LIFECYCLE = new Set(["Browser.newContext", "Browser.newPage", "BrowserContext.newPage", "BrowserContext.close", "Page.close"]);
 const REQUEST_METHODS = new Set([
     "delete",
     "fetch",
@@ -203,6 +207,26 @@ function isApiRequestContext(value) {
     return (typeof candidate["fetch"] === "function" &&
         typeof candidate["get"] === "function" &&
         typeof candidate["post"] === "function");
+}
+/**
+ * Where in the test's own code a call was made, for a timeout's reason: the
+ * stack through these proxies runs past V8's usual ten frames.
+ */
+function testSite() {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 50;
+    const stack = new Error().stack?.split("\n").slice(2) ?? [];
+    Error.stackTraceLimit = limit;
+    // A strong pass runs the suite in its isolated copy of the project, under
+    // `.supercov/`: the test's frame is any outside `node_modules`, said
+    // relative to where the suite runs.
+    const frame = stack.find((line) => /[/\\]tests?[/\\]|\.(spec|test)\.[cm]?[jt]sx?:/.test(line) && !line.includes("node_modules"));
+    if (!frame)
+        return undefined;
+    const root = process.cwd().replaceAll("\\", "/");
+    const place = frame.trim().replace(/^at\s+/, "").replaceAll("\\", "/").replace(`${pathToFileURL(root).href}/`, "").replace(`${root}/`, "");
+    // `name (file:line:column)`: the place alone.
+    return /\(([^()]+)\)$/.exec(place)?.[1] ?? place;
 }
 function callerSource() {
     const stack = new Error().stack?.split("\n").slice(2) ?? [];
@@ -278,6 +302,16 @@ class CoveragePhaseController {
     // Set when a worker's evidence could not be read: the test's coverage is
     // then a lower bound.
     workerEvidenceMissing = false;
+    // A strong attempt's: the test's default timeouts (`watchWaits`), the
+    // calls it made on Playwright's objects that have not settled, each with
+    // when its own timeout ends it, the newest of them, and since when its
+    // pages have sent and answered no request (`stall`).
+    waitTimeouts;
+    waits = new Set();
+    newestWait;
+    testCalledAt;
+    matcherSite;
+    quietSince = Date.now();
     disposed = false;
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
@@ -647,10 +681,18 @@ class CoveragePhaseController {
             void this.registerWorker(worker);
         };
         const closed = () => this.closedContexts.add(context);
-        context.on("page", register);
-        context.on("serviceworker", registerServiceWorker);
-        context.on("close", closed);
-        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker], ["close", closed]]);
+        const listeners = [["page", register], ["serviceworker", registerServiceWorker], ["close", closed]];
+        // A strong attempt's pages are busy while they send or have
+        // answered a request: not stalled.
+        if (this.waitTimeouts) {
+            const busy = () => {
+                this.quietSince = Date.now();
+            };
+            listeners.push(["request", busy], ["requestfinished", busy], ["requestfailed", busy]);
+        }
+        for (const [event, listener] of listeners)
+            context.on(event, listener);
+        this.contextListeners.set(context, listeners);
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
         for (const page of context.pages())
@@ -761,6 +803,56 @@ class CoveragePhaseController {
     requestPhaseId() {
         return this.activePhaseId;
     }
+    /** Keeps the calls a strong attempt makes, under its test's default timeouts. */
+    watchWaits(timeouts) {
+        this.waitTimeouts = timeouts;
+    }
+    /** A call the test made on one of Playwright's objects, until it settles. */
+    trackWait(object, method, args, pending, site) {
+        if (!this.waitTimeouts || !(pending instanceof Promise))
+            return;
+        // A locator assertion's `_expect` comes from Playwright's matcher:
+        // where the test called the matcher.
+        this.keepWait(describeCall(object, method, args), ownDeadline({ method, args, startedAt: Date.now(), request: isApiRequestContext(object), timeouts: this.waitTimeouts }), pending, site ?? this.matcherSite);
+    }
+    /**
+     * An `expect.poll` or a `toPass`, until it settles: it ends by its own
+     * timeout, `timeout` where the test gave one, else its config's.
+     */
+    keepRetries(operation, timeout, polls, pending) {
+        if (!this.waitTimeouts || !(pending instanceof Promise))
+            return;
+        const ms = timeout ?? (polls ? this.waitTimeouts.expect : this.waitTimeouts.toPass);
+        this.keepWait(operation, ms > 0 ? Date.now() + ms : Infinity, pending, this.matcherSite);
+    }
+    keepWait(operation, deadline, pending, at) {
+        // Whether it is the test's own (not opening or closing a context or
+        // a page, as Playwright's fixtures do); the first such call is where
+        // the test's own time starts.
+        // Where in the test it was called (`at`), for a timeout's reason.
+        const wait = { operation: at ? `${operation} at ${at}` : operation, deadline, fromTest: !LIFECYCLE.has(operation.split(" ")[0]) };
+        if (wait.fromTest)
+            this.testCalledAt ??= Date.now();
+        this.waits.add(wait);
+        this.newestWait = wait;
+        const settled = () => this.waits.delete(wait);
+        pending.then(settled, settled);
+    }
+    /** A default timeout the test set on a page or a context: the shortest counts. */
+    lowerTimeout(method, args) {
+        const ms = Number(args[0]);
+        if (!this.waitTimeouts || !(ms > 0))
+            return;
+        const kind = method === "setDefaultTimeout" ? "action" : "navigation";
+        const now = this.waitTimeouts[kind];
+        this.waitTimeouts[kind] = now > 0 ? Math.min(now, ms) : ms;
+    }
+    /** What a strong attempt is stalled on before `limitAt`, if it is, and what it waits on now. */
+    stall(limitAt) {
+        const newest = this.newestWait;
+        const stalled = stalledOn({ waits: this.waits, newest, limitAt, quietSince: this.quietSince, now: Date.now() });
+        return { stalled: stalled?.operation, waiting: this.waits.has(newest) ? newest.operation : undefined, since: this.testCalledAt };
+    }
     async dispose() {
         this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
@@ -815,6 +907,9 @@ class CoveragePhaseController {
                 const method = String(property);
                 return (...args) => {
                     this.promotePendingAssertion();
+                    // Where the test made the call, while its frame is
+                    // still on the stack.
+                    const site = this.waitTimeouts ? testSite() : undefined;
                     const isRequest = REQUEST_METHODS.has(method) &&
                         isApiRequestContext(object);
                     if (ACTION_METHODS.has(method) || isRequest) {
@@ -822,7 +917,9 @@ class CoveragePhaseController {
                             const operation = `${object.constructor?.name ?? "Playwright"}.${method}`;
                             const phase = await this.beginAction(operation);
                             try {
-                                const result = await Reflect.apply(value, object, isRequest ? this.scopeApiRequest(args) : args);
+                                const pending = Reflect.apply(value, object, isRequest ? this.scopeApiRequest(args) : args);
+                                this.trackWait(object, method, args, pending, site);
+                                const result = await pending;
                                 this.finish(phase);
                                 return this.prepareResult(result);
                             }
@@ -836,6 +933,9 @@ class CoveragePhaseController {
                         ? this.scopeBrowserContext(args)
                         : args;
                     const result = Reflect.apply(value, object, invokedArgs);
+                    if (method === "setDefaultTimeout" || method === "setDefaultNavigationTimeout")
+                        this.lowerTimeout(method, invokedArgs);
+                    this.trackWait(object, method, invokedArgs, result, site);
                     return this.wrapResult(result, method === "newContext" ? invokedArgs : undefined);
                 };
             },
@@ -1664,7 +1764,12 @@ function isPlaywrightValue(value) {
         return true;
     }
 }
-function wrapMatchers(matchers, path = "expect", settles = false) {
+/**
+ * The matchers of an `expect`. `retries` is what an `expect.poll` or a
+ * `toPass` retries under: whether it polls, and the timeout its `expect` was
+ * given (`expect.poll(fn, { timeout })`, `expect.configure({ timeout })`).
+ */
+function wrapMatchers(matchers, path = "expect", settles = false, retries = { polls: false, timeout: undefined }) {
     return new Proxy(matchers, {
         get(target, property) {
             // Matcher objects and built-ins can expose getters whose internal slots
@@ -1675,11 +1780,15 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
             if (value &&
                 typeof value === "object" &&
                 (name === "not" || name === "resolves" || name === "rejects"))
-                return wrapMatchers(value, `${path}.${name}`, settles && name === "not");
+                return wrapMatchers(value, `${path}.${name}`, settles && name === "not", retries);
             if (typeof value !== "function")
                 return value;
             return (...args) => {
                 const controller = activeController;
+                // Where the test called the matcher: the calls it makes of
+                // Playwright's objects are named by it.
+                if (controller?.waitTimeouts)
+                    controller.matcherSite = testSite();
                 const settled = settles && SETTLED_MATCHERS.has(name);
                 const phase = bridgedAssertionDepth === 0
                     ? controller?.beginAssertion(`${path}.${name}`, undefined, !settled)
@@ -1690,6 +1799,10 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
                     controller?.promotePendingAssertion();
                 try {
                     const result = Reflect.apply(value, target, args);
+                    // A poll, or `toPass`, retries until its own timeout,
+                    // whatever the calls in it wait on.
+                    if (retries.polls || name === "toPass")
+                        controller?.keepRetries(`${path}.${name}`, retries.polls ? retries.timeout : args[0]?.timeout ?? retries.timeout, retries.polls, result);
                     if (result instanceof Promise) {
                         return result.then((resolved) => {
                             if (phase && controller)
@@ -1714,21 +1827,22 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
         },
     });
 }
-function wrapExpectCallable(callable, polls = false) {
+function wrapExpectCallable(callable, polls = false, timeout = undefined) {
     return new Proxy(callable, {
         apply(target, thisArg, argumentsList) {
             const result = Reflect.apply(target, thisArg, argumentsList);
+            // `expect.configure(options)`: an `expect` under its timeout.
             if (typeof result === "function")
-                return wrapExpectCallable(result, polls);
+                return wrapExpectCallable(result, polls, argumentsList[0]?.timeout ?? timeout);
             if (result && typeof result === "object")
-                return wrapMatchers(result, "expect", !polls && !isPlaywrightValue(argumentsList[0]));
+                return wrapMatchers(result, "expect", !polls && !isPlaywrightValue(argumentsList[0]), { polls, timeout: polls ? argumentsList[1]?.timeout ?? timeout : timeout });
             return result;
         },
         get(target, property, receiver) {
             const value = Reflect.get(target, property, receiver);
             if (typeof value !== "function")
                 return value;
-            return wrapExpectCallable(value.bind(target), polls || property === "poll");
+            return wrapExpectCallable(value.bind(target), polls || property === "poll", timeout);
         },
     });
 }
@@ -1870,6 +1984,13 @@ const instrumentedFixtures = {
             const configuredHeaders = Object.fromEntries(Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(([name, value]) => [name, String(value)]));
             const setupStarted = performance.now();
             const controller = new CoveragePhaseController(scope, configuredHeaders, testInfo.project.use.baseURL);
+            if (strong?.kind === "mutant")
+                controller.watchWaits({
+                    action: testInfo.project.use.actionTimeout ?? 0,
+                    navigation: testInfo.project.use.navigationTimeout ?? 0,
+                    expect: testInfo.project.expect?.timeout ?? 5_000,
+                    toPass: testInfo.project.expect?.toPass?.timeout ?? 0,
+                });
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
@@ -1908,10 +2029,13 @@ const instrumentedFixtures = {
             // A mutant that ran in this worker's own process may have left
             // state in it: the next test gets a new worker.
             let restartWorker = false;
+            // A mutant attempt that stalls ends there, a timeout.
+            const stall = watchStall(testInfo, strong, (limitAt) => controller.stall(limitAt));
             try {
                 await use();
             }
             finally {
+                stall?.stop();
                 const teardownStarted = performance.now();
                 const endedAtMs = Date.now();
                 try {
@@ -1946,7 +2070,7 @@ const instrumentedFixtures = {
                     appendEvidenceLine(`${JSON.stringify(payload)}\n`);
                 }
                 finally {
-                    strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true });
+                    strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true, ...stallDetails(stall) });
                     restartWorker = ranInWorker(strong, scope.attemptId) && testInfo.status === "passed";
                     await timed("controller.dispose", () => controller.dispose());
                     timingCount("fixture.testTeardown", performance.now() - teardownStarted);

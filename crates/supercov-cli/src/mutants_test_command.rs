@@ -102,6 +102,25 @@ const DEFAULT_TIMEOUT_FACTOR: f64 = 1.5;
 /// How a verdict that ran past its time limit begins
 /// (`playwrightStrong.mjs`).
 const TIME_LIMIT_REASON: &str = "ran past its time limit";
+/// How a verdict whose attempt stalled before its time limit begins: ended
+/// there as a timeout (`playwrightStrong.mjs`, `watchStall`).
+const STALLED_REASON: &str = "stopped at ";
+
+/// The time a timeout that stalled did not wait, from its reason: `stopped
+/// at 2.5 s of its 6.5 s time limit, ...` saved 4 s. `None` for any other
+/// reason.
+fn stall_saving_ms(reason: &str) -> Option<u64> {
+    let rest = reason.strip_prefix(STALLED_REASON)?;
+    let (stopped, rest) = rest.split_once(" s of its ")?;
+    let (limit, _) = rest.split_once(" s time limit")?;
+    let ms = |seconds: &str| {
+        seconds
+            .parse::<f64>()
+            .ok()
+            .map(|s| (s * 1000.0).round() as u64)
+    };
+    Some(ms(limit)?.saturating_sub(ms(stopped)?))
+}
 
 /// A time limit's factor as given (`from` names where): a number above 0.
 fn timeout_factor(value: &str, from: &str) -> Result<f64, String> {
@@ -971,19 +990,32 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
             "firstTier": {"candidates": first_tier.candidates, "seconds": first_tier.ms / 1000},
         });
     }
-    let limited = asked
+    let timeouts_saying = |start: &str| {
+        asked
+            .iter()
+            .filter_map(|(id, _)| verdicts.get(id))
+            .filter(|verdict| verdict.status == "timeout")
+            .filter(|verdict| {
+                verdict
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with(start))
+            })
+            .count()
+    };
+    let limited = timeouts_saying(TIME_LIMIT_REASON);
+    let stalled = timeouts_saying(STALLED_REASON);
+    // What ending them where they stalled saved: each one's limit less the
+    // time it ran, as its reason says.
+    let saved_ms = asked
         .iter()
         .filter_map(|(id, _)| verdicts.get(id))
         .filter(|verdict| verdict.status == "timeout")
-        .filter(|verdict| {
-            verdict
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.starts_with(TIME_LIMIT_REASON))
-        })
-        .count();
-    if limited > 0 {
-        data["timeLimit"] = json!({"factor": factor, "constantMs": 5000, "timedOut": limited});
+        .filter_map(|verdict| verdict.reason.as_deref().and_then(stall_saving_ms))
+        .sum::<u64>();
+    if limited + stalled > 0 {
+        data["timeLimit"] = json!({"factor": factor, "constantMs": 5000, "timedOut": limited,
+            "stalled": stalled, "stalledSavedMs": saved_ms});
     }
     if !carried.from.is_empty() || !carried.not_kept.is_empty() {
         data["carried"] = json!({
@@ -1359,11 +1391,18 @@ fn plan_text(data: &Value) -> String {
                 data["resumed"]["skipped"]
             ));
         }
-        if let Some(limited) = data["timeLimit"]["timedOut"].as_u64() {
+        if let Some(limited) = data["timeLimit"]["timedOut"].as_u64().filter(|n| *n > 0) {
             extra.push_str(&format!(
                 "  {limited} timeout(s) ran past their time limit: {}x the test's baseline + {} s\n",
                 data["timeLimit"]["factor"],
                 data["timeLimit"]["constantMs"].as_u64().unwrap_or(0) / 1000
+            ));
+        }
+        if let Some(stalled) = data["timeLimit"]["stalled"].as_u64().filter(|n| *n > 0) {
+            let saved = data["timeLimit"]["stalledSavedMs"].as_u64().unwrap_or(0) / 1000;
+            extra.push_str(&format!(
+                "  {stalled} timeout(s) ended early once they stalled, saving about {}: past every run of their test that passed, waiting on what could not end before the limit\n",
+                if saved >= 60 { format!("{}m{:02}s", saved / 60, saved % 60) } else { format!("{saved} s") }
             ));
         }
         if let Some(carried) = data["carried"]["mutants"].as_u64().filter(|n| *n > 0) {
@@ -3439,13 +3478,39 @@ mod tests {
             "{spent}"
         );
         let limited = plan_text(&json!({"run": "r1", "summary": summary,
-            "timeLimit": {"factor": 1.5, "constantMs": 5000, "timedOut": 7}}));
+            "timeLimit": {"factor": 1.5, "constantMs": 5000, "timedOut": 7, "stalled": 0}}));
         assert!(
             limited.contains(
                 "  7 timeout(s) ran past their time limit: 1.5x the test's baseline + 5 s\n"
-            ),
+            ) && !limited.contains("stalled"),
             "{limited}"
         );
+        // Timeouts that stalled before their limit, and none at it.
+        let stalled = plan_text(&json!({"run": "r1", "summary": summary,
+            "timeLimit": {"factor": 1.5, "constantMs": 5000, "timedOut": 0, "stalled": 3, "stalledSavedMs": 12_400}}));
+        assert!(
+            stalled.contains(
+                "  3 timeout(s) ended early once they stalled, saving about 12 s: past every run of their test that passed, waiting on what could not end before the limit\n"
+            ) && !stalled.contains("ran past their time limit"),
+            "{stalled}"
+        );
+        let minutes = plan_text(&json!({"run": "r1", "summary": summary,
+            "timeLimit": {"factor": 1.5, "constantMs": 5000, "timedOut": 0, "stalled": 32, "stalledSavedMs": 365_000}}));
+        assert!(minutes.contains(" saving about 6m05s: "), "{minutes}");
+        // Each stalled timeout's saving, from its reason.
+        assert_eq!(
+            stall_saving_ms("stopped at 2.5 s of its 6.5 s time limit, past every run"),
+            Some(4_000)
+        );
+        for other in [
+            "ran past its time limit of 6.5 s",
+            "stopped at 2.5 s",
+            "stopped at 2.5 s of its 6.5",
+            "stopped at x s of its 6.5 s time limit",
+            "stopped at 2.5 s of its y s time limit",
+        ] {
+            assert_eq!(stall_saving_ms(other), None, "{other}");
+        }
         // Kept from runs of the files as they are, and why the rest were not,
         // the reason most said first.
         let unchanged = plan_text(&json!({"run": "r3", "summary": summary,

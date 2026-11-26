@@ -173,12 +173,16 @@ export default class SupercovPlaywrightStrongReporter {
         const said = {
             "passed": "lives",
             "failed": "fails",
-            "timed-out": `ran out of its ${seconds(attempt.limitMs)} limit (its baseline ${seconds(attempt.baselineMs)})`,
+            "timed-out": attempt.stalledAtMs === undefined
+                ? `ran out of its ${seconds(attempt.limitMs)} limit (its baseline ${seconds(attempt.baselineMs)})`
+                : `stalled before its ${seconds(attempt.limitMs)} limit (its baseline ${seconds(attempt.baselineMs)})`,
         }[attempt.outcome] ?? attempt.outcome;
+        // What a timeout waited on, where the fixture saw it.
+        const waiting = attempt.outcome === "timed-out" && attempt.waitingOn ? `, waiting on ${attempt.waitingOn}` : "";
         // A cold attempt's failure decides nothing: it runs again once a
         // control has passed on its server.
         const cold = attempt.cold && (attempt.outcome === "failed" || attempt.outcome === "timed-out") ? ", before any control here: runs again after one" : "";
-        console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said} (${took}${cold})`);
+        console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said}${waiting} (${took}${cold})`);
     }
     /**
      * What this invocation is doing, for the engine's progress line: the
