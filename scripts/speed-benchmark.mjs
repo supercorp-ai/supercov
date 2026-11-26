@@ -340,10 +340,13 @@ function keepTraces(label) {
 
 // perf, where it can count: Linux, with perf installed and allowed to count
 // a user's own processes (`kernel.perf_event_paranoid` 2 or less).
+// SPEED_PERF names the perf binary when the one on PATH is a wrapper that
+// refuses a kernel it was not built for (speed.yml finds one).
 const perfStat = (() => {
   if (process.platform !== 'linux') return undefined;
-  const probe = spawnSync('perf', ['stat', '-e', 'instructions:u', '-x', ',', '--', 'true'], { encoding: 'utf8' });
-  return probe.status === 0 && /instructions/.test(probe.stderr) ? 'perf' : undefined;
+  const perf = process.env.SPEED_PERF || 'perf';
+  const probe = spawnSync(perf, ['stat', '-e', 'instructions:u', '-x', ',', '--', 'true'], { encoding: 'utf8' });
+  return probe.status === 0 && /instructions/.test(probe.stderr) ? perf : undefined;
 })();
 function retiredInstructions(file) {
   if (!existsSync(file)) return undefined;
