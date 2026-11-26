@@ -60,6 +60,7 @@ switched on and records what the established tools record:
 | `survived` | Every test that could kill it passed |
 | `timeout` | A test ran past its time limit with the mutant in place |
 | `no-coverage` | No test ran the mutated code |
+| `equivalent` | No test can tell it from the original, proven before running it; left out of the score |
 | `unviable` | The mutant does not compile (Rust and Go); counted apart and left out of the score |
 | `error` | The pass could not give it a verdict, with the reason; left out of the score |
 
@@ -78,8 +79,63 @@ first pass of their own:
   reached or infected it, the likeliest killer first, and stops at the first
   failure.
 
+- a JavaScript or TypeScript mutant whose file compiles to the same code as
+  the original is `equivalent`, and is not run; mutants whose files compile
+  to the same code as each other run once, and each takes that run's verdict
+  (see Equivalent mutants, below).
+
 Each of these shortcuts is exact. Where the run cannot prove a test is
 irrelevant, the test runs.
+
+### Equivalent mutants
+
+Some mutants change the source without changing the program: a branch that
+can never run emptied, `if (false)` made `if (false)` again, `"a".trim()`
+made `"a"`. No test can kill them, yet each one used to run every test
+that reached it and then waited in the survivors for someone to dismiss it.
+
+Before a strong pass runs a JavaScript or TypeScript mutant, Supercov
+compiles its file twice -- once as written, once with the mutant -- with the
+same optimising compiler and the same options (oxc's minifier, built into
+Supercov, with every assumption that could change behaviour turned off),
+and compares the two outputs. Where they are identical the mutant is the
+original program, so it is `equivalent`: not run, not a survivor, and out of
+the score. This is Trivial Compiler Equivalence (Papadakis et al., ICSE
+2015). It only ever says `equivalent` on an exact match; anything else, a
+file it cannot compile included, runs as before. Two mutants of one file
+that compile to the same code are one program: the pass runs one of them and
+gives the other the same verdict.
+
+There is nothing to set up or turn on. The pass says what it spared:
+
+```text
+[supercov] 10 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 10 of them would have run and did not
+[supercov] 6 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict
+[supercov] about 1 s of test time saved by not running them
+```
+
+Its summary says the same, and each one says why where it is listed:
+
+```text
+$ supercov runs latest mutants src/shapes.ts:13
+13:7  ConditionalExpression  infected  strong: equivalent
+  empty → true
+  why: `empty` was false at least once (opposite-value)
+  strong: equivalent: compiles to the same code as the original: no test can tell it apart, so it was not run
+  id:  src/shapes.ts:13:7-13:12:ConditionalExpression:true
+```
+
+Here `if (empty) { return "none"; } return "none";` returns `"none"` whichever
+way the test goes, so making it `true` changes nothing. A mutant that takes
+another's verdict says whose: `compiles to the same code as <id>, which ran
+for both`.
+
+The markdown and HTML reports fold them into a section of their own, apart
+from the survivors. A file that does not compile (a syntax Supercov's parser
+does not take) is named, and its mutants run as before:
+`could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js`. So is a file
+whose mutants would take longer to compile than to run, such as a
+generated file with thousands of mutants.
 
 ### How this differs from coverage
 

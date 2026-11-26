@@ -262,6 +262,7 @@ pub(crate) fn markdown(
             (tally.strong.timeout, "timed out"),
             (tally.strong.survived, "survived"),
             (tally.strong.no_coverage, "no coverage"),
+            (tally.strong.equivalent, "equivalent"),
             (tally.strong.unviable, "unviable"),
             (tally.strong.error, "error"),
             (tally.strong.not_run, "not run (no driver)"),
@@ -444,6 +445,23 @@ pub(crate) fn markdown(
                 if logged.len() == 1 { "changes" } else { "change" },
             ),
             &logged,
+        ));
+    }
+    // Those proven equivalent, apart and folded: nothing to triage.
+    let equivalent = data
+        .mutants
+        .iter()
+        .filter(|mutant| report::outcome(mutant) == Outcome::Equivalent)
+        .collect::<Vec<_>>();
+    if !equivalent.is_empty() && !asked_statuses {
+        text.push_str(&folded(
+            format!(
+                "{} proven equivalent: no test can tell {} from the original, so {} not run, not counted as survivors, and not in the score",
+                plural(equivalent.len(), "mutant"),
+                if equivalent.len() == 1 { "it" } else { "them" },
+                if equivalent.len() == 1 { "it is" } else { "they are" },
+            ),
+            &equivalent,
         ));
     }
     if !so_far.is_empty() {
@@ -730,6 +748,42 @@ mod tests {
             &data(vec![mutant(1, Infected, Some(json!({"status": "error"})))]),
         );
         assert!(text.contains("No mutation score: no mutant was killed, timed out, survived or left uncovered · 1 error\n"), "{text}");
+    }
+
+    /// Mutants proven equivalent are counted, and folded apart from the
+    /// survivors with why in plain words; a duplicate's survival says whose
+    /// run it took.
+    #[test]
+    fn a_comment_folds_proven_equivalent_mutants_apart() {
+        use serde_json::json;
+        use supercov_engine::coverage_index::MutantStatus::*;
+        let mutants = vec![
+            mutant(
+                1,
+                Infected,
+                Some(
+                    json!({"status": "survived", "tests": 0, "reason": "same-code-as:src/a.py:9:1-9:2:X:y"}),
+                ),
+            ),
+            mutant(
+                2,
+                Infected,
+                Some(json!({"status": "equivalent", "reason": "compiles-to-original"})),
+            ),
+        ];
+        let text = markdown(&request(), &data(mutants.clone()));
+        for expected in [
+            " · 1 survived · 1 equivalent\n",
+            "| `src/a.py:1:3` | `a + b → a - b` | infected | survived | — | compiles to the same code as src/a.py:9:1-9:2:X:y, which ran for both |\n",
+            "\n<details><summary>1 mutant proven equivalent: no test can tell it from the original, so it is not run, not counted as survivors, and not in the score</summary>\n",
+            "| `src/a.py:2:3` | `a + b → a - b` | infected | equivalent | — | compiles to the same code as the original: no test can tell it apart, so it was not run |\n",
+        ] {
+            assert!(text.contains(expected), "{expected}\n---\n{text}");
+        }
+        // Asked for a verdict, the section is not added.
+        let mut survived = request();
+        survived.mutants.strong_statuses = vec!["survived".into()];
+        assert!(!markdown(&survived, &data(mutants)).contains("proven equivalent"));
     }
 
     /// What a pull request's comment needs: the survivors with how many

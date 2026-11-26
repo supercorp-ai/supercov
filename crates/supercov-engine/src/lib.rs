@@ -51,6 +51,7 @@ pub mod javascript_frontend;
 pub mod javascript_run;
 #[cfg(test)]
 mod js_babel_print;
+pub mod js_compiled_equivalence;
 pub mod js_instrumenter;
 mod js_mutant_links;
 mod js_mutants;

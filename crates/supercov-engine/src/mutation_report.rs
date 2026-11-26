@@ -110,18 +110,56 @@ fn tests(count: u64) -> String {
     format!("{count} test{}", if count == 1 { "" } else { "s" })
 }
 
+/// A verdict's reason in plain words, where it is one of the codes a pass
+/// writes for a mutant it compared by compiled code
+/// (`js_compiled_equivalence`).
+fn plain_reason(reason: String) -> String {
+    use crate::js_compiled_equivalence::{COMPILES_TO_ORIGINAL, SAME_CODE_AS};
+    if reason == COMPILES_TO_ORIGINAL {
+        return "compiles to the same code as the original: no test can tell it apart, so it was not run"
+            .into();
+    }
+    match reason.strip_prefix(SAME_CODE_AS) {
+        Some(other) => {
+            format!("compiles to the same code as {other}, which ran for both")
+        }
+        None => reason,
+    }
+}
+
+/// Where a strong pass decided a mutant by its compiled code -- equivalent
+/// to the original, or taking the verdict of another that compiles to the
+/// same code -- why, in plain words.
+pub fn compiled_reason(entry: &MutantEntry) -> Option<String> {
+    use crate::js_compiled_equivalence::{COMPILES_TO_ORIGINAL, SAME_CODE_AS};
+    let reason = verdict(entry)?.reason?;
+    (reason == COMPILES_TO_ORIGINAL || reason.starts_with(SAME_CODE_AS))
+        .then(|| plain_reason(reason))
+}
+
 /// Why a mutant has its outcome, in plain words. `strong_ran` is whether a
 /// strong pass gave any of the run's mutants a verdict: a mutant without
 /// one is then one the pass left out.
 pub fn why(entry: &MutantEntry, strong_ran: bool) -> String {
     let saved = verdict(entry);
-    let given = saved.as_ref().and_then(|verdict| verdict.reason.clone());
+    let given = saved
+        .as_ref()
+        .and_then(|verdict| verdict.reason.clone())
+        .map(plain_reason);
     let ran = saved.as_ref().map_or(0, |verdict| verdict.tests);
     match outcome(entry) {
-        Outcome::Killed => match saved.and_then(|verdict| verdict.killed_by) {
-            Some(test) => format!("{test} failed with it in place"),
-            None => "a test failed with it in place".into(),
-        },
+        Outcome::Killed => {
+            let killed = match saved.and_then(|verdict| verdict.killed_by) {
+                Some(test) => format!("{test} failed with it in place"),
+                None => "a test failed with it in place".into(),
+            };
+            match given {
+                Some(same) if same.starts_with("compiles to the same code as ") => {
+                    format!("{killed}; it {same}")
+                }
+                _ => killed,
+            }
+        }
         Outcome::Timeout => {
             given.unwrap_or_else(|| "a test ran past its time with it in place".into())
         }
@@ -599,6 +637,47 @@ mod tests {
             strong,
             stryker: None,
         }
+    }
+
+    /// A mutant decided by its compiled code says so in plain words, and a
+    /// duplicate killed names the test and whose run it took.
+    #[test]
+    fn compiled_code_reasons_are_said_in_plain_words() {
+        let with = |status: &str, reason: &str| {
+            entry(
+                "src/a.ts",
+                1,
+                MutantStatus::Infected,
+                Some(json!({"status": status, "killedBy": "t", "reason": reason})),
+            )
+        };
+        let equivalent = with("equivalent", "compiles-to-original");
+        assert_eq!(
+            why(&equivalent, true),
+            "compiles to the same code as the original: no test can tell it apart, so it was not run"
+        );
+        assert_eq!(compiled_reason(&equivalent), Some(why(&equivalent, true)));
+        let killed = with("killed", "same-code-as:src/a.ts:2:1-2:3:X:y");
+        assert_eq!(
+            why(&killed, true),
+            "t failed with it in place; it compiles to the same code as src/a.ts:2:1-2:3:X:y, which ran for both"
+        );
+        assert_eq!(
+            compiled_reason(&killed).as_deref(),
+            Some("compiles to the same code as src/a.ts:2:1-2:3:X:y, which ran for both")
+        );
+        // Any other reason is said as it is, and is no compiled reason.
+        let other = with("timeout", "ran past 5 s");
+        assert_eq!(why(&other, true), "ran past 5 s");
+        assert_eq!(compiled_reason(&other), None);
+        assert_eq!(
+            why(&with("killed", "other"), true),
+            "t failed with it in place"
+        );
+        assert_eq!(
+            compiled_reason(&entry("src/a.ts", 1, MutantStatus::Infected, None)),
+            None
+        );
     }
 
     fn data(mutants: Vec<MutantEntry>) -> CoverageMutantsData {

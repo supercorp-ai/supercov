@@ -501,6 +501,60 @@ the comparison inside the block (or function body: a parameter's default does
 not see it) that declares it, and the file must hold no `with` and no
 reference to `eval`, which can bind a name no declaration shows.
 
+### `compiles-to-original`: compiled the same
+
+A strong pass decides it, not the listing (`js_compiled_equivalence`). Before
+the pass runs a JavaScript or TypeScript mutant the plan has not decided, it
+compiles the mutant's file twice with one pinned compiler: once as measured,
+once with the mutant applied in place (StrykerJS's mutated program, no
+switch). Each compile parses the file, rejects it on any parse or early
+error, erases TypeScript keeping every import as written
+(`onlyRemoveTypeImports`), turns JSX into calls, then runs oxc's minifier
+(`oxc_minifier`, the version in `Cargo.lock`) and prints the result
+minified. Where the two outputs are byte for byte the same, the mutant is
+`equivalent` (strong verdict `equivalent`, reason `compiles-to-original`)
+and is not run.
+
+Why it is sound: each step preserves what the program does, so a program
+and its output behave alike; two programs with one output behave alike for
+every input (Papadakis et al., "Trivial Compiler Equivalence", ICSE 2015).
+The minifier runs with every option that trades exactness for size off:
+`@__PURE__` annotations are not trusted, property reads and writes, global
+reads and imports are taken to have effects, nothing unreferenced is
+dropped, function and class names are kept (`f.name`), `debugger` is kept,
+and nothing is renamed. What it still assumes is what any optimising
+JavaScript compiler assumes: the built-ins behave as the language defines
+them (`"a".trim()` is `"a"`), and the program does not read its own source
+text. A function that reads its source (`f.toString()`) is the one place
+the two differ, and there the strong build places no switch at all
+(`function-source`); a stack trace's columns, the other way to see the
+text, differ under the strong build's switches anyway. The source compared
+is the source the run measured: a file whose bytes differ from the run's
+source manifest is not compared, and its mutants run.
+
+Anything short of an exact match runs as before: a file that does not
+parse or compile (named on the standard error), a mutant whose node is not
+found, a transform that reports an error.
+
+Each compile is of the whole file, so the work is a file's size times its
+mutants. A pass compiles at most 512 MiB of source, the cheapest files
+first: a few seconds on a few cores. A file past that (a generated one,
+thousands of mutants in a hundred kilobytes) is named on the standard error
+and its mutants run as before.
+
+#### Duplicates
+
+Two mutants of one file whose compiled outputs are the same are one
+program, by the same argument. The pass keeps the first in its plan and
+takes the others out before sharding, so every shard takes out the same
+ones; once the kept mutant has a verdict a run decides -- `killed`,
+`survived` or `timeout` -- each duplicate gets that verdict, with no test of
+its own run (`tests: 0`) and the reason `same-code-as:<id>`. A kill by the
+kept one is a kill of the same program; a survival is the same program
+surviving every test that could kill it. An `error`, or no verdict (a
+budget spent), gives the duplicates nothing, and the next pass compares
+them again.
+
 ### Untestable boundaries: a hint
 
 Some mutants are not equivalent but no test can practically tell them apart. A
@@ -660,6 +714,7 @@ took where it took half the budget or more.
   turn's records, values among them, as it loses its hits. A statement whose
   hit was written in an earlier turn and whose comparison ran in the lost one
   reads as if the comparison never ran there.
-- Equivalent mutants beyond the static rules above are not detected. They show
+- Equivalent mutants beyond the static rules above and what compiles to
+  the original are not detected. They show
   up as `not-infected` with their reason, which is often what makes them
   recognisable.

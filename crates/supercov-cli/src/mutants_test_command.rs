@@ -284,6 +284,11 @@ tests the command runs (a merge of the suite's parts, a run of the whole
 suite) is made into the pass's run with those tests alone, without measuring:
 the tests of the files the command names, or all of a merge whose runs each
 measured the command.
+A JavaScript or TypeScript mutant whose file compiles to the same code as
+the original (an `if (false)` branch emptied, say) is equivalent: proven,
+not run, and not a survivor; mutants that compile to the same code as each
+other run once for all of them. Nothing to set up: the pass says how many it
+spared and the test time saved.
 A run of the same files keeps every verdict it holds. After an edit, a
 mutant keeps its verdict where neither its file nor any test that could kill
 it changed, and could reach nothing that changed. --budget counts from the
@@ -906,6 +911,20 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     for (_, verdicts) in &carried.from {
         saved.extend(verdicts.clone());
     }
+    // What compiles to the original is equivalent, not run; mutants that
+    // compile to the same code as one another run once for all of them, and
+    // one whose twin has a verdict takes it now. Before sharding, so every
+    // shard takes the same ones out.
+    let same_code =
+        supercov_engine::js_compiled_equivalence::decide_for_run(&mut plan, &root, run, &saved);
+    let shared =
+        supercov_engine::js_compiled_equivalence::shared_verdicts(&same_code.duplicates, &saved);
+    saved.extend(shared);
+    if !options.plan {
+        for line in same_code_said(&same_code_json(&same_code)) {
+            eprintln!("[supercov] {line}");
+        }
+    }
     settle_progress(&mut progress, &saved);
     // A second pass over the same run runs only what has no verdict.
     plan.mutants
@@ -931,7 +950,22 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // The cheapest first: a pass cut short has decided as many as it could.
     plan.cheapest_first();
     if options.plan {
-        return Ok(plan_json(run, &plan));
+        let mut planned = plan_json(run, &plan);
+        // The duplicates are out of the plan's mutants, not out of the
+        // mutants it is about: each counts where its twin runs.
+        let planned_ids = plan
+            .mutants
+            .iter()
+            .map(|mutant| mutant.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let duplicates = same_code
+            .duplicates
+            .values()
+            .filter(|kept| planned_ids.contains(kept.as_str()))
+            .count();
+        planned["summary"]["mutants"] = json!(plan.mutants.len() + duplicates);
+        planned["sameCode"] = same_code_json(&same_code);
+        return Ok(planned);
     }
     let running = plan
         .mutants
@@ -951,10 +985,12 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         factor,
         first_tier,
         &killers,
+        &same_code.duplicates,
     )?;
     let verdicts = read_saved(run);
     let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
     data["summary"]["durationMs"] = json!(started.elapsed().as_millis() as u64);
+    data["sameCode"] = same_code_json(&same_code);
     data["scope"] = json!({
         "diff": options.diff,
         "files": options.files,
@@ -1179,6 +1215,90 @@ fn markdown(data: &Value, options: &Options) -> ExitCode {
         arguments.extend(["--output".to_owned(), output.display().to_string()]);
     }
     crate::mutants_export::command(&arguments)
+}
+
+/// What comparing compiled code decided, for the answer's JSON.
+fn same_code_json(same: &supercov_engine::js_compiled_equivalence::SameCode) -> Value {
+    json!({
+        "equivalent": same.equivalent,
+        "equivalentToRun": same.equivalent_to_run,
+        "duplicates": same.duplicates.len(),
+        "savedMs": same.saved_ms,
+        "notCompiled": same.not_compiled,
+        "tooLarge": same.too_large,
+    })
+}
+
+/// What comparing compiled code decided, in the words the pass says it on
+/// the standard error and in its summary: nothing where it decided nothing
+/// and every file compiled.
+fn same_code_said(same: &Value) -> Vec<String> {
+    let count = |key: &str| same[key].as_u64().unwrap_or(0);
+    let mut said = Vec::new();
+    let (equivalent, to_run, duplicates) = (
+        count("equivalent"),
+        count("equivalentToRun"),
+        count("duplicates"),
+    );
+    if equivalent > 0 {
+        said.push(format!(
+            "{equivalent} mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart{}",
+            if to_run > 0 {
+                format!("; {to_run} of them would have run and did not")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    if duplicates > 0 {
+        said.push(format!(
+            "{duplicates} mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict"
+        ));
+    }
+    let saved = count("savedMs");
+    if saved > 0 {
+        said.push(format!(
+            "about {} s of test time saved by not running them",
+            saved.div_ceil(1000)
+        ));
+    }
+    if let Some(files) = same["notCompiled"]
+        .as_array()
+        .filter(|files| !files.is_empty())
+    {
+        said.push(format!(
+            "could not compile {} file(s) to compare their mutants' code, so their mutants run as before: {}",
+            files.len(),
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(files) = same["tooLarge"]
+        .as_array()
+        .filter(|files| !files.is_empty())
+    {
+        said.push(format!(
+            "did not compare the mutants of {} file(s), as compiling each of them would cost more than it saves, so their mutants run as before: {}",
+            files.len(),
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    said
+}
+
+/// The summary's lines on what comparing compiled code spared the pass.
+fn same_code_text(same: &Value) -> String {
+    same_code_said(same)
+        .into_iter()
+        .map(|line| format!("  {line}\n"))
+        .collect()
 }
 
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
@@ -1443,6 +1563,7 @@ fn plan_text(data: &Value) -> String {
                     .join(", ")
             ));
         }
+        extra.push_str(&same_code_text(&data["sameCode"]));
         extra.push_str(&narrowing_text(&summary["narrowed"]));
         if let Some(from) = data["measurement"]["derivedFrom"].as_str() {
             extra.push_str(&format!(
@@ -1485,7 +1606,7 @@ fn plan_text(data: &Value) -> String {
         );
     }
     format!(
-        "Strong mutation plan for {}: {} mutants\n  to run        {} (at most {} test runs)\n  survived      {} (no test infected them)\n  no coverage   {}\n  equivalent    {}\n{}",
+        "Strong mutation plan for {}: {} mutants\n  to run        {} (at most {} test runs)\n  survived      {} (no test infected them)\n  no coverage   {}\n  equivalent    {}\n{}{}",
         data["run"].as_str().unwrap_or(""),
         summary["mutants"],
         summary["toRun"],
@@ -1493,6 +1614,7 @@ fn plan_text(data: &Value) -> String {
         summary["decided"]["survived"],
         summary["decided"]["noCoverage"],
         summary["decided"]["equivalent"],
+        same_code_text(&data["sameCode"]),
         narrowing_text(&summary["narrowed"]),
     )
 }
@@ -2349,6 +2471,7 @@ fn execute(
     factor: f64,
     first_tier: supercov_engine::strong_tiers::Sizing,
     killers: &supercov_engine::strong_tiers::Killers,
+    duplicates: &std::collections::BTreeMap<String, String>,
 ) -> Result<Executed, Stop> {
     // Decided without running.
     for mutant in &plan.mutants {
@@ -2592,6 +2715,10 @@ fn execute(
             });
         }
     }
+    // Each mutant that compiles to the same code as one that ran takes its
+    // verdict.
+    let shared = supercov_engine::js_compiled_equivalence::shared_verdicts(duplicates, saved);
+    saved.extend(shared);
     save(run, &plan.mutant_set, saved, progress)?;
     Ok(executed)
 }
@@ -4053,5 +4180,46 @@ mod tests {
             let error = parsed(words).unwrap_err();
             assert!(error.contains(said), "{words:?}: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod same_code_tests {
+    use super::*;
+    use supercov_engine::js_compiled_equivalence::SameCode;
+
+    #[test]
+    fn what_compiled_code_spared_is_said_and_nothing_when_nothing() {
+        assert!(same_code_said(&same_code_json(&SameCode::default())).is_empty());
+        assert_eq!(same_code_text(&same_code_json(&SameCode::default())), "");
+        let same = SameCode {
+            equivalent: 3,
+            equivalent_to_run: 2,
+            duplicates: std::collections::BTreeMap::from([("d".into(), "k".into())]),
+            saved_ms: 12_300,
+            not_compiled: vec!["src/legacy.js".into()],
+            too_large: vec!["src/generated.js".into()],
+        };
+        let json = same_code_json(&same);
+        assert_eq!(
+            json,
+            json!({"equivalent": 3, "equivalentToRun": 2, "duplicates": 1, "savedMs": 12_300,
+                "notCompiled": ["src/legacy.js"], "tooLarge": ["src/generated.js"]})
+        );
+        assert_eq!(
+            same_code_text(&json),
+            "  3 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 2 of them would have run and did not\n  1 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict\n  about 13 s of test time saved by not running them\n  could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js\n  did not compare the mutants of 1 file(s), as compiling each of them would cost more than it saves, so their mutants run as before: src/generated.js\n"
+        );
+        // Equivalent ones the plan had decided anyway: nothing saved.
+        let decided = SameCode {
+            equivalent: 1,
+            ..SameCode::default()
+        };
+        assert_eq!(
+            same_code_said(&same_code_json(&decided)),
+            [
+                "1 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart"
+            ]
+        );
     }
 }
