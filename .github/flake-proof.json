@@ -11,5 +11,6 @@
     "cli/a_budget_ends_the_pass_and_leaves_the_rest_for_the_next",
     "e2e_gates/background_by_time",
     "cli/a_copy_that_ends_once_the_pass_is_stopping_decides_nothing"
-  ]
+  ],
+  "label": "final2-seq"
 }
