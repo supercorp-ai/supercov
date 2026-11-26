@@ -25668,7 +25668,8 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         "{context}"
     );
     assert!(
-        said.contains("past a stall at ") && said.contains("with a timer due in "),
+        said.contains("past a stall at ")
+            && said.contains("with 1 unanswered request(s) that could still end the wait"),
         "{context}"
     );
     eprintln!(
