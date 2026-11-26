@@ -25640,13 +25640,20 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
     // window. It lives.
     let later = strong("public/later.js", 3, ":EqualityOperator:>");
     assert_eq!(later["status"], "survived", "{later}\n{context}");
-    // No poll ever answers: once no poll is due before the limit, nothing
-    // the page has yet to do can end the wait, and the attempt stops there.
+    // No poll ever answers: a timeout. Where no poll is due before the limit
+    // (a quick baseline's limit falls before the second interval poll), it
+    // stops there; where one is (a slow machine's longer baseline), it runs
+    // to the limit and says so.
     let unanswered = strong("public/later.js", 3, ":ConditionalExpression:false");
     assert_eq!(unanswered["status"], "timeout", "{context}");
     assert!(
-        reason(&unanswered).starts_with("stopped at ")
-            && reason(&unanswered).contains("its pages quiet with nothing due before the limit, waiting on Page.waitForResponse at tests/later.spec.js:"),
+        reason(&unanswered).contains("waiting on Page.waitForResponse at tests/later.spec.js:")
+            && ((reason(&unanswered).starts_with("stopped at ")
+                && reason(&unanswered)
+                    .contains("its pages quiet with nothing due before the limit"))
+                || (reason(&unanswered).starts_with("ran past its time limit of ")
+                    && reason(&unanswered).contains("with a timer due in ")
+                    && reason(&unanswered).contains("so it ran to its limit to confirm"))),
         "{unanswered}\n{context}"
     );
     // A request still unanswered could end the wait: never stalled, its
