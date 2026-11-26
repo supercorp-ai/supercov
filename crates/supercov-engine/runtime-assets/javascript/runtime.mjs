@@ -180,6 +180,7 @@ for (const name of [
   "__SUPERCOV_BUFFER_EXIT_INSTALLED__",
   "__SUPERCOV_BUFFER_FLUSHERS__",
   "__SUPERCOV_CHILD_PATCHED__",
+  "__SUPERCOV_COLUMNS_SNAPSHOT__",
   "__SUPERCOV_COMPACT_SNAPSHOT__",
   "__SUPERCOV_COVERAGE_SNAPSHOT__",
   "__SUPERCOV_DIRECT_RUNTIME__",
@@ -694,6 +695,13 @@ function compactSnapshotText(snapshot) {
   return JSON.stringify({ supercovCompactSnapshot: 1, order: keys, rest, strings, shapes, rows, hits });
 }
 runtimeGlobal.__SUPERCOV_COMPACT_SNAPSHOT__ = compactSnapshotText;
+// The text of a snapshot as the Playwright collector stores it: what
+// JSON.stringify(columnarEvents(coverageSnapshot())) writes, made from the
+// columns the events are kept in. Read through compactSnapshotText, every
+// event became an object, then a row, and the collector made each an object
+// again and then a column: on a page of 30,000 events, 26 ms at the end of
+// each test against 7.
+runtimeGlobal.__SUPERCOV_COLUMNS_SNAPSHOT__ = () => JSON.stringify(coverageSnapshotColumns());
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
 // A dedicated worker blocked in `Atomics.wait` runs no evaluation, so the
 // test runner could not read its evidence and reported the test as a lower
