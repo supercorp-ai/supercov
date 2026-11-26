@@ -515,7 +515,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       // The browser's pages too, for a suite that drives one.
       const pages = browserProfile && suite.name === 'e2e' ? join(output, `browser-profile-${variant}.json`) : undefined;
       const pageProfiler = pages
-        ? spawn(process.execPath, [new URL('./speed/renderer-profile.mjs', import.meta.url).pathname, '9333', pages], { stdio: 'inherit' })
+        ? spawn(process.execPath, [new URL('./speed/renderer-profile.mjs', import.meta.url).pathname, '9333', pages, application === 'large' ? '2000' : '15000'], { stdio: 'inherit' })
         : undefined;
       try {
         run(project, command, args, `profile-${variant}-${suite.name}`, {
