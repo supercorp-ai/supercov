@@ -1,0 +1,14 @@
+{
+  "runs": 52,
+  "shards": 4,
+  "hogs": 15,
+  "parallel": 4,
+  "tests": [
+    "cli/rust_compiled_to_wasm_under_node_tests_runs_its_mutants",
+    "cli/a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one",
+    "cli/a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel",
+    "cli/a_playwright_mutant_runs_its_first_tier_before_the_rest",
+    "cli/a_budget_ends_the_pass_and_leaves_the_rest_for_the_next",
+    "e2e_gates/background_by_time"
+  ]
+}
