@@ -7,7 +7,8 @@ description: >-
   a run by hand, a release pull request, a change to how CI runs, and
   whenever there is no map or its answer cannot be trusted. Needs a checkout
   with full history and `actions: read`. The reasons go to the step summary;
-  the tests a partial job runs to the `affected-selection` artifact.
+  the tests a partial job runs, and the test seconds the jobs deal their
+  tests by, to the `affected-selection-<workflow>` artifact.
 inputs:
   workflow:
     description: ci, compatibility, self-coverage, next or react
@@ -16,6 +17,9 @@ outputs:
   jobs:
     description: Each job's {run, mode, matrix, why}, as JSON
     value: ${{ steps.plan.outputs.jobs }}
+  mode:
+    description: How the run goes (full, map, corpus or skip), before the map is read
+    value: ${{ steps.map.outputs.mode }}
 runs:
   using: composite
   steps:
@@ -77,19 +81,53 @@ runs:
         mkdir -p "$answer"
         started=$(date +%s)
         run="${{ steps.map.outputs.run }}"
-        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --json > "$answer/affected.json" || true
+        # The three questions side by side: each reads the map on its own,
+        # writes nothing, and took a minute or more of the plan in turn.
         # --names and --files list every test to run, where --json keeps to
         # an agent's budget.
-        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --names > "$answer/names.txt" || rm -f "$answer/names.txt"
-        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --files > "$answer/files.txt" || rm -f "$answer/files.txt"
+        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --json > "$answer/affected.json" &
+        json=$!
+        { "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --names > "$answer/names.txt" || rm -f "$answer/names.txt"; } &
+        names=$!
+        { "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --files > "$answer/files.txt" || rm -f "$answer/files.txt"; } &
+        files=$!
+        wait "$json" || true
+        wait "$names" || true
+        wait "$files" || true
         echo "tests affected answered in $(( $(date +%s) - started )) s"
         jq -c '{summary: .data.summary, workingTree: .data.workingTree, unmeasured: .data.unmeasured, error: .error}' "$answer/affected.json" | head -c 3000; echo
+    # Each test's seconds in main's newest Self Coverage run, which every job
+    # of this run deals its tests by (scripts/ci-affected.mjs): the committed
+    # .github/test-seconds.tsv goes stale as tests are added, and a test it
+    # does not time landed in Self Coverage's first slice, which took twice
+    # as long as the others. Without them, the committed file is used. After
+    # the map is asked: the file is not one the map should see changed.
+    - name: Fresh test seconds
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        : > test-seconds.tsv
+        while read -r id; do
+          [ -n "$id" ] || continue
+          if gh run download "$id" --repo "$GITHUB_REPOSITORY" -n test-seconds -D "$RUNNER_TEMP/test-seconds" 2>/dev/null; then
+            cp "$RUNNER_TEMP/test-seconds/test-seconds.tsv" test-seconds.tsv
+            echo "Test seconds of Self Coverage run $id: $(wc -l < test-seconds.tsv) test(s)."
+            break
+          fi
+        done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow self-coverage.yml --branch main --status success --limit 10 \
+          --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+        [ -s test-seconds.tsv ] || echo "No Self Coverage run of main kept its test seconds: the committed ones are used."
+        echo "CI_TEST_SECONDS=$PWD/test-seconds.tsv" >> "$GITHUB_ENV"
     - name: Plan the jobs
       id: plan
       shell: bash
       run: node scripts/ci-affected.mjs plan "${{ inputs.workflow }}" "$RUNNER_TEMP/answer"
+    # Named for the workflow: the slow tier calls several in one run.
     - uses: actions/upload-artifact@v4
       with:
-        name: affected-selection
-        path: selection.json
+        name: affected-selection-${{ inputs.workflow }}
+        path: |
+          selection.json
+          test-seconds.tsv
         retention-days: 3
