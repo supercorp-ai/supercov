@@ -9797,6 +9797,25 @@ struct AppliedDecision {
     frame: String,
     values: Vec<String>,
     inline: bool,
+    /// By outcome, false then true: the vector every evaluation that ends in
+    /// it has, where there is only one. Such an outcome is recorded with that
+    /// number rather than one computed from the temporaries, which then hold
+    /// nothing anyone reads (`ValueShape::forced_vector`).
+    forced: [Option<u64>; 2],
+}
+
+/// What a decision's caller reads of its temporaries besides the vectors.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DecisionReads {
+    /// The values, for a decision whose outcome is read back from them once
+    /// its tree has been evaluated (`record_value_outcomes`).
+    Values,
+    /// The frame, which says whether a test ran whose outcome is not yet
+    /// recorded: an `if` without an `else`, a loop.
+    Frame,
+    /// Nothing: an `if` with an `else`, a conditional expression, where each
+    /// outcome is recorded where its branch starts.
+    Nothing,
 }
 
 impl<'a> ControlProbeV2Transformer<'a, '_> {
@@ -9960,6 +9979,17 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         index: usize,
     ) -> Expression<'a> {
         let mut steps = self.ast.vec();
+        // A decision whose every vector is known from its outcome keeps no
+        // values: its one condition sets the frame, if anything reads it, and
+        // stays as written, last, where it narrows.
+        let Some(value) = applied.values.get(index) else {
+            if applied.frame.is_empty() {
+                return expression;
+            }
+            steps.push(self.assign(&applied.frame, self.number(1)));
+            steps.push(expression);
+            return self.ast.expression_sequence(Span::default(), steps);
+        };
         if index == 0 {
             steps.push(self.assign(&applied.frame, self.number(1)));
             for name in &applied.values[1..] {
@@ -9973,7 +10003,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
                 self.number(3_u64.pow(index as u32)),
             ));
         }
-        steps.push(self.assign(&applied.values[index], expression));
+        steps.push(self.assign(value, expression));
         self.ast.expression_sequence(Span::default(), steps)
     }
 
@@ -10162,6 +10192,13 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
     }
 
     fn outcome(&self, applied: &AppliedDecision, outcome: bool) -> Expression<'a> {
+        // Where the outcome says which conditions were evaluated and what
+        // each was, the vector is that number: what the temporaries would sum
+        // to at every evaluation that reaches this call.
+        let vector = match applied.forced[usize::from(outcome)] {
+            Some(vector) => self.number(vector),
+            None => self.encoded(applied),
+        };
         self.ast.expression_call(
             Span::default(),
             self.identifier(&self.mcdc_end_v2),
@@ -10169,7 +10206,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             self.ast.vec_from_array([
                 Argument::from(self.identifier(&self.probe_file_v2)),
                 Argument::from(self.number(applied.index as u64)),
-                Argument::from(self.encoded(applied)),
+                Argument::from(vector),
                 Argument::from(
                     self.ast
                         .expression_boolean_literal(Span::default(), outcome),
@@ -10323,6 +10360,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         &mut self,
         test: &mut Expression<'a>,
         plan: DecisionPlan,
+        reads: DecisionReads,
     ) -> Option<AppliedDecision> {
         if plan.condition_count > 32 {
             let frame_name = self.scratch_for("_supercovF", plan.inline_frame);
@@ -10370,13 +10408,34 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             return None;
         }
 
+        // Numbered as `instrument_conditions` numbers them, on the same tree.
+        let shape = value_shape(test, &mut 0);
+        let forced = [shape.forced_vector(false), shape.forced_vector(true)];
+        // Both outcomes forced: one condition, whose value is the outcome.
+        // Nothing reads its value, and the frame only where the caller does.
+        let keeps_values = reads == DecisionReads::Values || forced.contains(&None);
+        let frame = if keeps_values || reads == DecisionReads::Frame {
+            self.scratch_for("_supercovF", plan.inline_frame)
+        } else {
+            String::new()
+        };
+        let values = if keeps_values {
+            (0..plan.condition_count)
+                .map(|_| self.scratch_for("_supercovV", plan.inline_frame))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let applied = AppliedDecision {
             index: plan.index,
-            frame: self.scratch_for("_supercovF", plan.inline_frame),
-            values: (0..plan.condition_count)
-                .map(|_| self.scratch_for("_supercovV", plan.inline_frame))
-                .collect(),
+            frame,
+            values,
             inline: plan.inline_frame,
+            forced: if reads == DecisionReads::Values {
+                [None, None]
+            } else {
+                forced
+            },
         };
         let mut next_index = 0;
         self.instrument_conditions(test, &applied, &mut next_index);
@@ -10497,7 +10556,7 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         // A value decision has at most 32 conditions, and so is applied.
         if let Some((root, plan, shape)) = value {
             let applied = self
-                .apply_decision(expression, plan)
+                .apply_decision(expression, plan, DecisionReads::Values)
                 .expect("a value decision fits the encoding");
             self.pending_values
                 .entry(root)
@@ -10516,7 +10575,12 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let plan = decision_outcome_is_variable(&statement.test)
             .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        let reads = if statement.alternate.is_some() {
+            DecisionReads::Nothing
+        } else {
+            DecisionReads::Frame
+        };
+        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan, reads));
         self.visit_statement(&mut statement.consequent);
         if let Some(alternate) = &mut statement.alternate {
             self.visit_statement(alternate);
@@ -10546,7 +10610,9 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let plan = decision_outcome_is_variable(&expression.test)
             .then(|| self.reserve_decision(&expression.test));
         self.visit_expression(&mut expression.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut expression.test, plan));
+        let applied = plan.and_then(|plan| {
+            self.apply_decision(&mut expression.test, plan, DecisionReads::Nothing)
+        });
         self.visit_expression(&mut expression.consequent);
         self.visit_expression(&mut expression.alternate);
         let Some(applied) = applied else {
@@ -10571,7 +10637,8 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
                 .ast
                 .expression_sequence(Span::default(), self.ast.vec_from_array([record, value]));
         }
-        if applied.inline {
+        // A decision that keeps no temporaries needs no frame to declare them.
+        if applied.inline && !applied.frame.is_empty() {
             let mut names = vec![applied.frame];
             names.extend(applied.values);
             self.inline_names = Some(names);
@@ -10582,7 +10649,8 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let plan = decision_outcome_is_variable(&statement.test)
             .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        let applied = plan
+            .and_then(|plan| self.apply_decision(&mut statement.test, plan, DecisionReads::Frame));
         self.visit_statement(&mut statement.body);
         if let Some(applied) = applied {
             self.loop_outcomes(&mut statement.body, &applied, false);
@@ -10594,7 +10662,8 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
             .then(|| self.reserve_decision(&statement.test));
         self.visit_statement(&mut statement.body);
         self.visit_expression(&mut statement.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        let applied = plan
+            .and_then(|plan| self.apply_decision(&mut statement.test, plan, DecisionReads::Frame));
         if let Some(applied) = applied {
             self.loop_outcomes(&mut statement.body, &applied, true);
         }
@@ -10612,7 +10681,7 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let mut applied = None;
         if let (Some(test), Some(plan)) = (&mut statement.test, plan) {
             self.visit_expression(test);
-            applied = self.apply_decision(test, plan);
+            applied = self.apply_decision(test, plan, DecisionReads::Frame);
         }
         if let Some(update) = &mut statement.update {
             self.visit_expression(update);
@@ -12387,6 +12456,37 @@ enum ValueShape {
     And(Box<ValueShape>, Box<ValueShape>),
     Or(Box<ValueShape>, Box<ValueShape>),
     Not(Box<ValueShape>),
+}
+
+impl ValueShape {
+    /// The vector, encoded as the runtime decodes it, that every evaluation
+    /// ending in `outcome` has, when there is only one: each condition is
+    /// evaluated and its value follows from the outcome. That is so for a
+    /// lone condition, either way, for the true outcome of conditions joined
+    /// by `&&` alone, and for the false outcome of conditions joined by `||`
+    /// alone (and so on through `!`). Anywhere else an outcome has more than
+    /// one vector, and the temporaries say which.
+    fn forced_vector(&self, outcome: bool) -> Option<u64> {
+        let mut vector = 0;
+        self.force(outcome, &mut vector).then_some(vector)
+    }
+
+    fn force(&self, outcome: bool, vector: &mut u64) -> bool {
+        match self {
+            // Evaluated, and true or false: a digit of 2 or 1.
+            ValueShape::Condition(index) => {
+                *vector += 3_u64.pow(*index as u32) * if outcome { 2 } else { 1 };
+                true
+            }
+            ValueShape::Not(inner) => inner.force(!outcome, vector),
+            ValueShape::And(left, right) => {
+                outcome && left.force(true, vector) && right.force(true, vector)
+            }
+            ValueShape::Or(left, right) => {
+                !outcome && left.force(false, vector) && right.force(false, vector)
+            }
+        }
+    }
 }
 
 fn value_shape(expression: &Expression<'_>, next: &mut usize) -> ValueShape {
@@ -15435,15 +15535,19 @@ export function shapes(n: number): unknown {
         for expected in [
             // The bookkeeping rides inside the first condition, and every
             // condition ends in the assignment of its own value.
-            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, t0 + +!!t1 + 3 * +!!t2, true), t0 = 0;",
+            // The true outcome of `&&` alone has one vector, both conditions
+            // true (2 + 3 * 2), and is recorded as that number.
+            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, 8, true), t0 = 0;",
             // Without an `else` there is nowhere inside the statement for the
             // false outcome, and an `else` made for it would be a branch to
             // a coverage tool the tests run: it is recorded after the `if`,
             // when the frame says it has not been.
             "\t\t}\n\t\tt0 && END(0, t0 + +!!t1 + 3 * +!!t2, false);\n\t}",
-            "if (t3 = 1, t4 = !list) {\n\t\tEND(1, t3 + +!!t4, true);",
-            "} else {\n\t\tEND(1, t3 + +!!t4, false);",
-            "return (t5 = 1, t6 = list) ? (void END(2, t5 + +!!t6, true), list[0]) : (void END(2, t5 + +!!t6, false), undefined);",
+            // A lone condition's value is the outcome: each branch records its
+            // one vector, and the test is left as written.
+            "if (!list) {\n\t\tEND(1, 2, true);",
+            "} else {\n\t\tEND(1, 1, false);",
+            "return list ? (void END(2, 2, true), list[0]) : (void END(2, 1, false), undefined);",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
@@ -15468,17 +15572,98 @@ export function shapes(n: number): unknown {
         );
         for expected in [
             // The label stays on its loop, for `continue walk`.
-            "{\n\t\twalk: while (t0 = 1, t1 = i < limit) {\n\t\t\tEND(0, t0 + +!!t1, true), t0 = 0;",
-            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1, false);\n\t}",
+            // A lone condition keeps only the frame, which says a test ran
+            // whose outcome is not yet recorded.
+            "{\n\t\twalk: while (t0 = 1, i < limit) {\n\t\t\tEND(0, 2, true), t0 = 0;",
+            "\t\t}\n\t\tt0 && END(0, 1, false);\n\t}",
             // A `do … while` body runs before its test: the frame says whether
             // one came before this iteration, and starts cleared.
-            "{\n\t\tt4 = 0;\n\t\tdo {\n\t\t\tt4 && (END(2, t4 + +!!t5, true), t4 = 0);",
-            "} while (t4 = 1, t5 = i > 0);\n\t\tt4 && END(2, t4 + +!!t5, false);\n\t}",
-            "for (let j = 0; t6 = 1, t7 = j < limit; j++) {\n\t\t\tEND(3, t6 + +!!t7, true), t6 = 0;",
-            "\t\t}\n\t\tt6 && END(3, t6 + +!!t7, false);\n\t}",
+            "{\n\t\tt2 = 0;\n\t\tdo {\n\t\t\tt2 && (END(2, 2, true), t2 = 0);",
+            "} while (t2 = 1, i > 0);\n\t\tt2 && END(2, 1, false);\n\t}",
+            "for (let j = 0; t3 = 1, j < limit; j++) {\n\t\t\tEND(3, 2, true), t3 = 0;",
+            "\t\t}\n\t\tt3 && END(3, 1, false);\n\t}",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
+    }
+
+    #[test]
+    fn a_forced_vector_is_the_only_vector_its_outcome_has() {
+        // Every evaluation of each shape, short-circuited as JavaScript does,
+        // and the vectors each outcome is reached with: the instrumenter
+        // writes a number for an outcome exactly when there is one vector.
+        fn evaluate(shape: &ValueShape, values: &[bool], vector: &mut u64) -> bool {
+            match shape {
+                ValueShape::Condition(index) => {
+                    let value = values[*index];
+                    *vector += 3_u64.pow(*index as u32) * if value { 2 } else { 1 };
+                    value
+                }
+                ValueShape::Not(inner) => !evaluate(inner, values, vector),
+                ValueShape::And(left, right) => {
+                    evaluate(left, values, vector) && evaluate(right, values, vector)
+                }
+                ValueShape::Or(left, right) => {
+                    evaluate(left, values, vector) || evaluate(right, values, vector)
+                }
+            }
+        }
+        for source in [
+            "a",
+            "!a",
+            "!!a",
+            "a && b",
+            "a || b",
+            "!(a && b)",
+            "!(a || b)",
+            "a && b && c",
+            "a || b || c",
+            "(a || b) && c",
+            "a && (b || c)",
+            "!(a && b) || c",
+            "!a && !b",
+            "a ?? b",
+            "(a && b) && (c && d)",
+            "!((a || b) || !(c && d))",
+        ] {
+            let allocator = Allocator::default();
+            let expression = Parser::new(&allocator, source, SourceType::mjs())
+                .parse_expression()
+                .expect("a decision parses");
+            let mut count = 0;
+            let shape = super::value_shape(&expression, &mut count);
+            for outcome in [false, true] {
+                let mut reached = std::collections::BTreeSet::new();
+                for bits in 0..1_u32 << count {
+                    let values = (0..count)
+                        .map(|index| bits >> index & 1 == 1)
+                        .collect::<Vec<_>>();
+                    let mut vector = 0;
+                    if evaluate(&shape, &values, &mut vector) == outcome {
+                        reached.insert(vector);
+                    }
+                }
+                let only = (reached.len() == 1).then(|| *reached.first().unwrap());
+                assert_eq!(shape.forced_vector(outcome), only, "{source} {outcome}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_condition_in_a_parameter_default_needs_no_frame() {
+        // Nothing is read back from a lone condition's temporaries, so the
+        // arrow that declares a parameter default's temporaries is not made.
+        let shaped = decision_shape(
+            "export function pick(n: number, tag = n > 5 ? 'high' : 'low') {\n  return tag;\n}\n",
+            "src/defaults.ts",
+        );
+        assert!(
+            shaped.contains(
+                "n > 5 ? (void END(0, 2, true), \"high\") : (void END(0, 1, false), \"low\")"
+            ),
+            "{shaped}"
+        );
+        assert!(!shaped.contains("=> {"), "{shaped}");
     }
 
     #[test]
@@ -15488,7 +15673,7 @@ export function shapes(n: number): unknown {
                 "export function pick(\n",
                 "  n: number,\n",
                 "  kind = class { static label = 'none'; static { if (n > 1) this.label = 'some'; } },\n",
-                "  tag = n > 5 ? 'high' : 'low',\n",
+                "  tag = n > 5 && n < 9 ? 'high' : 'low',\n",
                 ") {\n",
                 "  return [kind.label, tag];\n",
                 "}\n",
@@ -15496,12 +15681,12 @@ export function shapes(n: number): unknown {
             "src/defaults.ts",
         );
         for expected in [
-            "static {\n\t\tlet t0, t1;\n",
-            "if (t0 = 1, t1 = n > 1) {\n\t\t\t\tEND(0, t0 + +!!t1, true), t0 = 0;",
+            "static {\n\t\tlet t0;\n",
+            "if (t0 = 1, n > 1) {\n\t\t\t\tEND(0, 2, true), t0 = 0;",
             // A parameter default has no body to declare in: the arrow holds
             // the whole conditional expression, so its branches still see
             // what the test narrowed.
-            "(() => {\n\tlet t2, t3;\n\treturn (t2 = 1, t3 = n > 5) ? (void END(1, t2 + +!!t3, true), \"high\") : (void END(1, t2 + +!!t3, false), \"low\");\n})()",
+            "(() => {\n\tlet t1, t2, t3;\n\treturn (t1 = 1, t3 = 0, t2 = n > 5) && (t1 += 3, t3 = n < 9) ? (void END(1, 8, true), \"high\") : (void END(1, t1 + +!!t2 + 3 * +!!t3, false), \"low\");\n})()",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
