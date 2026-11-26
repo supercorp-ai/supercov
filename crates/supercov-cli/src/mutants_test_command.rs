@@ -3188,23 +3188,27 @@ fn earlier_candidates(
     root: &Path,
 ) -> Option<std::collections::BTreeMap<String, BTreeSet<TestName>>> {
     supercov_engine::strong_plan::run_recorded_mutant_values(&earlier.evidence_path)
-        .then_some(())?;
-    let plan = plan_for_run(earlier, root).ok()?.plan?;
-    Some(
-        plan.mutants
-            .iter()
-            .map(|mutant| {
-                (
-                    mutant.id.clone(),
-                    mutant
-                        .candidates
-                        .iter()
-                        .map(|candidate| named(&plan.tests[candidate.test]))
-                        .collect(),
-                )
-            })
-            .collect(),
-    )
+        .then(|| {
+            plan_for_run(earlier, root)
+                .ok()
+                .and_then(|planned| planned.plan)
+        })
+        .flatten()
+        .map(|plan| {
+            plan.mutants
+                .iter()
+                .map(|mutant| {
+                    (
+                        mutant.id.clone(),
+                        mutant
+                            .candidates
+                            .iter()
+                            .map(|candidate| named(&plan.tests[candidate.test]))
+                            .collect(),
+                    )
+                })
+                .collect()
+        })
 }
 
 /// A test as two runs both name it: its file and its name.
@@ -3435,22 +3439,22 @@ impl Reach {
             .map(|support| support.names.values().cloned().collect())
             .unwrap_or_default();
         let checkout = supercov_engine::run_currency::Checkout::new(root, &self.test_files);
-        for mutant in undecided {
-            let files = mutant
-                .candidates
-                .iter()
-                .filter_map(|candidate| tests[candidate.test].file.as_ref());
-            for file in files {
-                if !self.loads.contains_key(file) {
-                    let loads = checkout.loads(
-                        &BTreeSet::from([file.clone()]),
-                        ran.runners.as_ref(),
-                        &configurations,
-                    );
-                    self.loads.insert(file.clone(), loads);
-                }
-            }
-        }
+        let files = undecided
+            .iter()
+            .flat_map(|mutant| &mutant.candidates)
+            .filter_map(|candidate| tests[candidate.test].file.clone())
+            .collect::<BTreeSet<_>>();
+        self.loads = files
+            .into_iter()
+            .map(|file| {
+                let loads = checkout.loads(
+                    &BTreeSet::from([file.clone()]),
+                    ran.runners.as_ref(),
+                    &configurations,
+                );
+                (file, loads)
+            })
+            .collect();
         self
     }
 
@@ -3476,7 +3480,7 @@ impl Reach {
         if !self.known.contains(&key) {
             return Err(NEW_TEST);
         }
-        let affected = self.reached_files.contains(&key.0) || !self.unaffected.contains(&key);
+        let affected = !self.unaffected.contains(&key) || self.reached_files.contains(&key.0);
         // A directory loaded whole holds files no import names.
         let bounded = self
             .loads
@@ -3621,12 +3625,13 @@ fn kept_verdicts(
                 let Some(then) = candidates_then(then) else {
                     return Err(CANDIDATES_UNKNOWN);
                 };
-                for candidate in &mutant.candidates {
-                    if !then.contains(&named(&tests[candidate.test])) {
-                        return Err(NEW_TEST);
+                mutant.candidates.iter().try_for_each(|candidate| {
+                    if then.contains(&named(&tests[candidate.test])) {
+                        stands(candidate.test)
+                    } else {
+                        Err(NEW_TEST)
                     }
-                    stands(candidate.test)?;
-                }
+                })?;
                 Ok(verdict)
             }
         });
@@ -4778,6 +4783,26 @@ mod tests {
             "{text}"
         );
         assert_eq!(short_commit("abc"), "abc");
+        // Kept verdicts no test run reached (a plan's), and every reason
+        // the rest run again.
+        let reasons = [
+            MOVED,
+            LOADS_CHANGED,
+            KILLER_GONE,
+            KILLER_UNKNOWN,
+            CANDIDATES_UNKNOWN,
+        ];
+        let text = plan_text(&json!({"run": "r3", "summary": summary, "carried": {
+            "runs": [{"run": "r2", "mutants": 1}], "mutants": 1, "testRuns": 0,
+            "notKept": reasons.iter().map(|reason| (*reason, 1)).collect::<std::collections::BTreeMap<_, _>>(),
+        }}));
+        assert!(
+            text.contains("  1 verdict(s) kept from run r2: nothing they depend on changed\n"),
+            "{text}"
+        );
+        for reason in reasons {
+            assert!(text.contains(not_kept_said(reason)), "{reason}: {text}");
+        }
     }
 
     /// A pass that resumes mutants says so as it starts (the median

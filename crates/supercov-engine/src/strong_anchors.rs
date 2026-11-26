@@ -196,6 +196,23 @@ mod tests {
         assert_eq!(anchor(CART, "src/cart.js:Mutator"), None);
         assert_eq!(anchor(CART, "src/other.js:2:7-2:16:M:x"), None);
         assert_eq!(anchor(CART, "src/cart.js:x:7-2:16:M:x"), None);
+        for broken in [
+            "src/cart.jsx:2:7-2:16:M:x",
+            "src/cart.js:2:7",
+            "src/cart.js:2:7-2",
+            "src/cart.js:2:7-2:16",
+            "src/cart.js:2:x-2:16:M:x",
+            "src/cart.js:2:7-y:16:M:x",
+            "src/cart.js:2:7-2:z:M:x",
+        ] {
+            assert_eq!(anchor(CART, broken), None, "{broken}");
+        }
+        assert!(of_source("src/cart.js", CART, []).is_empty());
+        // Two declarations on one line: the first holds a mutant of either,
+        // and its anchor is the line's.
+        let one_line = "export function a() { return 1; } export function b() { return 2; }\n";
+        let id = "src/cart.js:1:60-1:61:NumberLiteral:3";
+        assert!(anchor(one_line, id).is_some());
         // Past the end of the file: held by no declaration.
         assert_eq!(anchor(CART, "src/cart.js:90:1-90:2:M:x"), None);
         // A file no parser reads is one declaration: any change moves it.

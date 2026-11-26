@@ -83,28 +83,27 @@ fn by_names(file: &str) -> bool {
         .any(|extension| file.ends_with(extension))
 }
 
+/// Whether `c` can be part of an identifier.
+fn word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
 /// Each identifier of `text`, and those read other than before a `.`.
 fn identifiers(text: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut names = BTreeSet::new();
     let mut bare = BTreeSet::new();
-    let bytes = text.as_bytes();
-    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
-    let mut at = 0;
-    while at < bytes.len() {
-        if !word(bytes[at]) || (at > 0 && word(bytes[at - 1])) {
-            at += 1;
-            continue;
-        }
-        let start = at;
-        while at < bytes.len() && word(bytes[at]) {
-            at += 1;
-        }
-        let name = &text[start..at];
-        if bytes[start].is_ascii_digit() {
+    let mut rest = text;
+    while let Some(start) = rest.find(word) {
+        let tail = &rest[start..];
+        let length = tail.find(|c: char| !word(c)).unwrap_or(tail.len());
+        let name = &tail[..length];
+        rest = &tail[length..];
+        // A number, not a name.
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
             continue;
         }
         names.insert(name.to_owned());
-        let next = text[at..].trim_start();
+        let next = rest.trim_start();
         if !next.starts_with('.') || next.starts_with("...") {
             bare.insert(name.to_owned());
         }
@@ -118,7 +117,7 @@ fn module_bindings(text: &str) -> BTreeSet<String> {
     let mut bindings = BTreeSet::new();
     let ident = |rest: &str| {
         rest.trim_start()
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .split(|c: char| !word(c))
             .next()
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
@@ -131,9 +130,7 @@ fn module_bindings(text: &str) -> BTreeSet<String> {
         let before = text[..at].trim_end();
         if let Some(before) = before.strip_suffix('=') {
             let before = before.trim_end();
-            let start = before
-                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-                .map_or(0, |at| at + 1);
+            let start = before.rfind(|c: char| !word(c)).map_or(0, |at| at + 1);
             if start < before.len() {
                 bindings.insert(before[start..].to_owned());
             }
@@ -157,13 +154,11 @@ fn without_bindings(text: &str) -> String {
 /// A declaration's name as code names it: the last part of its path, where
 /// that is an identifier.
 fn own_name(path: &str) -> Option<String> {
-    let last = path.rsplit(['.', ':']).next()?;
-    let last = last.split('#').next()?;
+    let last = path.rsplit(['.', ':']).next().unwrap_or_default();
+    let last = last.split('#').next().unwrap_or_default();
     let identifier = !last.is_empty()
-        && !last.as_bytes()[0].is_ascii_digit()
-        && last
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$');
+        && !last.starts_with(|c: char| c.is_ascii_digit())
+        && last.chars().all(word);
     identifier.then(|| last.to_owned())
 }
 
@@ -174,13 +169,10 @@ fn own_name(path: &str) -> Option<String> {
 /// whatever names it.
 fn declared(before: &str) -> bool {
     let before = before.trim_end();
-    let word = before
-        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-        .next()
-        .unwrap_or_default();
+    let last = before.rsplit(|c: char| !word(c)).next().unwrap_or_default();
     before.is_empty()
         || before.ends_with([';', '}', '{'])
-        || ["export", "declare", "async"].contains(&word)
+        || ["export", "declare", "async"].contains(&last)
 }
 
 /// A file's declarations, as reaching reads them, from its source.
@@ -202,11 +194,11 @@ fn nodes(code: &Code, source: &str) -> Vec<Node> {
         })
         .collect::<Vec<_>>();
     let mut children = vec![Vec::new(); code.units.len()];
-    for (index, unit) in code.units.iter().enumerate() {
-        if let Some(parent) = unit.parent {
-            children[parent].push(index);
-        }
-    }
+    code.units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| Some((unit.parent?, index)))
+        .for_each(|(parent, index)| children[parent].push(index));
     code.units
         .iter()
         .enumerate()
@@ -224,19 +216,17 @@ fn nodes(code: &Code, source: &str) -> Vec<Node> {
             own.push_str(source.get(at..end.max(at)).unwrap_or_default());
             let own = without_bindings(&own);
             let (names, bare) = identifiers(&own);
-            let line_start = starts.get(unit.line - 1).copied().unwrap_or(start);
-            let before = source.get(line_start..start).unwrap_or_default();
+            // A top-level declaration a name does not reach: an object's
+            // method (an object exported whole, `export default {}`), or a
+            // value an expression holds (`export default function`, an
+            // argument).
             let top = unit.parent == Some(0);
             Node {
                 name: own_name(&unit.path),
                 parent: unit.parent,
                 names,
                 bare,
-                always: index > 0
-                    && (before.contains("default")
-                        || (top && unit.kind == "method")
-                        || (top && !declared(&source[..start]))
-                        || unit.path.contains("__")),
+                always: top && (unit.kind == "method" || !declared(&source[..start])),
                 inert: unit.inert,
             }
         })
@@ -392,37 +382,46 @@ impl Program {
             })
             .collect::<Vec<Vec<bool>>>();
         let mut named = BTreeSet::<&str>::new();
-        let mut grew = true;
-        while grew {
-            grew = false;
-            for ((_, file), reached) in read.iter().zip(reached.iter_mut()) {
-                let File::Read { nodes, modules, .. } = file.as_ref() else {
-                    continue;
-                };
-                for index in 0..nodes.len() {
-                    let node = &nodes[index];
-                    if !reached[index] {
-                        let parent = node.parent.unwrap_or_default();
-                        let reachable = !node.inert
-                            && reached[parent]
-                            && (parent != 0
-                                || node.always
-                                || node.name.as_deref().is_none_or(|name| named.contains(name)));
-                        if !reachable {
-                            continue;
+        let mut opaque = false;
+        loop {
+            let mut grew = false;
+            read.iter()
+                .zip(reached.iter_mut())
+                .for_each(|((_, file), reached)| {
+                    let File::Read { nodes, modules, .. } = file.as_ref() else {
+                        return;
+                    };
+                    nodes.iter().enumerate().for_each(|(index, node)| {
+                        if !reached[index] {
+                            let parent = node.parent.unwrap_or_default();
+                            // Nested in code that runs, or named by it.
+                            let reachable = !node.inert
+                                && reached[parent]
+                                && (parent != 0
+                                    || node.always
+                                    || node
+                                        .name
+                                        .as_deref()
+                                        .is_none_or(|name| named.contains(name)));
+                            if !reachable {
+                                return;
+                            }
+                            reached[index] = true;
+                            grew = true;
                         }
-                        reached[index] = true;
-                        grew = true;
-                    }
-                    // A whole module read by more than its property names:
-                    // a name no longer says what runs.
-                    if node.bare.iter().any(|name| modules.contains(name)) {
-                        return true;
-                    }
-                    let before = named.len();
-                    named.extend(node.names.iter().map(String::as_str));
-                    grew |= named.len() > before;
-                }
+                        // A whole module read by more than its property
+                        // names: a name no longer says what runs.
+                        opaque |= node.bare.iter().any(|name| modules.contains(name));
+                        let before = named.len();
+                        named.extend(node.names.iter().map(String::as_str));
+                        grew |= named.len() > before;
+                    });
+                });
+            if opaque {
+                return true;
+            }
+            if !grew {
+                break;
             }
         }
         read.iter()
@@ -675,11 +674,48 @@ mod tests {
         assert!(checkout.reaches(&recorded, "test_app.py", &files));
     }
 
+    /// A method runs where its class does; a class, where a name reaches
+    /// it; a type never.
+    #[test]
+    fn a_method_is_reached_with_its_class_and_a_type_never() {
+        const SHAPES: &str = "export interface Shape {\n  area(): number;\n}\nexport class Square {\n  area() {\n    return 1;\n  }\n}\nexport class Unused {\n  area() {\n    return 0;\n  }\n}\n";
+        let checkout = Checkout::new(
+            "classes",
+            &[
+                (
+                    "test/a.test.ts",
+                    "import { Square } from \"../src/shapes.ts\";\nit(\"a\", () => new Square());\n",
+                ),
+                ("src/shapes.ts", SHAPES),
+            ],
+        );
+        let files = ["test/a.test.ts", "src/shapes.ts"];
+        let recorded = checkout.recorded(&files);
+        // A class nothing names: its method does not run.
+        checkout.write("src/shapes.ts", &SHAPES.replace("return 0", "return 2"));
+        assert!(!checkout.reaches(&recorded, "test/a.test.ts", &files));
+        // A type: nothing runs.
+        checkout.write(
+            "src/shapes.ts",
+            &SHAPES.replace("area(): number", "area(): string"),
+        );
+        assert!(!checkout.reaches(&recorded, "test/a.test.ts", &files));
+        // The class the test names: its method may run.
+        checkout.write("src/shapes.ts", &SHAPES.replace("return 1", "return 2"));
+        assert!(checkout.reaches(&recorded, "test/a.test.ts", &files));
+        // Nothing loaded, nothing reached.
+        let program = Program::new(checkout.root.clone(), recorded);
+        assert!(!program.reaches_change("test/a.test.ts", &BTreeSet::new()));
+    }
+
     #[test]
     fn names_and_bindings_are_read_from_text() {
-        let (names, bare) = identifiers("a.b(c, ...d) + 1x $e");
-        assert_eq!(names, ["a", "b", "c", "d", "$e"].map(str::to_owned).into());
-        assert_eq!(bare, ["b", "c", "d", "$e"].map(str::to_owned).into());
+        let (names, bare) = identifiers("a.b(c, ...d) + 1x $e _f a...g");
+        let all = ["a", "b", "c", "d", "$e", "_f", "g"].map(str::to_owned);
+        assert_eq!(names, all.clone().into());
+        assert_eq!(bare, all.into());
+        assert_eq!(identifiers(" + "), (BTreeSet::new(), BTreeSet::new()));
+        assert_eq!(identifiers("x.y").1, ["y".to_owned()].into());
         assert_eq!(
             module_bindings(
                 "import * as all from 'x';\nconst m = require('y');\nrequire('z');\nf(require('w'));\n= require('v');"
@@ -691,6 +727,7 @@ mod tests {
         assert_eq!(own_name("module.exports"), Some("exports".into()));
         assert_eq!(own_name("<<x>"), None);
         assert_eq!(own_name("9a"), None);
+        assert_eq!(own_name("_a$"), Some("_a$".into()));
         assert_eq!(own_name(""), None);
     }
 }

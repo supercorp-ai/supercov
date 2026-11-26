@@ -127,6 +127,58 @@ pub struct Lent<'a> {
     pub other_bytes: &'a BTreeSet<String>,
 }
 
+/// What one of the merged runs says of its verdicts beside them.
+pub struct Marks<'a> {
+    /// Its verdicts, by mutant id.
+    pub verdicts: &'a BTreeMap<String, Verdict>,
+    /// The files it recorded with other bytes than the merged run's.
+    pub other_bytes: &'a BTreeSet<String>,
+    /// Each verdict's anchor (`strong_anchors`).
+    pub anchors: &'a BTreeMap<String, String>,
+    /// Where each verdict it kept from an earlier run was reached.
+    pub carried: &'a BTreeMap<String, crate::strong_plan::CarriedFrom>,
+}
+
+/// Each merged verdict's anchor and, where a run kept it from an earlier
+/// one, where it was reached: as the first run that lends that very verdict
+/// for a file it recorded with the merged run's bytes says. A verdict the
+/// plan decides, which no run lends, has neither.
+pub fn merged_marks(
+    plan: &StrongPlan,
+    merged: &BTreeMap<String, Verdict>,
+    lenders: &[Marks<'_>],
+) -> (
+    BTreeMap<String, String>,
+    BTreeMap<String, crate::strong_plan::CarriedFrom>,
+) {
+    let files = plan
+        .mutants
+        .iter()
+        .map(|mutant| (mutant.id.as_str(), mutant.file.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let lender = |id: &String, verdict: &Verdict| {
+        lenders.iter().find(|lender| {
+            lender.verdicts.get(id) == Some(verdict)
+                && files
+                    .get(id.as_str())
+                    .is_some_and(|file| !lender.other_bytes.contains(*file))
+        })
+    };
+    let lent = merged
+        .iter()
+        .filter_map(|(id, verdict)| Some((id, lender(id, verdict)?)))
+        .collect::<Vec<_>>();
+    let anchors = lent
+        .iter()
+        .filter_map(|(id, lender)| Some(((*id).clone(), lender.anchors.get(*id)?.clone())))
+        .collect();
+    let carried = lent
+        .iter()
+        .filter_map(|(id, lender)| Some(((*id).clone(), lender.carried.get(*id)?.clone())))
+        .collect();
+    (anchors, carried)
+}
+
 /// The merged run's verdicts, by mutant id, from those of the runs merged
 /// (`docs/design/mutants.md`, Merged runs), and how many of them each run
 /// lent: a verdict two runs hold alike is counted for the first, in the
@@ -272,6 +324,72 @@ pub fn progress_note(progress: &Progress) -> String {
 mod tests {
     use super::*;
     use crate::strong_plan::{Candidate, CandidateReason, PlannedTest, ServerWide};
+
+    /// A merged verdict takes its anchor and its origin from the first run
+    /// that lends that very verdict for a file it recorded alike: not from
+    /// one whose verdict differs, nor one with other bytes of its file.
+    #[test]
+    fn a_merged_verdict_keeps_its_lender_s_anchor_and_origin() {
+        let mut plan = StrongPlan {
+            mutant_set: "set".into(),
+            tests: Vec::new(),
+            mutants: Vec::new(),
+        };
+        for (id, file) in [("a", "a.js"), ("b", "b.js"), ("c", "a.js"), ("d", "a.js")] {
+            plan.mutants.push(mutant(id, file, &[], &[]));
+        }
+        let merged = verdicts(&[
+            ("a", "killed"),
+            ("b", "killed"),
+            ("c", "survived"),
+            ("d", "killed"),
+            ("e", "killed"),
+        ]);
+        let first = verdicts(&[
+            ("a", "survived"),
+            ("b", "killed"),
+            ("c", "survived"),
+            ("d", "killed"),
+        ]);
+        let second = verdicts(&[("a", "killed"), ("b", "killed"), ("e", "killed")]);
+        let anchors = |run: &str, ids: &[&str]| -> BTreeMap<String, String> {
+            ids.iter()
+                .map(|id| ((*id).to_owned(), format!("{run}-{id}")))
+                .collect()
+        };
+        let origin = crate::strong_plan::CarriedFrom {
+            run: "r0".into(),
+            commit: None,
+        };
+        let carried = BTreeMap::from([("c".to_owned(), origin.clone())]);
+        let none = BTreeMap::new();
+        let other = BTreeSet::from(["b.js".to_owned()]);
+        let same = BTreeSet::new();
+        let first_anchors = anchors("1", &["a", "b", "c"]);
+        let second_anchors = anchors("2", &["a", "b", "e"]);
+        let lenders = [
+            Marks {
+                verdicts: &first,
+                other_bytes: &other,
+                anchors: &first_anchors,
+                carried: &carried,
+            },
+            Marks {
+                verdicts: &second,
+                other_bytes: &same,
+                anchors: &second_anchors,
+                carried: &none,
+            },
+        ];
+        let (kept, origins) = merged_marks(&plan, &merged, &lenders);
+        // `a` is the second's kill; `b` the second's, the first having other
+        // bytes of its file; `c` the first's, with where it was reached; `d`
+        // has no anchor; `e` is no mutant of the plan.
+        let mut expected = anchors("2", &["a", "b"]);
+        expected.extend(anchors("1", &["c"]));
+        assert_eq!(kept, expected);
+        assert_eq!(origins, BTreeMap::from([("c".to_owned(), origin)]));
+    }
 
     fn test(id: &str, file: &str) -> PlannedTest {
         PlannedTest {

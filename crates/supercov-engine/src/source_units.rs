@@ -650,14 +650,13 @@ pub fn code(path: &str, source: &str) -> Option<Code> {
 pub fn javascript_without_comments(path: &str, source: &str) -> Option<String> {
     let outline = javascript(path, source)?;
     let mut bytes = source.as_bytes().to_vec();
-    for (start, end) in outline.comments {
-        for byte in bytes.iter_mut().take(end).skip(start) {
-            // A character's every byte, so the text stays UTF-8.
-            if *byte != b'\n' {
-                *byte = b' ';
-            }
-        }
-    }
+    // A character's every byte, so the text stays UTF-8.
+    outline
+        .comments
+        .iter()
+        .flat_map(|(start, end)| *start..*end)
+        .filter(|at| source.as_bytes()[*at] != b'\n')
+        .for_each(|at| bytes[at] = b' ');
     Some(String::from_utf8(bytes).expect("ASCII spaces in place of whole characters"))
 }
 
@@ -1979,6 +1978,17 @@ mod tests {
         "e350d052c0bf53390700122e45fb4ad582d97437028c2a207b413cb1f70d5209";
 
     use super::*;
+
+    /// Comments blanked where they were, line breaks kept; a file that does
+    /// not parse has none to blank.
+    #[test]
+    fn a_javascript_file_s_comments_are_blanked_in_place() {
+        assert_eq!(
+            javascript_without_comments("a.js", "a(); /* b\nc */ d(); // é\n").as_deref(),
+            Some("a();     \n     d();      \n")
+        );
+        assert_eq!(javascript_without_comments("a.js", "function ("), None);
+    }
 
     fn paths(code: &Code) -> Vec<(&str, &str)> {
         code.units

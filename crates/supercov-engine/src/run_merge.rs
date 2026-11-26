@@ -1756,32 +1756,18 @@ fn kept_verdicts(
     // the merged run, or a later round carrying it over, resumes there.
     let progress = crate::strong_verdicts::merged_progress(&plan, &lent, &mutants);
     let lived = crate::strong_verdicts::merged_lived(&lent, &progress);
-    // Each verdict's anchor and, where a run kept it from an earlier one,
-    // where it was reached: as the first run that lends that very verdict
-    // for a file it recorded with the merged run's bytes says.
-    let files = plan
-        .mutants
+    let marks = lending
         .iter()
-        .map(|mutant| (mutant.id.as_str(), mutant.file.as_str()))
-        .collect::<BTreeMap<_, _>>();
-    let mut anchors = BTreeMap::new();
-    let mut carried = BTreeMap::new();
-    for (id, verdict) in &mutants {
-        let lender = lending.iter().find(|(_, verdicts, .., other_bytes, _)| {
-            verdicts.get(id) == Some(verdict)
-                && files
-                    .get(id.as_str())
-                    .is_some_and(|file| !other_bytes.contains(*file))
-        });
-        if let Some((.., (lent_anchors, lent_carried))) = lender {
-            if let Some(anchor) = lent_anchors.get(id) {
-                anchors.insert(id.clone(), anchor.clone());
-            }
-            if let Some(from) = lent_carried.get(id) {
-                carried.insert(id.clone(), from.clone());
-            }
-        }
-    }
+        .map(
+            |(_, verdicts, .., other_bytes, (anchors, carried))| crate::strong_verdicts::Marks {
+                verdicts,
+                other_bytes,
+                anchors,
+                carried,
+            },
+        )
+        .collect::<Vec<_>>();
+    let (anchors, carried) = crate::strong_verdicts::merged_marks(&plan, &mutants, &marks);
     let document = StrongVerdicts {
         schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: merged_run_id.to_owned(),
