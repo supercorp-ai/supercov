@@ -5,10 +5,11 @@
 //
 // The run's summary and every view of it, every file, every line of every
 // file (with its tests and phases), every decision (MC/DC vectors and
-// witness pairs; left out with --quick, for a large run), every test, the
-// mutants and their candidates, and every record of its evidence. Random ids
-// (run, attempt, worker, test key), times, process ids and paths are
-// replaced by stable names, and lists are sorted after that. A change meant
+// witness pairs), every test, the mutants and their candidates, and every
+// record of its evidence. --quick, for a large run, leaves out the files,
+// lines, decisions and, past 300, the tests: each is a query of its own.
+// Random ids (run, attempt, worker, test key), times, process ids and paths
+// are replaced by stable names, and lists are sorted after that. A change meant
 // not to change what Supercov measures leaves two runs' files equal byte for
 // byte (docs/performance.md, "Prove a speed-up changes nothing").
 import { spawnSync } from 'node:child_process';
@@ -120,7 +121,10 @@ const decisionLines = new Set((manifest ? JSON.parse(manifest.text).decisions ??
 const sizes = files.map((file) => (existsSync(join(project, file)) ? readFileSync(join(project, file), 'utf8').split('\n').length : 0));
 const single = sizes.reduce((sum, lines) => sum + lines, 0) <= 3000;
 const list = join(tmpdir(), `answers-${process.pid}.txt`);
-files.forEach((file, index) => {
+// --quick asks for no file, line or decision: on a large app's run each is
+// a query of its own, and the run's evidence, compared record by record,
+// is what they are all worked out from.
+if (!quick) files.forEach((file, index) => {
   answers.file[file] = query(['file', file, '--limit', '0']);
   const locations = Array.from({ length: sizes[index] }, (_, line) => `${file}:${line + 1}`);
   if (single) for (const location of locations) answers.line[location] = query(['line', location, '--limit', '0']);
