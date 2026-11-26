@@ -123,6 +123,69 @@ if (mode === 'trace') {
   }
 }
 
+if (mode === 'profile' || mode === 'ablate') {
+  // profile: CPU profiles of both servers' pages, self time by script and function.
+  // ablate: one server, B's runtime chunk with every probe helper made a no-op
+  // (call sites kept), A's served unchanged through the same interception.
+  const [aUrl, bUrl, flows] = rest;
+  const browser = await chromium.launch();
+  const agg = { A: { url: {}, fn: {} }, B: { url: {}, fn: {} } };
+  const results = { A: [], B: [] };
+  const noop = [
+    ['i.hit=e=>{s[e]!==l.e&&tO(i,e)}', 'i.hit=e=>{}'],
+    ['mcdcEndV2:function(e,t,r,n){if(0===r)return n;', 'mcdcEndV2:function(e,t,r,n){return n;'],
+    ['function tR(e,t){let r=e.clock;', 'function tR(e,t){return;let r=e.clock;'],
+    ['selectEnd2V2:function(e,t,r,n){return tR(e,t+2*!!n+ +!!r),r}', 'selectEnd2V2:function(e,t,r,n){return r}'],
+  ];
+  let patched = 0;
+  const n = Number(flows);
+  for (let i = 0; i < 2 * n + 2; i += 1) {
+    const v = [0, 3].includes(i % 4) ? 'A' : 'B';
+    const context = await browser.newContext(); const page = await context.newPage();
+    if (mode === 'ablate') {
+      await context.route('**/_next/static/chunks/*.js', async (route) => {
+        const response = await route.fetch(); let body = await response.text();
+        if (v === 'B' && body.includes('__SUPERCOV_ACTIVATE_PROBE_CONTEXT__')) for (const [from, to] of noop) if (body.includes(from)) { body = body.replace(from, to); patched += 1; }
+        await route.fulfill({ response, body });
+      });
+    }
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Performance.enable');
+    if (mode === 'profile') { await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 200 }); await cdp.send('Profiler.start'); }
+    await flow(page, mode === 'ablate' || v === 'A' ? aUrl : bUrl, (i >> 1) % 24);
+    const { metrics } = await cdp.send('Performance.getMetrics');
+    const m = Object.fromEntries(metrics.map((x) => [x.name, x.value]));
+    if (i >= 2) results[v].push({ script: m.ScriptDuration * 1000, task: m.TaskDuration * 1000 });
+    if (mode === 'profile') {
+      const { profile } = await cdp.send('Profiler.stop');
+      if (i >= 2) {
+        const nodes = new Map(profile.nodes.map((x) => [x.id, x]));
+        for (let k = 0; k < profile.samples.length; k += 1) {
+          const f = nodes.get(profile.samples[k]).callFrame; const dt = (profile.timeDeltas[k] ?? 0) / 1000 / n;
+          if (f.functionName === '(idle)') continue;
+          const url = f.url ? f.url.split('/').pop().slice(0, 40) : `(${f.functionName.startsWith('(') ? f.functionName : 'native ' + f.functionName})`;
+          agg[v].url[url] = (agg[v].url[url] ?? 0) + dt;
+          const fk = `${f.functionName || '(anon)'} ${url}`; agg[v].fn[fk] = (agg[v].fn[fk] ?? 0) + dt;
+        }
+      }
+    }
+    await context.close();
+  }
+  await browser.close();
+  const summary = Object.fromEntries(['script', 'task'].map((k) => [k, { A: +mean(results.A.map((r) => r[k])).toFixed(1), B: +mean(results.B.map((r) => r[k])).toFixed(1) }]));
+  console.log(JSON.stringify({ mode, flows: n, patchedChunks: patched, ...summary }));
+  if (mode === 'profile') {
+    for (const kind of ['url', 'fn']) {
+      const keys = new Set([...Object.keys(agg.A[kind]), ...Object.keys(agg.B[kind])]);
+      const rows = [...keys].map((k) => [k, agg.A[kind][k] ?? 0, agg.B[kind][k] ?? 0]).sort((x, y) => Math.max(y[1], y[2]) - Math.max(x[1], x[2]));
+      console.log(`== sampled self ms per flow by ${kind}: A, B (largest first)`);
+      for (const [k, a, b] of rows.slice(0, kind === 'url' ? 25 : 40)) console.log(`${a.toFixed(2).padStart(8)} ${b.toFixed(2).padStart(8)}  ${k}`);
+      const tot = (o) => Object.values(o).reduce((x, y) => x + y, 0);
+      console.log(`total ${tot(agg.A[kind]).toFixed(1)} ${tot(agg.B[kind]).toFixed(1)}`);
+    }
+  }
+}
+
 if (mode === 'opt') {
   const [url, flows] = rest;
   const browser = await chromium.launch({ args: ['--js-flags=--trace-opt --trace-deopt'] });

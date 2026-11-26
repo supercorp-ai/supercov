@@ -54,11 +54,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { pair: 'plain base', mode: abba, count: 18 }
-          - { pair: 'plain new', mode: abba, count: 18 }
-          - { pair: 'base new', mode: abba, count: 22 }
-          - { pair: 'plain base', mode: trace, count: 5 }
-          - { pair: 'base new', mode: trace, count: 5 }
+          - { pair: 'plain base', mode: profile, count: 6 }
+          - { pair: 'base plain', mode: ablate, count: 14 }
+          - { pair: 'base new', mode: abba, count: 45 }
+          - { pair: 'base new', mode: abba, count: 45 }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -80,6 +79,7 @@ jobs:
         run: tail -40 "$RUNNER_TEMP"/probe-diag/server-*.log || true
 
   measure:
+    if: false
     needs: build
     name: ${{ matrix.kind }} ${{ matrix.shard }} ${{ matrix.variants }}
     runs-on: ubuntu-24.04

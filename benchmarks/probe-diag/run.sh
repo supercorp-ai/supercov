@@ -22,10 +22,16 @@ start() {
   local dir=$WORK/app-$v
   rm -rf "$dir"; cp -R "$SRC" "$dir"
   local timed="/usr/bin/time -f %e,%U,%S -o $WORK/build-$v.txt npx next build >$WORK/build-$v.log 2>&1"
+  # The server alone is profiled: the build's workers would write profiles too.
+  local serve="exec npx next start -p $port"
+  if [ "$MODE" = profile ]; then
+    mkdir -p "$WORK/server-profile-$v"
+    serve="NODE_OPTIONS=\"\${NODE_OPTIONS:-} --cpu-prof --cpu-prof-dir=$WORK/server-profile-$v\" exec npx next start -p $port"
+  fi
   if [ "$v" = plain ]; then
-    (cd "$dir" && sh -c "$timed && exec npx next start -p $port" >"$WORK/server-$v.log" 2>&1 &)
+    (cd "$dir" && sh -c "$timed && $serve" >"$WORK/server-$v.log" 2>&1 &)
   else
-    (cd "$dir" && "$BINARIES/supercov-$v/supercov" -- sh -c "$timed && exec npx next start -p $port" >"$WORK/server-$v.log" 2>&1 &)
+    (cd "$dir" && "$BINARIES/supercov-$v/supercov" -- sh -c "$timed && $serve" >"$WORK/server-$v.log" 2>&1 &)
   fi
 }
 start "$A"; start "$B"
@@ -50,6 +56,17 @@ beforeA=$(server_ticks "$A"); beforeB=$(server_ticks "$B")
 URL_A="http://127.0.0.1:$(port_of "$A")"; URL_B="http://127.0.0.1:$(port_of "$B")"
 node "$HERE/drive.mjs" "$MODE" "$WORK/app-$A" "$URL_A" "$URL_B" "$COUNT"
 echo "next-server CPU over the comparison: $A $(( ($(server_ticks "$A") - beforeA) * 10 )) ms, $B $(( ($(server_ticks "$B") - beforeB) * 10 )) ms"
+stop_servers() {
+  pkill -INT -f next-server || true
+  for _ in $(seq 1 30); do pgrep -f next-server >/dev/null || break; sleep 1; done
+  pkill -KILL -f next-server || true
+  for _ in $(seq 1 30); do pgrep -f "supercov-(base|new)/supercov" >/dev/null || break; sleep 1; done
+}
+trap stop_servers EXIT
+if [ "$MODE" = profile ]; then
+  stop_servers
+  for v in "$A" "$B"; do echo "== server $v"; node "$HERE/server-profile.mjs" "$WORK/server-profile-$v"; done
+fi
 if [ "$MODE" = trace ]; then
   for v in "$A" "$B"; do node "$HERE/drive.mjs" opt "$WORK/app-$A" "http://127.0.0.1:$(port_of "$v")" 3; done
 fi
