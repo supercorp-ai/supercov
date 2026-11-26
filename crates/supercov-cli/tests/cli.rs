@@ -25230,6 +25230,160 @@ fn mutants_test_runs_alone_a_survivor_no_attempt_ran() {
     );
 }
 
+/// A survivor of the shared server that no attempt ran, sent alone, whose
+/// round alone the budget stops before it runs: the passes its candidates
+/// made on the shared server passed without it, so the pass leaves it with
+/// no verdict and no progress, and the next pass runs it on the shared server
+/// and then alone, where it is killed. Before, those passes were kept as its
+/// progress, and the next pass, finding every candidate passed, called it
+/// `survived` without running it.
+#[cfg(unix)]
+#[test]
+fn a_survivor_no_attempt_ran_keeps_no_progress_when_the_budget_stops_it_alone() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-unreached-budget");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-unreached-budget", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(
+        ".gitignore",
+        "node_modules\n.supercov\nsupport/slow-alone\n",
+    );
+    // As in `mutants_test_runs_alone_a_survivor_no_attempt_ran`, the worker
+    // the first request starts carries that request's attempt. And a server
+    // started with a mutant switched on is slow to be ready while
+    // `support/slow-alone` is there: the round alone outlasts the budget.
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { existsSync } from \"node:fs\";\nimport { fork } from \"node:child_process\";\nconst slow = Boolean(process.env.SUPERCOV_ACTIVE_MUTANT) && existsSync(new URL(\"./slow-alone\", import.meta.url));\nlet worker;\nconst waiting = new Map();\nlet next = 0;\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/ready\") {\n    if (slow) response.statusCode = 503;\n    return response.end(slow ? \"starting\" : \"ready\");\n  }\n  if (!worker) {\n    worker = fork(new URL(\"./worker.js\", import.meta.url));\n    worker.on(\"message\", ({ id, value }) => waiting.get(id)(value));\n  }\n  const id = next++;\n  waiting.set(id, (value) => response.end(String(value)));\n  worker.send({ id, q: Number(url.searchParams.get(\"q\")) });\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "support/worker.js",
+        "import { double } from \"../server/compute.js\";\nprocess.on(\"message\", ({ id, q }) => process.send({ id, value: double(q) }));\n",
+    );
+    project.write(
+        "server/compute.js",
+        "export function double(q) {\n  return q * 2;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: [{{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 600000, env: {{ PORT: \"{port}\" }} }}],\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/compute.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"the worker doubles\", async ({ request }) => {\n  expect(await (await request.get(\"/work?q=5\")).text()).toBe(\"10\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a server that hands its work to one worker");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let run = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let divided_id = || -> (String, serde_json::Value) {
+        let listed = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json();
+        let divided = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(":ArithmeticOperator:/")
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("{listed}"));
+        (divided["id"].as_str().unwrap().to_owned(), divided)
+    };
+    let saved = || -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(
+                project
+                    .root
+                    .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+            )
+            .unwrap_or_else(|_| "{}".into()),
+        )
+        .unwrap()
+    };
+    // The budget ends while the round alone waits for its server.
+    project.write("support/slow-alone", "");
+    let stopped = project.supercov_with(
+        &[
+            "runs", "latest", "mutants", "test", "--json", "--budget", "60",
+        ],
+        &[roots[0], ("SUPERCOV_VERBOSE", "1")],
+    );
+    let said = stopped.stderr();
+    let (id, divided) = divided_id();
+    let context = format!("{divided}\n{}\n{said}", saved());
+    contains_all(
+        &said,
+        &[
+            "[supercov] warning: 2 mutant(s) lived through every candidate test on the shared server, though no attempt ran them there",
+            "mutant(s), alone",
+            "budget spent, ",
+        ],
+    );
+    // No verdict, and nothing passed with it.
+    assert!(saved()["mutants"].get(&id).is_none(), "{context}");
+    assert!(saved()["progress"].get(&id).is_none(), "{context}");
+    assert_ne!(divided["strong"]["status"], "survived", "{context}");
+    // The next pass runs it on the shared server, then alone, where it is
+    // killed.
+    std::fs::remove_file(project.root.join("support/slow-alone")).unwrap();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let (_, divided) = divided_id();
+    let context = format!("{divided}\n{}\n{said}", saved());
+    assert!(
+        !said.contains("passed every candidate in earlier passes"),
+        "{context}"
+    );
+    assert_eq!(divided["strong"]["status"], "killed", "{context}");
+    assert!(
+        divided["strong"]["reason"].as_str().is_some_and(|reason| reason.contains(
+            "ran alone, with the server started with it switched on: its candidates passed on the shared server, yet no attempt of theirs ran it there"
+        )),
+        "{context}"
+    );
+}
+
 /// A Playwright mutant attempt is stopped at its time limit, its test's
 /// baseline x 1.5 + 5 s, or sooner where it stalls: a mutant that keeps an
 /// element from appearing ends as a `timeout` once the attempt is past every
@@ -25239,7 +25393,14 @@ fn mutants_test_runs_alone_a_survivor_no_attempt_ran() {
 /// survivor, woken by a timer in the page, lives; an `expect` whose own
 /// timeout ends it before the limit still kills, though after the window; a
 /// page that keeps sending requests is not stalled, and its timeout runs to
-/// the limit; and the summary and the progress lines say so.
+/// the limit; a page that polls on a timer every 4 s, quiet between polls,
+/// is not stalled either while its next poll is due before the limit: the
+/// mutant that leaves its first poll unanswered lives through the test, which
+/// a later poll satisfies, and the one that answers no poll stalls once no
+/// poll is due before the limit; a page with a request its server has not
+/// answered is never stalled, and the mutant that keeps it from saying done
+/// runs to its limit, a timeout confirmed there; and the summary and the
+/// progress lines say so.
 #[cfg(unix)]
 #[test]
 fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
@@ -25275,7 +25436,7 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
     project.write(".gitignore", "node_modules\n.supercov\n");
     project.write(
         "support/server.js",
-        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  if (path === \"/hang\") return;\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
     );
     project.write(
         "public/index.html",
@@ -25314,6 +25475,34 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
         &format!(
             "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
         ),
+    );
+    // Polls its server soon after it loads, then every 4 s: the first poll
+    // says ready, unless a mutant makes it wait for the next.
+    project.write(
+        "public/later.html",
+        "<!doctype html><body><script src=\"/later.js\"></script></body>\n",
+    );
+    project.write(
+        "public/later.js",
+        "let count = 0;\nfunction answered(polls) {\n  return polls >= 1;\n}\nfunction poll() {\n  count += 1;\n  fetch(`/health?ready=${answered(count) ? 1 : 0}`);\n}\nsetTimeout(poll, 300);\nsetInterval(poll, 4000);\n",
+    );
+    // Asks its server for what it never answers, and says done.
+    project.write(
+        "public/hang.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/hang.js\"></script></body>\n",
+    );
+    project.write(
+        "public/hang.js",
+        "function ready(state) {\n  return state === \"ok\";\n}\nfetch(\"/hang\");\ndocument.getElementById(\"state\").textContent = ready(\"ok\") ? \"Done\" : \"Waiting\";\n",
+    );
+    project.write(
+        "tests/hang.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits for done\", async ({ page }) => {\n  await page.goto(\"/hang.html\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
+    );
+    // Waits for the poll that says ready, with no timeout of its own.
+    project.write(
+        "tests/later.spec.js",
+        "import { test } from \"@playwright/test\";\ntest(\"waits for the ready poll\", async ({ page }) => {\n  await page.goto(\"/later.html\");\n  await page.waitForResponse((response) => response.url().includes(\"ready=1\"));\n});\n",
     );
     project.write(
         "tests/ready.spec.js",
@@ -25445,6 +25634,50 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
     assert!(
         duration(&busy) + 1_000 >= limit_ms(&busy),
         "{busy}\n{context}"
+    );
+    // The first poll left unanswered: the page's next poll, 4 s later,
+    // answers the wait before the limit, though the page was quiet past the
+    // window. It lives.
+    let later = strong("public/later.js", 3, ":EqualityOperator:>");
+    assert_eq!(later["status"], "survived", "{later}\n{context}");
+    // No poll ever answers: a timeout. Where no poll is due before the limit
+    // (a quick baseline's limit falls before the second interval poll), it
+    // stops there; where one is (a slow machine's longer baseline), it runs
+    // to the limit and says so.
+    let unanswered = strong("public/later.js", 3, ":ConditionalExpression:false");
+    assert_eq!(unanswered["status"], "timeout", "{context}");
+    assert!(
+        reason(&unanswered).contains("waiting on Page.waitForResponse at tests/later.spec.js:")
+            && ((reason(&unanswered).starts_with("stopped at ")
+                && reason(&unanswered)
+                    .contains("its pages quiet with nothing due before the limit"))
+                || (reason(&unanswered).starts_with("ran past its time limit of ")
+                    && reason(&unanswered).contains("with a timer due in ")
+                    && reason(&unanswered).contains("so it ran to its limit to confirm"))),
+        "{unanswered}\n{context}"
+    );
+    // A request still unanswered could end the wait: never stalled, its
+    // timeout runs to the limit, and says so.
+    let hanging = strong("public/hang.js", 2, ":ConditionalExpression:false");
+    assert_eq!(hanging["status"], "timeout", "{context}");
+    assert!(
+        reason(&hanging).starts_with("ran past its time limit of ")
+            && reason(&hanging).contains("waiting on expect(#state) to.have.text at tests/hang.spec.js:")
+            && reason(&hanging).contains(", with 1 unanswered request(s) that could still end the wait, so it ran to its limit to confirm"),
+        "{hanging}\n{context}"
+    );
+    assert!(
+        duration(&hanging) + 1_000 >= limit_ms(&hanging),
+        "{hanging}\n{context}"
+    );
+    assert!(
+        reply["timeLimit"]["confirmedAtLimit"].as_u64() >= Some(1),
+        "{context}"
+    );
+    assert!(
+        said.contains("past a stall at ")
+            && said.contains("with 1 unanswered request(s) that could still end the wait"),
+        "{context}"
     );
     eprintln!(
         "stalled: {} ms of {} ms, {} ms of {} ms; at the limit: {} ms of {} ms",

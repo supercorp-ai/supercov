@@ -1368,6 +1368,14 @@ page), and ends at once, a `timeout`, at the first moment (looked at every
   expect and `toPass` timeouts, and any `setDefaultTimeout` the test called);
   an API request's is 30 s;
 - the test's pages have sent and answered no request for a second;
+- nothing the pages have yet to do can end the wait before the limit: no
+  request of theirs is unanswered, no WebSocket is open, no worker runs, and
+  no timer, animation frame, idle callback or ending animation is due before
+  the limit in any frame, and every frame answers within a second. An init
+  script keeps each document's timers, frames and sockets from before its own
+  scripts run (`watchPageWork`); the fixture asks every frame at once
+  (`pendingBefore`). A page that could still end the wait is looked at again
+  once what it has yet to do is due, and its attempt goes on meanwhile;
 - the test's body is still running: once it has failed, run out of time or
   ended (Playwright then sets its duration), what its fixtures' teardown
   closes is nothing the test waited on.
@@ -1379,17 +1387,34 @@ its window only if the mutant slowed it by half its baseline and a second:
 the median 0.8 of it. A test whose waits can end before the limit (an
 `expect` that gives up after 5 s, a poll, a sleep) is left to fail by itself:
 a kill stays a kill. One that is still asking its server (a page that polls)
-is not stalled, and runs to its limit as before. What remains is a page woken
-only by a timer past the window that then passes before the limit: a mutant
-that delays its test by seconds and no more, which the window's margin and
-the data say is rare; the limit itself already judges a slowdown beyond it a
-`timeout`. The verdict says so: `stopped at 2.6 s of its 6.5 s time limit,
+is not stalled, and runs to its limit as before. Nor is one quiet between
+polls on a timer: on a large application's e2e suite, a page that polled
+every 5 s was quiet from its first poll, and an attempt waiting on
+`Page.waitForResponse` was stopped at 12.4 s, past its 12.25 s window, where
+the poll at 12.5 s would have answered the wait and the test passed before
+its 16.3 s limit; another run of the same mutant said `survived`. The window
+and the quiet second do not make a stall sound where the page's own timers
+can still act: what the page has yet to do does. With nothing due before the
+limit, no request in flight, no socket open and no worker, no event can reach
+the page before the limit but one the test itself causes, and the test is
+waiting. An attempt that stalled where its page could still end the wait runs
+to its limit, and its verdict is what that run gives: a survivor where a later
+poll answered it, a `timeout` at the limit where none did (`ran past its time
+limit of 6.6 s (...), waiting on Page.waitForResponse at ...; it stalled at
+2.6 s, with a timer due in 1.4 s that could still end the wait, so it ran to
+its limit to confirm`), counted apart in the summary (`2 of them confirmed by
+running to the limit`; `timeLimit.confirmedAtLimit`). A page that keeps a
+timer going for good (a clock, an analytics heartbeat) or a socket open never
+stalls, and its timeouts cost their whole limit, as they did before 4.29.15.
+
+The verdict of a stall says so: `stopped at 2.6 s of its 6.5 s time limit,
 past every run of the test that passed (1.5 × its 1.0 s baseline + 1 s), its
-pages quiet, waiting on Locator.click (#save), which cannot end before the
-limit`, and where the test made that call (`at tests/save.spec.ts:12:20`). A
-timeout at the limit says what it last waited on too; the summary counts the
-two apart and says what ending them early saved (`32 timeout(s) ended early
-once they stalled, saving about 6m05s`).
+pages quiet with nothing due before the limit, waiting on Locator.click
+(#save), which cannot end before the limit`, and where the test made that
+call (`at tests/save.spec.ts:12:20`). A timeout at the limit says what it last
+waited on too; the summary counts the two apart and says what ending them
+early saved (`32 timeout(s) ended early once they stalled, saving about
+6m05s`).
 
 Counting the window from the attempt's claim cut a kill short on a loaded CI
 machine: a new worker took 2.6 s to open the test's page, past the 2.5 s
@@ -1544,7 +1569,16 @@ which no attempt ran, is not a survivor: the requests that reached its code
 did not carry its mutant. It runs again alone, with the server started with
 it switched on (`unreached`), where every process runs it, and that verdict is
 its own. The pass says so on its output, and again for each such mutant that
-alone kills: a Supercov fault to report, which other survivors may share. A
+alone kills: a Supercov fault to report, which other survivors may share.
+Its passes on the shared server passed without it, so they are not its
+progress (Partial progress, below): a pass whose budget stops its round alone
+leaves it with no verdict and nothing passed, and the next pass runs it again
+from its first candidate, on the shared server and then alone. Kept as
+progress, they made the next pass call it `survived` without running it once
+(`tests: 1, durationMs: 0` on a large application's suite, where a pass that
+ran it killed it). A mutant left unfinished that no attempt has run yet is
+treated alike: its next round runs every candidate, not only those left, so
+that what it sends alone is every candidate. A
 mutant its tests run in the browser alone is not checked (a page notes
 nothing); a survivor whose code a candidate's server ran, but which also runs
 where the attempt's switch reaches it, is not either. The check costs an
@@ -1840,7 +1874,10 @@ passed survived. Three conditions keep the fact the same fact:
   round leaves without a verdict, the candidates whose attempt passed before
   any error outside a test (the same set it would count toward a survivor),
   as a `progress` record in the results; in a stopped round, those before
-  it began to stop. An attempt Playwright interrupted (the budget's
+  it began to stop. A mutant no attempt ran on its server (a survivor sent
+  alone as `unreached`, one whose invocation's server never ran it, one left
+  unfinished that no request carried yet) records none: what passed, passed
+  without it. An attempt Playwright interrupted (the budget's
   termination) neither passed nor failed: it settles nothing.
 - **When it stops holding.** It is invalidated as a verdict is, candidate by
   candidate: carried to a later run (`supercov mutants` after an edit, a

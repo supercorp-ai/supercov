@@ -184,10 +184,15 @@ export default class SupercovPlaywrightStrongReporter {
         }[attempt.outcome] ?? attempt.outcome;
         // What a timeout waited on, where the fixture saw it.
         const waiting = attempt.outcome === "timed-out" && attempt.waitingOn ? `, waiting on ${attempt.waitingOn}` : "";
+        // A stall its pages could still have ended: it ran on, and what
+        // that run gave is its outcome.
+        const doubted = attempt.doubtedAtMs === undefined
+            ? ""
+            : `, past a stall at ${seconds(attempt.doubtedAtMs)} with ${attempt.doubtedBy} that could still end the wait`;
         // A cold attempt's failure decides nothing: it runs again once a
         // control has passed on its server.
         const cold = attempt.cold && (attempt.outcome === "failed" || attempt.outcome === "timed-out") ? ", before any control here: runs again after one" : "";
-        console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said}${waiting} (${took}${cold})`);
+        console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said}${waiting}${doubted} (${took}${cold})`);
     }
     /**
      * What this invocation is doing, for the engine's progress line: the
@@ -359,6 +364,14 @@ export default class SupercovPlaywrightStrongReporter {
         const ranByRequest = ranByRequests(pass);
         // Survivors no attempt ran: they run again alone.
         const notRan = [];
+        // The mutants whose passes here do not count: no attempt ran them on
+        // their server (those `notRan` names, those whose invocation's server
+        // never ran them, and those left unfinished that no attempt has run
+        // yet). Their passes are not their progress: a pass that ends before
+        // they run again leaves them as open as before, and the next runs
+        // every candidate of theirs again, alone where its server does not run
+        // them. A survivor is one every candidate let live with it switched on.
+        const unproven = new Set();
         for (const [id, entry] of Object.entries(work.entries)) {
             if (existsSync(`${pass.shared}/verdicts/${key(id)}`)) {
                 decided += 1;
@@ -410,14 +423,16 @@ export default class SupercovPlaywrightStrongReporter {
             // app (a server that would not start with it).
             // (Where one invocation of several failed so, it runs alone with
             // the whole command started with it, which says whether it was the
-            // mutant's doing.)
-            if (kind === "alone" && !work.batch && globalError && !ended.length) {
+            // mutant's doing.) An error after the round began to stop is the
+            // stop's: its servers went down under it.
+            if (kind === "alone" && !work.batch && globalError && globalError.at < stoppedAt && !ended.length) {
                 verdict({ status: "killed", reason: `the command failed with it switched on (${globalError.message})${suffix}` });
                 continue;
             }
             // Its invocation's server never ran it: alone, the whole command
             // started with it.
             if (work.batch && !ranInServer.has(`${invocation}\0${entry.mutant}`)) {
+                unproven.add(id);
                 aloneEach.push(entry);
                 continue;
             }
@@ -428,11 +443,17 @@ export default class SupercovPlaywrightStrongReporter {
                 verdict({ status: "error", reason: "its candidate tests fail without any mutant" });
                 continue;
             }
+            // What passed of a mutant no attempt has run yet passed without
+            // it: its next round runs every candidate again, so that what it
+            // sends alone, if no attempt runs it there either, is all of them.
+            const notYetRan = unreached(kind, entry, ranByRequest);
+            if (notYetRan)
+                unproven.add(id);
             if (left.length) {
-                next(entry, "unfinished", left);
+                next(entry, "unfinished", notYetRan ? runnable : left);
                 continue;
             }
-            if (unreached(kind, entry, ranByRequest)) {
+            if (notYetRan) {
                 notRan.push(id);
                 next(entry, "unreached", runnable);
                 continue;
@@ -457,10 +478,13 @@ export default class SupercovPlaywrightStrongReporter {
         // What each mutant left open passed: its candidates that ran with it
         // and passed (before any error outside a test), by the plan's ids. A
         // later pass, or a later round, resumes there. A round of mutants a
-        // server ran from its start lends nothing to a request's own switch.
+        // server ran from its start lends nothing to a request's own switch,
+        // and a mutant no attempt ran here (`unproven`) passed nothing with
+        // it: a later pass that took its candidates' passes as its progress
+        // would call it `survived` without running it once.
         if (kind !== "alone") {
             for (const id of Object.keys(work.entries)) {
-                if (existsSync(`${pass.shared}/verdicts/${key(id)}`))
+                if (unproven.has(id) || existsSync(`${pass.shared}/verdicts/${key(id)}`))
                     continue;
                 const passed = (byMutant.get(id) ?? [])
                     .filter((attempt) => attempt.outcome === "passed" && attempt.endedAt < trustedUntil)
@@ -520,6 +544,14 @@ export default class SupercovPlaywrightStrongReporter {
             durationMs: Date.now() - started,
             attempts: mutated.length,
             timedOut: mutated.filter((attempt) => attempt.outcome === "timed-out").length,
+            // Attempts ended where they stalled, and those that stalled where
+            // their pages could still end the wait, ran on, and timed out
+            // all the same.
+            stalls: {
+                stopped: mutated.filter((attempt) => attempt.stalledAtMs !== undefined).length,
+                ranOn: mutated.filter((attempt) => attempt.doubtedAtMs !== undefined).length,
+                ranOnTimedOut: mutated.filter((attempt) => attempt.doubtedAtMs !== undefined && attempt.outcome === "timed-out").length,
+            },
             timeoutFactor: work.timeoutFactor,
             baselines: attempts.filter((attempt) => attempt.kind === "baseline").length,
             decided,
