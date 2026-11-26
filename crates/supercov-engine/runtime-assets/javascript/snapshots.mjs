@@ -151,48 +151,6 @@ export function eventsOfColumns(snapshot) {
     return { ...rest, events };
 }
 /**
- * A document's evidence put back together from the batches it handed over
- * while the test ran and the tail read at its end (runtime.mjs, evidenceTail):
- * the snapshot coverageSnapshotColumns would have given, or undefined where
- * the batches kept do not run up to the tail, which is then read whole.
- * Each row is an event as the runtime built it (hitEvent, decisionEvent).
- */
-export function snapshotFromBatches(batches, tail) {
-    if (!batches || batches.broken || batches.generation !== tail.generation ||
-        batches.eventRows.length !== tail.events || batches.hitIds.length !== tail.hits)
-        return undefined;
-    const events = [...batches.eventRows, ...tail.eventRows].map(([type, id, vector, timestampMs, phaseId, environment]) => {
-        const event = type === "hit" ? { type, id } : { type, id, vector };
-        event.timestampMs = timestampMs;
-        if (phaseId)
-            event.phaseId = phaseId;
-        event.environment = environment;
-        return event;
-    });
-    const snapshot = { decisions: tail.decisions, hits: [...batches.hitIds, ...tail.hitIds], events, logicals: tail.logicals };
-    if (tail.comparisons)
-        snapshot.comparisons = tail.comparisons;
-    return columnarEvents(snapshot);
-}
-/**
- * One more batch of a document's evidence, kept where it follows the ones
- * before it; a batch that does not marks the document's batches unusable.
- */
-export function keepBatch(kept, batch) {
-    const current = kept.get(batch.document);
-    if (batch.events === 0 && batch.hits === 0 && (!current || current.generation !== batch.generation)) {
-        kept.set(batch.document, { generation: batch.generation, eventRows: [...batch.eventRows], hitIds: [...batch.hitIds] });
-        return;
-    }
-    if (!current || current.broken || current.generation !== batch.generation ||
-        current.eventRows.length !== batch.events || current.hitIds.length !== batch.hits) {
-        kept.set(batch.document, { generation: batch.generation, broken: true, eventRows: [], hitIds: [] });
-        return;
-    }
-    current.eventRows.push(...batch.eventRows);
-    current.hitIds.push(...batch.hitIds);
-}
-/**
  * A snapshot's events as columns: each event's type, phase and environment
  * as an index into a table of the distinct ones, its time as the difference
  * from the event before it, and its id, where it is one of the snapshot's

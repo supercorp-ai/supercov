@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepBatch, snapshotFromBatches } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
@@ -288,9 +288,6 @@ class CoveragePhaseController {
     // Evidence documents gave as they left (`__supercovLeaving`), merged with
     // the rest when there is any.
     leftSnapshots = [];
-    // The batches of evidence each document handed over while the test ran
-    // (runtime.mjs, pushEvidence), by document.
-    evidenceBatches = new Map();
     snapshottedPages = new WeakSet();
     snapshottedWorkers = new WeakSet();
     // Workers that did not answer an evaluation in time. They are not waited
@@ -445,7 +442,7 @@ class CoveragePhaseController {
     async snapshotPage(page) {
         const snapshots = [];
         for (const frame of page.frames()) {
-            snapshots.push(await readSnapshot(frame, this)
+            snapshots.push(await readSnapshot(frame)
                 .then((snapshot) => snapshot ?? { decisions: [], hits: [], events: [] })
                 .catch(() => ({
                 decisions: [],
@@ -1326,11 +1323,7 @@ function takeLeavingEvidence(source, payload) {
         return;
     try {
         timingCount("transfer.leavingBytes", typeof payload === "string" ? payload.length : 0);
-        const evidence = JSON.parse(payload);
-        if (evidence?.supercovBatch === 1)
-            keepBatch(controller.evidenceBatches, evidence);
-        else
-            controller.leftSnapshots.push(expandSnapshot(evidence));
+        controller.leftSnapshots.push(expandSnapshot(JSON.parse(payload)));
     }
     catch {
         // Not evidence.
@@ -1367,7 +1360,7 @@ function prepareContext(context) {
     }
     return prepared;
 }
-function readSnapshot(target, controller) {
+function readSnapshot(target) {
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
@@ -1387,16 +1380,7 @@ function readSnapshot(target, controller) {
             return undefined;
         // Phase timing counts the bytes each read carried, as its "ms".
         timingCount("transfer.snapshotBytes", text.length);
-        const read = JSON.parse(text);
-        if (read?.supercovTail !== 1)
-            return expandSnapshot(read);
-        // What came after the batches the page handed over; put together
-        // with them, or else read whole.
-        const whole = snapshotFromBatches(controller?.evidenceBatches.get(read.document), read);
-        if (whole)
-            return whole;
-        timingCount("transfer.wholeAgain");
-        return target.evaluate(() => globalThis.__SUPERCOV_WHOLE_COLUMNS__?.()).then((again) => (typeof again === "string" ? JSON.parse(again) : undefined));
+        return expandSnapshot(JSON.parse(text));
     });
 }
 let activeController;
