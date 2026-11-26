@@ -2,7 +2,7 @@
 # The fast tier's checks on this machine, before a push: what CI's `Fast
 # tier` status will say, in minutes instead of a round trip.
 #
-#   scripts/pre-push.sh [--base <ref>] [--coverage] [--no-tests]
+#   scripts/pre-push.sh [--base <ref>] [--coverage] [--no-tests] [--plan]
 #   npm run pre-push -- [--coverage]
 #
 #   1. `npm run check:lint`: the fault-site check, `cargo fmt --check` and
@@ -20,18 +20,21 @@
 #      the instrumented workspace, so it takes longer; macOS measures a
 #      handful of platform lines Linux does not, and the reverse.
 #
-# It checks what is committed: the map is asked about HEAD against the merge
+# --plan prints CI's plan for the change (which jobs run, which tests) and
+# stops before linting or testing. It checks what is committed: the map is asked about HEAD against the merge
 # base with <base> (origin/main), as CI asks about the pull request.
 set -euo pipefail
 
 base=origin/main
 coverage=false
 tests=true
+plan_only=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) base=$2; shift 2 ;;
     --coverage) coverage=true; shift ;;
     --no-tests) tests=false; shift ;;
+    --plan) plan_only=true; shift ;;
     -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "pre-push: unknown option $1" >&2; exit 2 ;;
   esac
@@ -52,8 +55,10 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "pre-push: uncommitted changes are not checked: commit them first to check what you push"
 fi
 
-step "lint: fault sites, cargo fmt, clippy"
-npm run --silent check:lint
+if [ "$plan_only" = false ]; then
+  step "lint: fault sites, cargo fmt, clippy"
+  npm run --silent check:lint
+fi
 
 [ "$tests" = true ] || { step "done"; exit 0; }
 
@@ -146,6 +151,10 @@ plan_from_map() {
 rm -f "$work/plan-ci.md"
 if plan_from_map; then
   grep -E '^\| (check|engine-integrations|rust-|launch-|bun-|kotlin-|lint|clang-)' "$work/plan-ci.md" | sed 's/^/  /' || true
+  if [ "$plan_only" = true ]; then
+    echo "pre-push: selections in $work/selection-ci.json and $work/selection-self-coverage.json"
+    exit 0
+  fi
   check=$(node -e 'const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).check; console.log(j.run ? j.mode : "skip")' "$work/jobs-ci.json")
   step "affected tests (cargo nextest, as CI's check job: $check)"
   if [ "$check" = skip ]; then
@@ -160,6 +169,7 @@ if plan_from_map; then
   echo "pre-push: CI also runs the jobs the table above says run (engine integrations, wasm, workers); this runs the workspace's tests alone"
 else
   step "affected tests: the quick check's selection, as no map could answer"
+  [ "$plan_only" = true ] && exec node scripts/quick-check.mjs --base "$base"
   node scripts/quick-check.mjs --base "$base" --run
 fi
 
