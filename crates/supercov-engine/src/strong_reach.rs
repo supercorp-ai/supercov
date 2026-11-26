@@ -862,6 +862,56 @@ mod tests {
         assert!(reaches("gone"));
     }
 
+    const GENERIC: &str = "pub mod inner {\n    pub struct W<T>(pub T);\n    impl<T: Copy> std::ops::Add for W<T>\n    where\n        T: std::ops::Add<Output = T>,\n    {\n        type Output = W<T>;\n        fn add(self, o: W<T>) -> W<T> {\n            W(self.0 + o.0)\n        }\n    }\n    pub struct P(pub *const u8);\n    unsafe impl Send for P {}\n    impl P {\n        pub fn get(&self) -> u8 {\n            1\n        }\n    }\n}\n\npub fn sum(a: u8, b: u8) -> u8 {\n    #![allow(unused)]\n    let tag = \"#x\";\n    (inner::W(a) + inner::W(b)).0\n}\n\n#[cfg_attr(test, inline)]\npub fn later() -> u8 {\n    2\n}\n";
+
+    /// An operator implemented for a generic type in a module is reached by
+    /// the type's name (`W`), whatever its header holds (generics, `where`);
+    /// a method no code names is not; an item under an attribute the
+    /// compiler does not own is reached with what holds it.
+    #[test]
+    fn a_rust_operator_of_a_generic_type_is_reached_by_its_type() {
+        let tests = "use shop::*;\n\n#[test]\nfn sums() {\n    assert_eq!(sum(1, 2), 3);\n}\n";
+        let checkout = Checkout::new(
+            "rust-generic",
+            &[("src/lib.rs", GENERIC), ("tests/t.rs", tests)],
+        );
+        let files = ["src/lib.rs", "tests/t.rs"];
+        let recorded = checkout.recorded(&files);
+        let reaches = || {
+            Program::new(checkout.root.clone(), recorded.clone()).reaches_change_from(
+                "tests/t.rs",
+                Some("sums"),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        };
+        assert!(!reaches());
+        checkout.write(
+            "src/lib.rs",
+            &GENERIC.replace("self.0 + o.0", "o.0 + self.0"),
+        );
+        assert!(reaches());
+        checkout.write(
+            "src/lib.rs",
+            &GENERIC.replace("            1\n", "            2\n"),
+        );
+        assert!(!reaches());
+        checkout.write("src/lib.rs", &GENERIC.replace("    2\n}\n", "    3\n}\n"));
+        assert!(reaches());
+        assert_eq!(
+            header("inner::unsafe impl Send for P"),
+            "unsafe impl Send for P"
+        );
+        assert_eq!(
+            implementation_keys("unsafe impl Send for P"),
+            BTreeSet::from(["P".to_owned(), "Send".to_owned()])
+        );
+        assert!(implementation_keys("struct S").is_empty());
+        assert_eq!(
+            rust_attributes("#![allow(x)] # [inline] #x"),
+            ["allow", "inline"]
+        );
+    }
+
     /// What a name cannot follow gives up the bound: a whole module read
     /// as a value, a default export, an object's method at the top level.
     #[test]
