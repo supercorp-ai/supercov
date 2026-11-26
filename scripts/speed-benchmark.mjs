@@ -342,15 +342,21 @@ function keepTraces(label) {
 // a user's own processes (`kernel.perf_event_paranoid` 2 or less).
 // SPEED_PERF names the perf binary when the one on PATH is a wrapper that
 // refuses a kernel it was not built for (speed.yml finds one).
+// A virtual machine that hides the processor's counters cannot count
+// instructions: there perf counts CPU time (task-clock, milliseconds), noisier
+// than instructions and still steadier than wall time. Each sample says which.
 const perfStat = (() => {
   if (process.platform !== 'linux') return undefined;
   const perf = process.env.SPEED_PERF || 'perf';
-  const probe = spawnSync(perf, ['stat', '-e', 'instructions:u', '-x', ',', '--', 'true'], { encoding: 'utf8' });
-  return probe.status === 0 && /instructions/.test(probe.stderr) ? perf : undefined;
+  for (const event of ['instructions:u', 'task-clock']) {
+    const probe = spawnSync(perf, ['stat', '-e', event, '-x', ',', '--', 'true'], { encoding: 'utf8' });
+    if (probe.status === 0 && probe.stderr.includes(event.split(':')[0]) && !/not supported|not counted/.test(probe.stderr)) return { perf, event };
+  }
+  return undefined;
 })();
-function retiredInstructions(file) {
+function retiredInstructions(file, event) {
   if (!existsSync(file)) return undefined;
-  const line = readFileSync(file, 'utf8').split('\n').find((text) => text.includes('instructions'));
+  const line = readFileSync(file, 'utf8').split('\n').find((text) => text.includes(event.split(':')[0]));
   const count = Number(line?.split(',')[0]);
   return Number.isFinite(count) ? count : undefined;
 }
@@ -372,7 +378,7 @@ function suiteRun(round, variant, suite, binary) {
   // several percent from one round to the next.
   const counts = join(output, `instructions-${round}-${variant}-${suite.name}.csv`);
   const [command, ...args] = perfStat
-    ? [perfStat, 'stat', '-e', 'instructions:u', '-x', ',', '-o', counts, '--', plainCommand, ...plainArgs]
+    ? [perfStat.perf, 'stat', '-e', perfStat.event, '-x', ',', '-o', counts, '--', plainCommand, ...plainArgs]
     : [plainCommand, ...plainArgs];
   // CPU by kind of process (scripts/speed/cpu-sampler.py), on Linux.
   const cpuFile = join(output, `cpu-${round}-${variant}-${suite.name}.json`);
@@ -389,8 +395,8 @@ function suiteRun(round, variant, suite, binary) {
   );
   sampler?.kill();
   const extra = existsSync(report) ? flowTimes(report) : {};
-  const instructions = perfStat ? retiredInstructions(counts) : undefined;
-  if (instructions !== undefined) extra.instructions = instructions;
+  const count = perfStat ? retiredInstructions(counts, perfStat.event) : undefined;
+  if (count !== undefined) extra[perfStat.event === 'task-clock' ? 'cpuMs' : 'instructions'] = count;
   sample(round, variant, suite.name, seconds, extra);
   keepTraces(`${round}-${variant}-${suite.name}`);
   if (!binary || suite.build) return;
@@ -808,17 +814,18 @@ for (const variant of ['plain', ...binaries.map(({ name }) => name)]) {
 // Instructions retired, where perf could count them: each variant's median
 // and its spread over the rounds, against plain's median.
 for (const suite of suites) {
-  const counts = (variant) => samples.filter((entry) => entry.variant === variant && entry.suite === suite.name && entry.instructions !== undefined).map((entry) => entry.instructions);
+  const field = perfStat?.event === 'task-clock' ? 'cpuMs' : 'instructions';
+  const counts = (variant) => samples.filter((entry) => entry.variant === variant && entry.suite === suite.name && entry[field] !== undefined).map((entry) => entry[field]);
   const plain = counts('plain');
   if (plain.length === 0) continue;
   for (const variant of ['plain', ...binaries.map(({ name }) => name)]) {
     const values = counts(variant);
     if (values.length === 0) continue;
     const ratio = (value) => (value / median(plain)).toFixed(4);
-    instructionRows.push(`| ${suite.name} | ${variant} | ${(median(values) / 1e9).toFixed(2)} | ${ratio(median(values))} | ${ratio(Math.min(...values))}–${ratio(Math.max(...values))} |`);
+    instructionRows.push(`| ${suite.name} | ${variant} | ${field === 'cpuMs' ? `${(median(values) / 1000).toFixed(1)} CPU s` : `${(median(values) / 1e9).toFixed(2)} billion`} | ${ratio(median(values))} | ${ratio(Math.min(...values))}–${ratio(Math.max(...values))} |`);
   }
 }
-const instructionTable = instructionRows.length === 0 ? '' : ['', '| Instructions | Variant | Billions, median | × plain | Range over rounds |', '|---|---|---|---|---|', ...instructionRows].join('\n');
+const instructionTable = instructionRows.length === 0 ? '' : ['', `| ${perfStat?.event === 'task-clock' ? 'CPU time (no counters here)' : 'Instructions'} | Variant | Median | × plain | Range over rounds |`, '|---|---|---|---|---|', ...instructionRows].join('\n');
 // CPU seconds by kind of process, for the first round's runs.
 const cpu = Object.fromEntries(
   readdirSync(output)
