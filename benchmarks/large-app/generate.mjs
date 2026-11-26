@@ -223,7 +223,11 @@ export default defineConfig({
   fullyParallel: true,
   retries: 0,
   reporter: [['list'], ['json']],
-  use: { baseURL: \`http://127.0.0.1:\${port}\` },
+  use: {
+    baseURL: \`http://127.0.0.1:\${port}\`,
+    // The speed benchmark's renderer profile attaches to this port.
+    ...(process.env.SPEED_DEVTOOLS_PORT ? { launchOptions: { args: [\`--remote-debugging-port=\${process.env.SPEED_DEVTOOLS_PORT}\`] } } : {}),
+  },
   webServer: {
     command: \`npx next build && npx next start -p \${port}\`,
     url: \`http://127.0.0.1:\${port}/\`,

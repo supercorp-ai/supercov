@@ -42,7 +42,7 @@ function place(callFrame) {
 function aggregate(trace) {
   const events = Array.isArray(trace) ? trace : trace.traceEvents ?? [];
   for (const event of events) {
-    if (event.ph === 'X' && typeof event.dur === 'number' && /(^|,)v8(,|$)/.test(event.cat ?? '')) {
+    if (event.ph === 'X' && typeof event.dur === 'number' && /(^|,)(v8|devtools\.timeline)(,|$)/.test(event.cat ?? '')) {
       const entry = v8Events.get(event.name) ?? { us: 0, count: 0 };
       entry.us += event.dur;
       entry.count += 1;
@@ -112,7 +112,9 @@ async function record(url) {
   while (!closed) {
     await send('Tracing.start', {
       transferMode: 'ReturnAsStream',
-      traceConfig: { includedCategories: ['disabled-by-default-v8.cpu_profiler', 'v8'] },
+      // The renderer's own tasks as well (devtools.timeline: scripts run,
+      // parsing, style, layout, paint), beside the samples of its JavaScript.
+      traceConfig: { includedCategories: ['disabled-by-default-v8.cpu_profiler', 'v8', 'devtools.timeline'] },
     });
     await Promise.race([sleep(15_000), ended]);
     if (closed) return;

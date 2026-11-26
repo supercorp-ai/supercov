@@ -241,6 +241,7 @@ export default {
     run(project, 'npx', ['playwright', 'install', 'chromium'], 'browser');
     return {
       project,
+      browserProfile: true,
       description: process.env.SPEED_SHARD ? `part ${process.env.SPEED_SHARD} of the generated suite` : 'the generated suite once',
       suites: [
         {
@@ -502,7 +503,8 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     "for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => process.exit(0));\n",
   );
   const profiled = {};
-  for (const [variant, binary] of [['plain'], [name, path]]) {
+  // Every binary, so one binary's change shows against the other's.
+  for (const [variant, binary] of [['plain'], ...binaries.map((entry) => [entry.name, entry.path])]) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
     for (const suite of suites) {
       reset(`profile-${variant}-${suite.name}`);
