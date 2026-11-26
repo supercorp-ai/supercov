@@ -402,9 +402,7 @@ impl Program {
                 for index in 0..nodes.len() {
                     let node = &nodes[index];
                     if !reached[index] {
-                        let Some(parent) = node.parent else {
-                            continue;
-                        };
+                        let parent = node.parent.unwrap_or_default();
                         let reachable = !node.inert
                             && reached[parent]
                             && (parent != 0
@@ -518,6 +516,15 @@ mod tests {
             "src/data.json",
         ]);
         assert!(!checkout.reaches(&recorded, "test/cart.test.js", &files));
+        // A test file is read once: asked again, it answers as it did.
+        let program = Program::new(checkout.root.clone(), recorded.clone());
+        let loaded = files.iter().map(|file| (*file).to_owned()).collect();
+        assert!(!program.reaches_change("test/cart.test.js", &loaded));
+        checkout.write(
+            "src/audit.js",
+            &AUDIT.replacen("return sum;", "return -sum;", 1),
+        );
+        assert!(!program.reaches_change("test/cart.test.js", &loaded));
         // `audit` changed: `refund` names it.
         checkout.write(
             "src/audit.js",
@@ -577,6 +584,11 @@ mod tests {
             (
                 "import report from \"../src/audit.js\";\nit(\"a\", () => report(1));\n",
                 "export default function quiet(sum) {\n  return 0;\n}\n",
+                true,
+            ),
+            (
+                "export * as all from \"../src/audit.js\";\nit(\"a\", () => 1);\n",
+                report_changed.as_str(),
                 true,
             ),
             (

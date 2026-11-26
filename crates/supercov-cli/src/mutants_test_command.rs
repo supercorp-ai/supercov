@@ -1547,20 +1547,16 @@ fn plan_text(data: &Value) -> String {
                 }
             };
             let from = match runs.as_slice() {
-                [] => String::new(),
                 [one] => format!(" from {}", at(one)),
-                several => {
-                    let each = several
+                several => format!(
+                    " from {} runs, {}",
+                    several.len(),
+                    several
                         .iter()
                         .map(|kept| format!("{} from {}", kept["mutants"], at(kept)))
-                        .collect::<Vec<_>>();
-                    let (last, rest) = each.split_last().expect("several runs");
-                    format!(
-                        " from {} runs, {} and {last}",
-                        several.len(),
-                        rest.join(", ")
-                    )
-                }
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             };
             let took = match data["carried"]["testRuns"].as_u64() {
                 Some(runs) if runs > 0 => format!(", which took {runs} test run(s) to reach"),
@@ -2501,16 +2497,16 @@ fn anchors_of(
     run: &StoredRun,
     plan: &StrongPlan,
 ) -> std::collections::BTreeMap<String, String> {
-    let Ok(stored) = supercov_engine::source_manifest::load_manifest(run) else {
-        return std::collections::BTreeMap::new();
-    };
+    let recorded = supercov_engine::source_manifest::load_manifest(run)
+        .map(|stored| stored.manifest.files)
+        .unwrap_or_default();
     supercov_engine::strong_anchors::of_files(
         root,
         plan.mutants
             .iter()
             .map(|mutant| (mutant.id.as_str(), mutant.file.as_str())),
         |file, source| {
-            stored.manifest.files.get(file).is_some_and(|recorded| {
+            recorded.get(file).is_some_and(|recorded| {
                 recorded.same_bytes(&supercov_engine::source_manifest::FileFingerprint::of(
                     source,
                 ))
@@ -3191,9 +3187,8 @@ fn earlier_candidates(
     earlier: &StoredRun,
     root: &Path,
 ) -> Option<std::collections::BTreeMap<String, BTreeSet<TestName>>> {
-    if !supercov_engine::strong_plan::run_recorded_mutant_values(&earlier.evidence_path) {
-        return None;
-    }
+    supercov_engine::strong_plan::run_recorded_mutant_values(&earlier.evidence_path)
+        .then_some(())?;
     let plan = plan_for_run(earlier, root).ok()?.plan?;
     Some(
         plan.mutants
@@ -3441,10 +3436,11 @@ impl Reach {
             .unwrap_or_default();
         let checkout = supercov_engine::run_currency::Checkout::new(root, &self.test_files);
         for mutant in undecided {
-            for candidate in &mutant.candidates {
-                let Some(file) = &tests[candidate.test].file else {
-                    continue;
-                };
+            let files = mutant
+                .candidates
+                .iter()
+                .filter_map(|candidate| tests[candidate.test].file.as_ref());
+            for file in files {
                 if !self.loads.contains_key(file) {
                     let loads = checkout.loads(
                         &BTreeSet::from([file.clone()]),
@@ -4030,7 +4026,7 @@ mod tests {
         }));
         assert!(
             shards.contains(
-                "  193 verdict(s) kept from 2 runs, 190 from run r2 (commit 1a2b3c4) and 3 from run r1 (commit 5e6f7a8): nothing they depend on changed\n"
+                "  193 verdict(s) kept from 2 runs, 190 from run r2 (commit 1a2b3c4), 3 from run r1 (commit 5e6f7a8): nothing they depend on changed\n"
             ),
             "{shards}"
         );
@@ -4094,7 +4090,7 @@ mod tests {
                 {"run": "r2", "mutants": 5}, {"run": "r1", "mutants": 4}]}}));
         assert!(
             both.contains(
-                "  9 verdict(s) kept from 2 runs, 5 from run r2 and 4 from run r1: the checkout is unchanged since them\n"
+                "  9 verdict(s) kept from 2 runs, 5 from run r2, 4 from run r1: the checkout is unchanged since them\n"
             ),
             "{both}"
         );
@@ -4777,7 +4773,7 @@ mod tests {
             "mutationScore": 1.0});
         let text = plan_text(&json!({"run": "r3", "summary": summary, "carried": data}));
         assert!(
-            text.contains("  3 verdict(s) kept from 2 runs, 2 from run r2 (commit 0123456) and 1 from run r1, which took 10 test run(s) to reach: nothing they depend on changed\n")
+            text.contains("  3 verdict(s) kept from 2 runs, 2 from run r2 (commit 0123456), 1 from run r1, which took 10 test run(s) to reach: nothing they depend on changed\n")
                 && text.contains("  1 earlier verdict(s) not kept, so run again: 1 timed out, which runs again after an edit: a time limit is the new run's\n"),
             "{text}"
         );

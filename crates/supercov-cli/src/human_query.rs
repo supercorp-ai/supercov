@@ -3238,6 +3238,55 @@ mod tests {
         );
     }
 
+    /// A strong verdict kept from an earlier run says where it was reached:
+    /// the run, and its commit where git said.
+    #[test]
+    fn a_kept_verdict_says_where_it_was_reached() {
+        use serde_json::{Value, json};
+        use supercov_engine::coverage_index::MutantStatus;
+        use supercov_engine::mutants_query::{MutantEntry, MutantSpan, WeakResult};
+        let mutant = |strong: Option<Value>| MutantEntry {
+            log_only: false,
+            line_tests: None,
+            id: "src/a.ts:1:3-1:9:LogicalOperator:&&".into(),
+            file: "src/a.ts".into(),
+            span: MutantSpan {
+                start: [1, 3],
+                end: [1, 9],
+            },
+            mutator: "LogicalOperator".into(),
+            original: "a || b".into(),
+            replacement: "a && b".into(),
+            changed: None,
+            status: MutantStatus::Infected,
+            weak: WeakResult {
+                reach: "reached",
+                infection: Some("infected"),
+                code: "c".into(),
+                reason: "r".into(),
+                proxy: false,
+                rule: None,
+                untestable: None,
+                untestable_reason: None,
+            },
+            strong,
+            stryker: None,
+        };
+        let suffix = |strong: Value| carried_suffix(&mutant(Some(strong)));
+        assert_eq!(
+            suffix(
+                json!({"status": "killed", "carriedFrom": {"run": "r5", "commit": "1a2b3c4d5e"}})
+            ),
+            "  carried from run r5 (commit 1a2b3c4)"
+        );
+        assert_eq!(
+            suffix(json!({"status": "killed", "carriedFrom": {"run": "r5"}})),
+            "  carried from run r5"
+        );
+        assert_eq!(suffix(json!({"status": "killed"})), "");
+        assert_eq!(carried_suffix(&mutant(None)), "");
+    }
+
     /// A pull request's comment: the survivors' table, cut at its cap with
     /// the command that lists the rest; pipes and backticks kept in cells.
     #[test]
