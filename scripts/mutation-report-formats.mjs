@@ -156,7 +156,7 @@ public class ReadMutations {
   }
 }
 `);
-    run("mvn", ["-q", "-B", "compile", "dependency:build-classpath", "-Dmdep.outputFile=cp.txt"], { cwd: reader, stdio: "inherit" });
+    run("mvn", ["-q", "-B", "compile", "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath", "-Dmdep.outputFile=cp.txt"], { cwd: reader, stdio: "inherit" });
     const classpath = `${resolve(reader, "target/classes")}:${readFileSync(resolve(reader, "cp.txt"), "utf8").trim()}`;
     const read = run("java", ["-cp", classpath, "org.pitest.aggregate.ReadMutations", resolve(project, "mutations.xml")]).trim();
     const written = (readFileSync(resolve(project, "mutations.xml"), "utf8").match(/<mutation /g) ?? []).length;
