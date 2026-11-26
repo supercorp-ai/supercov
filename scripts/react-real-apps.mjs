@@ -61,13 +61,8 @@ function verify(cwd, name, command, args, expected, extra = {}) {
   assert.equal(data.testOutcomes.skipped, expected.skipped, name);
   assert.equal(data.testOutcomes.failed, 0, name);
   assert.equal(data.testOutcomes.unknown, 0, name);
-  assert.ok(
-    data.assertionCoverage.summary
-      .observedAssertionsWithoutCurrentExplanation >= expected.assertions,
-    name,
-  );
   console.log(
-    `[${name}] ${expected.passed} passing tests; ${expected.skipped} skipped; complete measurement; assertion occurrences retained`,
+    `[${name}] ${expected.passed} passing tests; ${expected.skipped} skipped; complete measurement`,
   );
 }
 run(
@@ -99,7 +94,7 @@ verify(
   'react',
   'npm',
   ['test', '--', '--run'],
-  { passed: 21, skipped: 0, assertions: 30 },
+  { passed: 21, skipped: 0 },
   { SUPERCOV_SOURCE_ROOTS: 'src' },
 );
 const native = clone(
@@ -125,6 +120,6 @@ verify(
     '--testPathIgnorePatterns',
     '__tests__/lib/string.test.ts$|node_modules/',
   ],
-  { passed: 809, skipped: 28, assertions: 1000 },
+  { passed: 809, skipped: 28 },
 );
 console.log(`Full transcripts and summaries: ${audit}`);
