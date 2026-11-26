@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- `supercov mutants` on a new commit runs only the mutants whose verdict could have changed since an earlier strong pass of the same command, dependencies and configuration in `.supercov/runs` (a restored baseline among them): nothing to set up. A verdict is now found by its mutant's code rather than its line, so a line added above a function keeps its mutants' verdicts (each verdict's anchor is saved with it, `anchors` in `strong-mutation.json`), and a change to another function of the same file no longer runs the file's mutants again. A kill is kept where the test that killed it is still a candidate and runs as it did; a survival where every candidate now ran with it then and runs as it did; a timeout runs again, its time limit being the new run's. The pass's summary names each run it kept verdicts from with its commit and what reaching them took (`26 verdict(s) kept from run r5 (commit 1a2b3c4), which took 25 test run(s) to reach`), says why the rest run again, and `runs <id> mutants` says where each kept verdict was reached (`carried from run r5 (commit 1a2b3c4)`; `--json`: `carried.runs`, `carried.testRuns`, `strong.carriedFrom`). On a fixture's eight commits touching code, tests, a helper and configuration, carrying forward ran 72 mutants where passes from nothing ran 201, every verdict the same; on two pairs of consecutive commits of unjs/ufo, it kept 684 and 560 verdicts and ran 226 and 353 mutants where passes from nothing ran 878 and 886, all 979 and 987 verdicts the same.
+
+**Fixed**
+
+- A verdict kept after an edit could be wrong where the edit changed a function the mutant's tests never ran without it. A mutant that changes a branch can send a test into code it never ran, so a test's record without the mutant does not bound what it runs with it: in the fixture, `refund(20)` never calls `audit`, a mutant of `refund`'s condition sends it there, and once `audit` changed two such survivors were killed, but 4.29.15 kept them. A test now runs as it did only where nothing changed that it could run with the mutant switched on: for a JavaScript or TypeScript test, nothing its imports load and its code can name (`strong_reach.rs`); for a Python or Ruby test, no code its imports load; for any other, no code but tests'. `docs/design/strong-mutation.md` ("After an edit") has the argument.
+
 ## 4.29.15
 
 **Fixed**

@@ -1732,6 +1732,7 @@ fn kept_verdicts(
             document.lived,
             tests,
             other_bytes,
+            (document.anchors, document.carried),
         ));
     });
     if lending.is_empty() {
@@ -1741,7 +1742,7 @@ fn kept_verdicts(
     let lent = lending
         .iter()
         .map(
-            |(_, verdicts, progress, lived, tests, other_bytes)| crate::strong_verdicts::Lent {
+            |(_, verdicts, progress, lived, tests, other_bytes, _)| crate::strong_verdicts::Lent {
                 verdicts,
                 progress,
                 lived,
@@ -1755,6 +1756,18 @@ fn kept_verdicts(
     // the merged run, or a later round carrying it over, resumes there.
     let progress = crate::strong_verdicts::merged_progress(&plan, &lent, &mutants);
     let lived = crate::strong_verdicts::merged_lived(&lent, &progress);
+    let marks = lending
+        .iter()
+        .map(
+            |(_, verdicts, .., other_bytes, (anchors, carried))| crate::strong_verdicts::Marks {
+                verdicts,
+                other_bytes,
+                anchors,
+                carried,
+            },
+        )
+        .collect::<Vec<_>>();
+    let (anchors, carried) = crate::strong_verdicts::merged_marks(&plan, &mutants, &marks);
     let document = StrongVerdicts {
         schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: merged_run_id.to_owned(),
@@ -1762,6 +1775,8 @@ fn kept_verdicts(
         mutant_set: plan.mutant_set,
         progress,
         lived,
+        anchors,
+        carried,
     };
     let from = lending
         .iter()

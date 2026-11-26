@@ -22249,11 +22249,12 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         "test/tax.test.js",
         "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
     );
-    // Kills each mutant it is given, noting their ids; with FAKE_HALF, half
+    // Kills each mutant it is given by its first candidate, noting their
+    // ids; with FAKE_HALF, half
     // of them and then ends as Ctrl-C ends a pass.
     project.write(
         "fake-strong.mjs",
-        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nconst kill = process.env.FAKE_HALF ? mutants.slice(0, Math.ceil(mutants.length / 2)) : mutants;\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of kill) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: \"killed\", tests: 1 }) + \"\\n\");\nif (process.env.FAKE_HALF) process.exit(130);\n",
+        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nconst kill = process.env.FAKE_HALF ? mutants.slice(0, Math.ceil(mutants.length / 2)) : mutants;\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of kill) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: \"killed\", killedBy: plan.tests[mutant.candidates[0].test].id, tests: 1 }) + \"\\n\");\nif (process.env.FAKE_HALF) process.exit(130);\n",
     );
     project.commit("tax");
     project
@@ -22395,7 +22396,7 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
     project.edit("src/tax.js", "sum / 5.0", "sum / 5");
     let unrecorded = project.supercov(&["mutants"]).succeeds();
     assert!(
-        unrecorded.contains(&format!("verdict(s) kept from run {edited}: ")),
+        unrecorded.contains(&format!("verdict(s) kept from run {edited} (commit ")),
         "{unrecorded}"
     );
     assert!(!unrecorded.contains(&previous), "{unrecorded}");
@@ -22499,10 +22500,11 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
         "test/tax.test.js",
         "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
     );
-    // Gives each mutant it is given FAKE_STATUS, noting their ids.
+    // Gives each mutant it is given FAKE_STATUS (a kill by its first
+    // candidate), noting their ids.
     project.write(
         "fake-strong.mjs",
-        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of mutants) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: process.env.FAKE_STATUS, tests: 1 }) + \"\\n\");\n",
+        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of mutants) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: process.env.FAKE_STATUS, killedBy: plan.tests[mutant.candidates[0].test].id, tests: 1 }) + \"\\n\");\n",
     );
     project.commit("tax");
     // Each shard's job measures the whole suite on its own machine.
@@ -23141,6 +23143,228 @@ fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
     assert!(
         tax["carried"].is_null() && tax["summary"]["ran"].as_u64() > Some(0),
         "{tax}"
+    );
+}
+
+/// Verdicts carried forward across commits are those a fresh pass reaches.
+/// A project measured and passed whole on its first commit, then one commit
+/// after another, each touching code, tests, helpers or configuration in its
+/// own way: at each, `supercov mutants` keeps what no change could move and
+/// runs the rest, and a pass from nothing on the same commit gives every
+/// mutant the same verdict. The trap: `refund`'s mutants survive while
+/// `audit`, which no test runs, returns what it is given, and a mutant that
+/// sends `refund(20)` into `audit` is killed once `audit` changes, though no
+/// test's record names `audit`. The listing says where a kept verdict was
+/// reached.
+#[cfg(unix)]
+#[test]
+fn verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
+    let project = vitest_mutants_project("strong-carried-forward");
+    project.write(
+        "vitest.config.js",
+        "export default { test: { include: [\"test/**/*.test.js\"] } };\n",
+    );
+    project.write(
+        "src/audit.js",
+        "export function audit(sum) {\n  return sum;\n}\n",
+    );
+    project.write(
+        "src/cart.js",
+        "import { audit } from \"./audit.js\";\n\nexport function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function refund(sum) {\n  if (sum > 1000) {\n    return audit(sum);\n  }\n  return sum - 1;\n}\n\nexport function wrap(text) {\n  return \"[\" + text + \"]\";\n}\n",
+    );
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n\nexport function round(value) {\n  return Math.round(value * 100) / 100;\n}\n",
+    );
+    project.write(
+        "src/format.js",
+        "export function price(cents) {\n  const whole = Math.floor(cents / 100);\n  const rest = cents % 100;\n  return whole + \".\" + String(rest).padStart(2, \"0\");\n}\n",
+    );
+    project.write(
+        "test/helpers.js",
+        "export function cents(value) {\n  return value;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label, refund } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n  it(\"refunds\", () => expect(refund(20)).toBeGreaterThan(0));\n});\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax, round } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\nit(\"rounds\", () => expect(round(1.234)).toBe(1.23));\n",
+    );
+    project.write(
+        "test/format.test.js",
+        "import { expect, it } from \"vitest\";\nimport { price } from \"../src/format.js\";\nimport { cents } from \"./helpers.js\";\nit(\"prices\", () => expect(price(cents(1234))).toBe(\"12.34\"));\n",
+    );
+    project.commit("fixture");
+    let pass = || {
+        project
+            .supercov(&["mutants", "--json", "--", "npx", "vitest", "run"])
+            .json()
+    };
+    let statuses = |run: &str| {
+        let saved = serde_json::from_str::<serde_json::Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // A pass from nothing: the store set aside while it runs.
+    let store = project.root.join(".supercov");
+    let aside = project.root.join(".supercov-aside");
+    let fresh = || {
+        std::fs::rename(&store, &aside).unwrap();
+        let reply = pass();
+        let verdicts = statuses(reply["run"].as_str().unwrap());
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::rename(&aside, &store).unwrap();
+        (reply, verdicts)
+    };
+    let first = pass();
+    let all = first["summary"]["ran"].as_u64().unwrap();
+    assert!(all > 20, "{first}");
+    // Each commit: what the carrying pass kept and ran, against a fresh
+    // pass's verdicts.
+    let mut kept_in_all = 0;
+    let mut ran_in_all = 0;
+    let mut step = |message: &str, kept: Option<u64>, why: &[&str]| {
+        project.commit(message);
+        let carried = pass();
+        let (whole, verdicts) = fresh();
+        assert_eq!(
+            statuses(carried["run"].as_str().unwrap()),
+            verdicts,
+            "{message}: {carried}"
+        );
+        let ran = carried["summary"]["ran"].as_u64().unwrap();
+        assert!(
+            ran < whole["summary"]["ran"].as_u64().unwrap() || kept.is_none(),
+            "{message}: {carried}"
+        );
+        if let Some(kept) = kept {
+            assert_eq!(carried["carried"]["mutants"], kept, "{message}: {carried}");
+        } else {
+            assert!(carried["carried"].is_null(), "{message}: {carried}");
+        }
+        let reasons = carried["carried"]["notKept"]
+            .as_object()
+            .map(|reasons| reasons.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(reasons, why, "{message}: {carried}");
+        kept_in_all += kept.unwrap_or(0);
+        ran_in_all += ran;
+        carried
+    };
+    // Comments and blank lines move every mutant of two files: each verdict
+    // is found by its code.
+    project.write(
+        "src/cart.js",
+        &format!(
+            "// The cart's rules.\n// Shipping is free from 50.\n\n{}",
+            project.read("src/cart.js")
+        ),
+    );
+    project.edit(
+        "src/tax.js",
+        "export function round",
+        "// Two decimals.\nexport function round",
+    );
+    let moved = step("comments", Some(25), &[]);
+    assert_eq!(moved["summary"]["ran"], 0, "{moved}");
+    // A test file: its tests' mutants run again, and the one a new test
+    // could kill.
+    project.write(
+        "test/tax.test.js",
+        &format!(
+            "{}it(\"no tax under 10\", () => expect(tax(5)).toBe(0));\n",
+            project.read("test/tax.test.js")
+        ),
+    );
+    step("a test", Some(18), &["newTest", "testReached"]);
+    // A helper one test file loads.
+    project.edit(
+        "test/helpers.js",
+        "  return value;",
+        "  return Number(value);",
+    );
+    step("a helper", Some(21), &["testReached"]);
+    // One function of a source: its own mutants and its tests' run again.
+    project.edit(
+        "src/tax.js",
+        "  return Math.round(value * 100) / 100;",
+        "  const scaled = value * 100;\n  return Math.round(scaled) / 100;",
+    );
+    step("a function", Some(18), &["fileChanged", "testReached"]);
+    // A function no test runs, which `refund`'s mutants lead the refund test
+    // into: they run again, and two of them are killed now.
+    project.edit("src/audit.js", "  return sum;", "  return -sum;");
+    let trap = step("audit", Some(13), &["loadsChanged"]);
+    let now = statuses(trap["run"].as_str().unwrap());
+    for id in [
+        "src/cart.js:18:7-18:17:ConditionalExpression:true",
+        "src/cart.js:18:7-18:17:EqualityOperator:<=",
+    ] {
+        assert_eq!(now[id], "killed", "{id}: {trap}");
+    }
+    // A function of the same file no test runs or names: every verdict is
+    // kept.
+    project.edit(
+        "src/cart.js",
+        "\"[\" + text + \"]\"",
+        "\"(\" + text + \")\"",
+    );
+    let unnamed = step("wrap", Some(26), &[]);
+    assert_eq!(unnamed["summary"]["ran"], 0, "{unnamed}");
+    // A test added to a file: its file's tests may run otherwise, and it may
+    // kill what survived.
+    project.edit(
+        "test/cart.test.js",
+        "  it(\"refunds\"",
+        "  it(\"ships 50 free\", () => expect(shipping(50)).toBe(0));\n  it(\"refunds\"",
+    );
+    step("a test added", Some(13), &["newTest", "testReached"]);
+    // The configuration: nothing is kept.
+    project.edit("vitest.config.js", "] } };", "], testTimeout: 5000 } };");
+    step("configuration", None, &[]);
+    assert!(
+        kept_in_all > ran_in_all,
+        "kept {kept_in_all}, ran {ran_in_all}"
+    );
+
+    // The summary and the listing say where a kept verdict was reached.
+    project.edit(
+        "test/helpers.js",
+        "  return Number(value);",
+        "  return value;",
+    );
+    project.commit("helper back");
+    let back = project.supercov(&["mutants", "--", "npx", "vitest", "run"]);
+    let said = back.stdout();
+    assert!(
+        said.contains(" verdict(s) kept from run ")
+            && said.contains(", which took ")
+            && said.contains(" test run(s) to reach: nothing they depend on changed\n"),
+        "{said}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js"])
+        .succeeds();
+    let configured = project.git(&["rev-parse", "--short=7", "HEAD~1"]);
+    assert!(
+        listed.contains(&format!("(commit {})", configured.trim())),
+        "{listed}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js:7"])
+        .succeeds();
+    assert!(
+        line.contains("  strong: killed  carried from run "),
+        "{line}"
     );
 }
 

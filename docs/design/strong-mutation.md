@@ -1844,9 +1844,9 @@ passed survived. Three conditions keep the fact the same fact:
   termination) neither passed nor failed: it settles nothing.
 - **When it stops holding.** It is invalidated as a verdict is, candidate by
   candidate: carried to a later run (`supercov mutants` after an edit, a
-  later round's jobs) only where the mutant's file is byte for byte as it
-  was and the candidate is one the earlier run found unaffected, with no test
-  of its file reached; merged (`supercov merge`) as the union of every run's
+  later round's jobs) only where the mutant is found by its code and the
+  candidate runs as it did with the mutant switched on (After an edit,
+  below); merged (`supercov merge`) as the union of every run's
   candidates, a run lending only tests it measured, for a file it recorded
   with the merged run's bytes. A candidate that is no longer a candidate
   lends nothing.
@@ -2095,40 +2095,155 @@ which have no values to compare.
 
 ## After an edit: verdicts no change could move
 
-`supercov mutants` measures the checkout again once it changed, and that
-run has no verdicts. It keeps those of the earlier runs of the same command,
-dependencies and configuration (and mutant set), mutant by mutant, where
-nothing the verdict depends on changed; the rest run. The earlier runs are
-read newest first, and each gives the mutants still without a verdict the ones
-it can keep, each judged against that run's own `tests affected`: a pass split
-across machines leaves each share's verdicts in its own run, and they are kept
-together. Reading stops once every mutant has one. A run whose record of what
-each test ran is gone lends nothing, and the next older run is read. `tests affected`
+A team that passed every mutant of commit A should not pay for it again on
+commit B. `supercov mutants` measures the checkout again once it changed, and
+that run has no verdicts. It keeps those of the earlier runs of the same
+command, dependencies and configuration (and mutant set), mutant by mutant,
+where nothing the verdict depends on changed; the rest run. Nothing is asked
+for: the earlier runs are those in `.supercov/runs`, a baseline restored
+there among them. They are read newest first, and each gives the mutants
+still without a verdict the ones it can keep: a pass split across machines
+leaves each share's verdicts in its own run, and they are kept together.
+Reading stops once every mutant has one. A run whose record of what each
+test ran is gone lends nothing, and the next older run is read. A change to
+the configuration or the dependencies keeps nothing: they set what every
+test does.
+
+**Which mutant a verdict was.** A mutant's id holds its lines, so a line added
+above a function gives each of its mutants a new id though none changed. A
+pass saves each verdict's *anchor* beside it (`anchors` in
+`strong-mutation.json`, `strong_anchors.rs`): the text of the innermost
+declaration the mutant sits in (a function, a method, a class; the file for a
+module's top level), byte for byte with its comments, its name path, where
+in that text the mutant is, and what it does. A mutant now finds its earlier
+verdict by its anchor, wherever its declaration moved. Any change to the
+declaration's own lines, a comment or a space, is another anchor and runs it
+again: an anchor can lose a match, never make a wrong one. A run saved
+before anchors finds a verdict by the mutant's id, where its file is byte for
+byte as it was.
+
+**What a test runs with a mutant switched on.** `tests affected`
 (`source_manifest::affected_tests`) says, from each test's recorded
-execution, which tests a change since that run could have reached: a test
-file's edit reaches its tests, a source edit the tests that ran the changed
-code (a file no parser reads, any test that ran it), a helper the tests load
-the tests whose files load it, and a test that ran with others and recorded
-nothing of its own is undetermined wherever the change is inside what the run
-covered. A mutant keeps its verdict (killed, survived or timeout; an error
-runs again) where
+execution, which tests a change since a run could have reached. That record
+is of the test without a mutant. With one, the test may run code it never
+ran: the mutant changes a value, a branch goes the other way, and a function
+the test never called is called. In the fixture below, `refund(20)` never
+calls `audit`, and a mutant that makes `sum > 1000` true sends it there;
+`audit` returned what it was given, so the refund test passed and the mutant
+survived. Once `audit` returns `-sum`, that mutant is killed, though no
+test's record names `audit` and `tests affected` reaches no test. 4.29.15
+kept the survivor (two mutants of that condition, of the five it kept there).
 
-- its file is as it was, byte for byte (a comment appended counts as a
-  change: a mutant's id holds its lines);
-- every candidate test it has now is one the earlier run had, unaffected, and
-  so is every test of their test files (they share the file's state), and so
-  is every test of the files it runs whole.
+So a test *runs as it did* with a mutant switched on only where no code the
+mutant could lead it into changed, and the bound is what the test's process
+can run:
 
-A new test that could kill it is a candidate the earlier run did not have, so
-it runs. A test that failed in the earlier run is affected in `tests affected`
-(its record was cut short, and an agent should run it again), but for keeping
-a verdict its failing is what varies from run to run: it counts as reached
-only where the change reaches code the run covered (`beyondTheRun`), the
-bound a test with no record of its own gets. Measured on 4.29.6 against a
-large application's e2e suite, one job's measurement had four tests fail at
-random, and the next round dropped that run's verdicts for every mutant whose
-candidates shared a test file with them. `runs <id> mutants test` keeps
-nothing of another run: it tests the run it names.
+- **A test that runs the mutant's code in its own process from what its
+  imports load** -- a Jest, Vitest, Mocha or `node:test` test, a pytest or
+  RSpec one; not a Playwright test, not a mutant a server starts with, not a
+  test a process serving it answered, and only where every import of its
+  file, its runner's setup files and what they import in turn is followed
+  (`test_loads`) and reaches the mutant's file. A JavaScript or TypeScript module runs its top
+  level as it loads; a declaration nested in code that runs runs where that
+  code puts it; a top-level declaration runs only where some code that runs
+  names it, or where it is a value in an expression (an argument, a binding,
+  `export default`). So the declarations the test can run are found by names
+  (`strong_reach.rs`): from the test's file, whole, and every top level of
+  every file it loads, each declaration they name, and what that names in
+  turn, until nothing new is named. A name is any identifier, in strings too
+  (comments are not code), so a declaration named alike anywhere counts: the
+  bound only grows. The test runs as it did where no declaration found so
+  changed since the earlier run (a declaration's comments and layout aside;
+  a function added alone changes nothing written before) and the earlier run
+  recorded every file it loads. What names cannot follow gives the bound
+  up: a module object read other than by a property name (`import * as all`
+  read as `all[name]`, or passed on), a module exported whole
+  (`export * as`), a top-level code change, a changed file no parser reads,
+  a Python or Ruby file whose code changed (a decorator registers a function
+  no code names), a directory a test loads whole.
+- **Any other test**: the earlier run found it unaffected, and every test of
+  its file (they share the file's state), and no code changed but tests'.
+
+**The rules.** A mutant keeps its verdict where its anchor finds it, no file
+it runs whole was reached (a Vitest module-level mutant), and:
+
+- **killed**: the test that killed it is one of its candidates now (it still
+  reaches the mutated code in the new run's measurement), the earlier run had
+  it, and it runs as it did. A kill needs one test: that test fails again.
+  A kill whose run did not say which test made it runs again.
+- **survived**: every candidate it has now was a candidate then, so ran with
+  it and passed, and runs as it did. A new test, a changed one, or one the
+  earlier run did not run with it runs it again. Every other test cannot
+  kill it in the new run's own plan.
+- **timeout**: runs again. A timeout rests on its time limit, which is the
+  new run's (each test's baseline in the measurement, times the factor), and
+  on how loaded the machine is; a mutant that runs slowly rather than
+  forever ends near its limit, either side of it. Keeping one with a kill's
+  evidence would keep what a fresh pass may not reach. It costs a timeout's
+  limit again, and on the open-source library below, 11 of 979 mutants.
+- **error** and a mutant that did not compile run again.
+
+A test that failed in the earlier run is affected in `tests affected` (its
+record was cut short, and an agent should run it again), but for keeping a
+verdict its failing is what varies from run to run: where its process is not
+bounded by its imports, it counts as reached only where the change reaches
+code the run covered (`beyondTheRun`), the bound a test with no record of its
+own gets. A pass's progress (Partial progress, above) is kept by the same
+rules, candidate by candidate. `runs <id> mutants test` keeps nothing of
+another run: it tests the run it names.
+
+**Soundness.** A kept verdict is the one a fresh pass reaches wherever the
+tests are deterministic, as a pass assumes of every test it runs, and the
+bound holds: no test runs code its process cannot name or load. What a name
+cannot follow -- `eval`, a module read by a computed name through an object
+other than its own, code another process runs for a test (a worker thread
+started from a file path) -- is not seen; every case Supercov can see gives
+the bound up instead. Everything uncertain runs again: a timeout, a mutant
+whose code moved within its declaration, a kill no record names a test for,
+a test no import bounds where any code changed.
+
+**What the pass says.** How many verdicts it kept, from which runs, the
+commit each measured, and what reaching them took; and how many earlier
+verdicts it did not keep, by why:
+
+    26 verdict(s) kept from run r5 (commit 1a2b3c4), which took 25 test run(s) to reach: nothing they depend on changed
+    13 earlier verdict(s) not kept, so run again: 13 a test that could kill them loads code that changed, which they could lead it into
+
+`--json` gives `carried.runs` (each run, its commit and how many it gave),
+`carried.testRuns` and `carried.notKept`. The verdicts kept are saved into the
+new run with where each was reached (`carried` in `strong-mutation.json`, the
+first run of a chain of keeps), and `runs <id> mutants` says so beside each
+(`killed  carried from run r5 (commit 1a2b3c4)`; `strong.carriedFrom` with
+`--json`).
+
+**Measured.** A fixture repository (Vitest: four sources, three test files
+and a helper; `verdicts_carried_across_commits_are_those_a_fresh_pass_reaches`
+in `crates/supercov-cli/tests/cli.rs`) passed whole on its first commit, then
+one commit at a time, each carried forward from the one before and compared
+with a pass from nothing on the same commit: every verdict the same, each
+time. 4.29.15's rules, on the same commits, kept two wrong verdicts.
+
+| commit | kept | ran | 4.29.15 kept, ran | a pass from nothing ran |
+| --- | --- | --- | --- | --- |
+| comments and blank lines above two files' functions | 25 | 0 | 5, 19 | 24 |
+| a test file: an assertion added | 18 | 8 | 18, 8 | 25 |
+| a helper one test file loads | 21 | 5 | 21, 5 | 25 |
+| one function of a source | 18 | 8 | 18, 8 | 25 |
+| `audit`, which only a mutant reaches | 13 | 12 | 26, 0 (2 wrong) | 25 |
+| a function of the mutants' file no test runs | 26 | 0 | 13, 12 | 25 |
+| a test added to a file | 13 | 13 | 13, 13 | 26 |
+| the runner's configuration | 0 | 26 | 0, 26 | 26 |
+| all | 134 | 72 | 114, 91 | 201 |
+
+On ufo (unjs/ufo, Vitest, 979 mutants), two pairs of consecutive commits of
+its history, each passed whole on the first and carried forward to the
+second, against a pass from nothing on the second: `4d024df` to `7959de5` (a
+fix to `parseFilename` and its test) kept 684 verdicts and ran 226 mutants
+where a pass from nothing ran 878, the kept verdicts having taken 4,501 test
+runs; `7959de5` to `3c4b43d` (`filterQuery` added, with its tests) kept 560
+and ran 353 of 886 (4,880 test runs). All 979 and 987 verdicts are the same,
+status for status. The command took 16.7 s and 20.2 s against 29.2 s and
+37.9 s, measuring included.
 
 ### On the files as they are
 

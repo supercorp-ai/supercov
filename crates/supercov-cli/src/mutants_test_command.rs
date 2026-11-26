@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 use supercov_engine::{
     run_store::{StoredRun, discover_runs, select_run},
     strong_plan::{
-        PlannedMutant, Progress as Passed, StrongPlan, StrongVerdicts, Verdict, plan_for_run,
+        CarriedFrom, PlannedMutant, Progress as Passed, StrongPlan, StrongVerdicts, Verdict,
+        plan_for_run,
     },
 };
 
@@ -894,6 +895,13 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .map(|document| (document.progress, document.lived))
         .unwrap_or_default();
     *LIVED.lock().expect("no thread panics holding it") = marked;
+    // Each mutant's anchor, saved with its verdict for a later pass to find
+    // it by after an edit, and where each verdict kept from an earlier run
+    // was reached.
+    let anchors = anchors_of(&root, run, &narrowed);
+    let (mut kept_anchors, mut origins) = saved_document(run)
+        .map(|document| (document.anchors, document.carried))
+        .unwrap_or_default();
     let asked = plan
         .mutants
         .iter()
@@ -901,16 +909,19 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .collect::<Vec<_>>();
     // After an edit, the verdicts no change could have moved.
     let carried = if options.carry && !options.plan {
-        let carried = carry_over(&root, &inventory.runs, run, &plan, &saved);
+        let carried = carry_over(&root, &inventory.runs, run, &plan, &saved, &anchors);
         add_progress(&mut progress, carried.progress.clone());
         carried
     } else {
         Carried::default()
     };
     // Saved with the pass's own verdicts.
-    for (_, verdicts) in &carried.from {
-        saved.extend(verdicts.clone());
+    for kept in &carried.from {
+        saved.extend(kept.verdicts.clone());
     }
+    origins.extend(carried.origins.clone());
+    kept_anchors.extend(anchors);
+    *KEPT.lock().expect("no thread panics holding it") = (kept_anchors, origins);
     // What compiles to the original is equivalent, not run; mutants that
     // compile to the same code as one another run once for all of them, and
     // one whose twin has a verdict takes it now. Before sharding, so every
@@ -1054,12 +1065,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
             "stalled": stalled, "stalledSavedMs": saved_ms});
     }
     if !carried.from.is_empty() || !carried.not_kept.is_empty() {
-        data["carried"] = json!({
-            "from": carried.from.iter().map(|(from, _)| from).collect::<Vec<_>>(),
-            "mutants": carried.from.iter().map(|(_, verdicts)| verdicts.len()).sum::<usize>(),
-            "unchanged": carried.unchanged,
-            "notKept": carried.not_kept,
-        });
+        data["carried"] = carried_json(&carried);
     }
     // How the pass came by its run: made from another without measuring,
     // or measured, and what that spent of the budget.
@@ -1526,19 +1532,41 @@ fn plan_text(data: &Value) -> String {
             ));
         }
         if let Some(carried) = data["carried"]["mutants"].as_u64().filter(|n| *n > 0) {
-            let from = data["carried"]["from"]
+            let runs = data["carried"]["runs"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(Value::as_str)
                 .collect::<Vec<_>>();
+            // Each run with its commit, and how many it gave where several
+            // gave some.
+            let at = |kept: &Value| {
+                let run = kept["run"].as_str().unwrap_or_default();
+                match kept["commit"].as_str() {
+                    Some(commit) => format!("run {run} (commit {})", short_commit(commit)),
+                    None => format!("run {run}"),
+                }
+            };
+            let from = match runs.as_slice() {
+                [one] => format!(" from {}", at(one)),
+                several => format!(
+                    " from {} runs, {}",
+                    several.len(),
+                    several
+                        .iter()
+                        .map(|kept| format!("{} from {}", kept["mutants"], at(kept)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            let took = match data["carried"]["testRuns"].as_u64() {
+                Some(runs) if runs > 0 => format!(", which took {runs} test run(s) to reach"),
+                _ => String::new(),
+            };
             extra.push_str(&format!(
-                "  {carried} verdict(s) kept from run{} {}: {}\n",
-                if from.len() == 1 { "" } else { "s" },
-                from.join(", "),
+                "  {carried} verdict(s) kept{from}{took}: {}\n",
                 if data["carried"]["unchanged"] != true {
                     "nothing they depend on changed"
-                } else if from.len() == 1 {
+                } else if runs.len() == 1 {
                     "the checkout is unchanged since it"
                 } else {
                     "the checkout is unchanged since them"
@@ -1766,12 +1794,15 @@ pub(crate) fn read_shown(run: &StoredRun) -> std::collections::BTreeMap<String, 
         &document.progress,
         &document.lived,
     );
-    shown.extend(
-        document
-            .mutants
-            .into_iter()
-            .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data"))),
-    );
+    let carried = document.carried;
+    shown.extend(document.mutants.into_iter().map(|(id, verdict)| {
+        let mut shown = serde_json::to_value(verdict).expect("plain data");
+        // Kept from an earlier run: where it was reached.
+        if let Some(from) = carried.get(&id) {
+            shown["carriedFrom"] = serde_json::to_value(from).expect("plain data");
+        }
+        (id, shown)
+    }));
     shown
 }
 
@@ -2418,6 +2449,7 @@ fn save_to(
     saved: &std::collections::BTreeMap<String, Verdict>,
     progress: &Passed,
 ) -> Result<(), String> {
+    let kept = KEPT.lock().expect("no thread panics holding it").clone();
     supercov_engine::strong_verdicts::save(
         path,
         &StrongVerdicts {
@@ -2431,8 +2463,75 @@ fn save_to(
                 .into_iter()
                 .filter(|id| progress.contains_key(id))
                 .collect(),
+            // Of the verdicts saved alone.
+            anchors: kept
+                .0
+                .into_iter()
+                .filter(|(id, _)| saved.contains_key(id))
+                .collect(),
+            carried: kept
+                .1
+                .into_iter()
+                .filter(|(id, _)| saved.contains_key(id))
+                .collect(),
         },
     )
+}
+
+/// Each verdict's anchor and where each kept verdict was reached
+/// (`StrongVerdicts::anchors`, `StrongVerdicts::carried`), by mutant id:
+/// set once a pass knows them, saved with every save of its verdicts.
+#[allow(clippy::type_complexity)]
+static KEPT: std::sync::Mutex<(
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, CarriedFrom>,
+)> = std::sync::Mutex::new((
+    std::collections::BTreeMap::new(),
+    std::collections::BTreeMap::new(),
+));
+
+/// The anchor of each of the plan's mutants whose file is as the run
+/// measured it (`strong_anchors`), by id.
+fn anchors_of(
+    root: &Path,
+    run: &StoredRun,
+    plan: &StrongPlan,
+) -> std::collections::BTreeMap<String, String> {
+    let recorded = supercov_engine::source_manifest::load_manifest(run)
+        .map(|stored| stored.manifest.files)
+        .unwrap_or_default();
+    supercov_engine::strong_anchors::of_files(
+        root,
+        plan.mutants
+            .iter()
+            .map(|mutant| (mutant.id.as_str(), mutant.file.as_str())),
+        |file, source| {
+            recorded.get(file).is_some_and(|recorded| {
+                recorded.same_bytes(&supercov_engine::source_manifest::FileFingerprint::of(
+                    source,
+                ))
+            })
+        },
+    )
+}
+
+/// What a pass kept of earlier runs, as its answer says it: the runs, each
+/// with its commit and how many verdicts it gave, how many test runs those
+/// verdicts took when they were reached, and why the others run again.
+fn carried_json(carried: &Carried) -> Value {
+    let verdicts = || carried.from.iter().flat_map(|kept| kept.verdicts.values());
+    json!({
+        "from": carried.from.iter().map(|kept| &kept.run).collect::<Vec<_>>(),
+        "runs": carried.from.iter().map(|kept| json!({
+            "run": kept.run,
+            "commit": kept.commit,
+            "mutants": kept.verdicts.len(),
+        })).collect::<Vec<_>>(),
+        "mutants": verdicts().count(),
+        "testRuns": verdicts().map(|verdict| verdict.tests).sum::<u64>(),
+        "unchanged": carried.unchanged,
+        "notKept": carried.not_kept,
+    })
 }
 
 /// What running a plan's mutants did, beside the verdicts it saved.
@@ -2863,9 +2962,8 @@ fn summary(
 /// more.
 #[derive(Debug, Default)]
 struct Carried {
-    /// The verdicts kept from each earlier run, by mutant id, with the run's
-    /// id, newest run first.
-    from: Vec<(String, std::collections::BTreeMap<String, Verdict>)>,
+    /// The verdicts kept from each earlier run, newest run first.
+    from: Vec<KeptFrom>,
     /// Whether every run kept from was measured on the files as they are.
     unchanged: bool,
     /// The mutants an earlier run has a verdict for that none kept, counted
@@ -2874,45 +2972,93 @@ struct Carried {
     /// The candidates each mutant still undecided passed in the earlier
     /// runs, every run's together, as `kept_progress` keeps them.
     progress: Passed,
+    /// Where each kept verdict was reached, by mutant id: the run that
+    /// reached it, which is not the run it was kept from where that run
+    /// kept it too.
+    origins: std::collections::BTreeMap<String, CarriedFrom>,
+}
+
+/// The verdicts kept from one earlier run, by mutant id now, with the run
+/// and the commit it measured.
+#[derive(Debug)]
+struct KeptFrom {
+    run: String,
+    commit: Option<String>,
+    verdicts: std::collections::BTreeMap<String, Verdict>,
 }
 
 /// Why an earlier verdict was not kept, as `Carried::not_kept` counts it.
 const ERROR_RUNS_AGAIN: &str = "error";
 const FILE_CHANGED: &str = "fileChanged";
+const MOVED: &str = "moved";
 const WHOLE_FILE_CHANGED: &str = "wholeFileChanged";
 const NEW_TEST: &str = "newTest";
 const TEST_REACHED: &str = "testReached";
+const LOADS_CHANGED: &str = "loadsChanged";
 const NOT_RUN_THEN: &str = "notRunThen";
 const UNVIABLE_CHANGED: &str = "unviableChanged";
+const TIMEOUT_RUNS_AGAIN: &str = "timeout";
+const KILLER_GONE: &str = "killerGone";
+const KILLER_UNKNOWN: &str = "killerUnknown";
+const CANDIDATES_UNKNOWN: &str = "candidatesUnknown";
 
 /// How the pass's summary says each reason a verdict was not kept.
 fn not_kept_said(reason: &str) -> &'static str {
     match reason {
         ERROR_RUNS_AGAIN => "were errors, which run again",
-        FILE_CHANGED => "their file changed",
+        FILE_CHANGED => "code in their file changed",
+        MOVED => {
+            "their file's comments or layout changed and the code around them could not be matched to the earlier run's"
+        }
         WHOLE_FILE_CHANGED => "a file they run whole changed",
-        NEW_TEST => "a test that could kill them is new",
+        NEW_TEST => "a test that could kill them is new, or was not run with them",
         TEST_REACHED => "a test that could kill them could reach a change",
+        LOADS_CHANGED => {
+            "a test that could kill them loads code that changed, which they could lead it into"
+        }
         UNVIABLE_CHANGED => "did not compile, and the code they compile with changed",
+        TIMEOUT_RUNS_AGAIN => {
+            "timed out, which runs again after an edit: a time limit is the new run's"
+        }
+        KILLER_GONE => "the test that killed them no longer reaches them",
+        KILLER_UNKNOWN => "the earlier run did not say which test killed them",
+        CANDIDATES_UNKNOWN => "survived, and the earlier run's candidates could not be read",
         _ => "no test could kill them in that run",
     }
 }
 
+/// A commit as a person reads it: its first 7 characters.
+pub(crate) fn short_commit(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
+}
+
+/// The run's commit, as its record says: where its verdicts were reached.
+fn commit_of(run: &StoredRun) -> Option<String> {
+    run.metadata
+        .integrity
+        .git
+        .as_ref()
+        .and_then(|git| git.revision.clone())
+}
+
 /// Verdicts earlier runs of this checkout's project still give `run`'s
-/// mutants (`docs/design/mutants.md`, Keeping verdicts): of the earlier runs
-/// of the same command, dependencies, configuration and mutant set, newest
-/// first, each gives the mutants still undecided what it keeps of its
-/// verdicts. A run measured on the files as they are keeps every verdict
-/// (`unchanged_verdicts`): two measurements of the same files differ only by
-/// what varies from run to run, which moves no verdict. Any other keeps what
-/// no change since could move (`kept_verdicts`). A strong pass split across
-/// machines leaves each part's verdicts in its own run.
+/// mutants (`docs/design/strong-mutation.md`, "After an edit"): of the
+/// earlier runs of the same command, dependencies, configuration and mutant
+/// set, newest first, each gives the mutants still undecided what it keeps
+/// of its verdicts. A run measured on the files as they are keeps every
+/// verdict (`unchanged_verdicts`): two measurements of the same files differ
+/// only by what varies from run to run, which moves no verdict. Any other
+/// keeps what no change since could move (`kept_verdicts`), each verdict
+/// found by its mutant's anchor (`strong_anchors`) where the run saved
+/// anchors, so a mutant whose lines moved keeps its verdict. A strong pass
+/// split across machines leaves each part's verdicts in its own run.
 fn carry_over(
     root: &Path,
     runs: &[StoredRun],
     run: &StoredRun,
     plan: &StrongPlan,
     saved: &std::collections::BTreeMap<String, Verdict>,
+    anchors: &std::collections::BTreeMap<String, String>,
 ) -> Carried {
     let mut undecided = plan
         .mutants
@@ -2959,16 +3105,45 @@ fn carry_over(
             else {
                 continue;
             };
-            Some(Reach::of(&affected))
+            Some(Reach::of(&affected).with_loads(root, earlier, &undecided, &plan.tests))
         };
+        let matched = matched(&undecided, anchors, &document, reach.as_ref());
         let judged = match &reach {
             None => unchanged_verdicts(&undecided, &document.mutants),
-            Some(reach) => kept_verdicts(&undecided, &plan.tests, &document.mutants, reach),
+            Some(reach) => {
+                // The earlier run's candidates of each mutant, read once and
+                // only where a survivor asks.
+                let then = std::cell::OnceCell::new();
+                let candidates_then = |id: &str| {
+                    then.get_or_init(|| earlier_candidates(earlier, root))
+                        .as_ref()
+                        .map(|candidates| candidates.get(id).cloned().unwrap_or_default())
+                };
+                kept_verdicts(
+                    &undecided,
+                    &plan.tests,
+                    &document,
+                    &matched,
+                    reach,
+                    &candidates_then,
+                )
+            }
         };
         let mut kept = std::collections::BTreeMap::new();
         for (id, judgment) in judged {
             match judgment {
                 Ok(verdict) => {
+                    let then = matched.get(&id).unwrap_or(&id);
+                    let origin =
+                        document
+                            .carried
+                            .get(then)
+                            .cloned()
+                            .unwrap_or_else(|| CarriedFrom {
+                                run: earlier.id.clone(),
+                                commit: commit_of(earlier),
+                            });
+                    carried.origins.insert(id.clone(), origin);
                     kept.insert(id, verdict);
                 }
                 Err(why) => {
@@ -2979,11 +3154,21 @@ fn carry_over(
         if !kept.is_empty() {
             carried.unchanged &= same;
             undecided.retain(|mutant| !kept.contains_key(&mutant.id));
-            carried.from.push((earlier.id.clone(), kept));
+            carried.from.push(KeptFrom {
+                run: earlier.id.clone(),
+                commit: commit_of(earlier),
+                verdicts: kept,
+            });
         }
         add_progress(
             &mut carried.progress,
-            kept_progress(&undecided, &plan.tests, &document.progress, reach.as_ref()),
+            kept_progress(
+                &undecided,
+                &plan.tests,
+                &document.progress,
+                &matched,
+                reach.as_ref(),
+            ),
         );
     }
     for mutant in undecided {
@@ -2994,26 +3179,101 @@ fn carry_over(
     carried
 }
 
+/// Each earlier mutant of `earlier`'s plan, by id, with its candidate tests
+/// (file and name); `None` where the run's plan cannot be read without its
+/// mutants being listed from the checkout as it is now, which is not what
+/// that run measured.
+fn earlier_candidates(
+    earlier: &StoredRun,
+    root: &Path,
+) -> Option<std::collections::BTreeMap<String, BTreeSet<TestName>>> {
+    supercov_engine::strong_plan::run_recorded_mutant_values(&earlier.evidence_path)
+        .then(|| {
+            plan_for_run(earlier, root)
+                .ok()
+                .and_then(|planned| planned.plan)
+        })
+        .flatten()
+        .map(|plan| {
+            plan.mutants
+                .iter()
+                .map(|mutant| {
+                    (
+                        mutant.id.clone(),
+                        mutant
+                            .candidates
+                            .iter()
+                            .map(|candidate| named(&plan.tests[candidate.test]))
+                            .collect(),
+                    )
+                })
+                .collect()
+        })
+}
+
+/// A test as two runs both name it: its file and its name.
+type TestName = (String, String);
+
+/// A test's [`TestName`].
+fn named(test: &supercov_engine::strong_plan::PlannedTest) -> TestName {
+    (test.file.clone().unwrap_or_default(), test.name.clone())
+}
+
+/// The earlier run's id of each mutant still undecided that it has a verdict
+/// or progress for, by the id the mutant has now. On the files as they are
+/// (`reach` none), its id. After an edit, the mutant with the same anchor
+/// where the earlier run saved anchors, and otherwise the same id, where the
+/// mutant's file is byte for byte as it was.
+fn matched(
+    undecided: &[&PlannedMutant],
+    anchors: &std::collections::BTreeMap<String, String>,
+    earlier: &StrongVerdicts,
+    reach: Option<&Reach>,
+) -> std::collections::BTreeMap<String, String> {
+    let then = earlier
+        .anchors
+        .iter()
+        .map(|(id, anchor)| (anchor.as_str(), id.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let known = |id: &str| earlier.mutants.contains_key(id) || earlier.progress.contains_key(id);
+    undecided
+        .iter()
+        .filter_map(|mutant| {
+            let by_anchor = reach
+                .and(anchors.get(&mutant.id))
+                .and_then(|anchor| then.get(anchor.as_str()))
+                .map(|id| (*id).to_owned());
+            let by_id = reach
+                .is_none_or(|reach| !reach.changed.contains(&mutant.file))
+                .then(|| mutant.id.clone());
+            by_anchor
+                .or(by_id)
+                .filter(|id| known(id))
+                .map(|id| (mutant.id.clone(), id))
+        })
+        .collect()
+}
+
 /// The candidates each still undecided mutant passed in `earlier` that no
-/// change since could move, by mutant id: on the files as they are
-/// (`reach` none), every one that is a candidate still; after an edit, those
-/// whose test runs as it did (`Reach::runs_as_it_did`) where the mutant's
-/// file is byte for byte as it was. A pass is kept candidate by candidate: a
-/// change that reaches one test leaves the others' passes standing.
+/// change since could move, by mutant id now: on the files as they are
+/// (`reach` none), every one that is a candidate still; after an edit,
+/// those that run as they did with the mutant switched on (`Reach::stands`)
+/// where the code of the mutant's file did not change. A pass is kept
+/// candidate by candidate: a change that reaches one test leaves the
+/// others' passes standing.
 fn kept_progress(
-    undecided: &[&supercov_engine::strong_plan::PlannedMutant],
+    undecided: &[&PlannedMutant],
     tests: &[supercov_engine::strong_plan::PlannedTest],
     earlier: &Passed,
+    matched: &std::collections::BTreeMap<String, String>,
     reach: Option<&Reach>,
 ) -> Passed {
     let mut kept = Passed::new();
     for mutant in undecided {
-        let Some(passed) = earlier.get(&mutant.id) else {
+        let Some(passed) = matched.get(&mutant.id).and_then(|then| earlier.get(then)) else {
             continue;
         };
-        if !supercov_engine::strong_verdicts::resumes(mutant, tests)
-            || reach.is_some_and(|reach| reach.changed.contains(&mutant.file))
-        {
+        if !supercov_engine::strong_verdicts::resumes(mutant, tests) {
             continue;
         }
         let standing = mutant
@@ -3021,7 +3281,7 @@ fn kept_progress(
             .iter()
             .map(|candidate| &tests[candidate.test])
             .filter(|test| passed.contains(&test.id))
-            .filter(|test| reach.is_none_or(|reach| reach.runs_as_it_did(test)))
+            .filter(|test| reach.is_none_or(|reach| reach.stands(test, mutant).is_ok()))
             .map(|test| test.id.clone())
             .collect::<BTreeSet<_>>();
         if !standing.is_empty() {
@@ -3046,7 +3306,7 @@ fn judged(verdict: &Verdict) -> Result<Verdict, &'static str> {
 /// the mutants still undecided: every verdict a pass reached, whatever the
 /// two measurements' evidence says.
 fn unchanged_verdicts(
-    undecided: &[&supercov_engine::strong_plan::PlannedMutant],
+    undecided: &[&PlannedMutant],
     earlier: &std::collections::BTreeMap<String, Verdict>,
 ) -> Vec<(String, Result<Verdict, &'static str>)> {
     undecided
@@ -3055,16 +3315,32 @@ fn unchanged_verdicts(
         .collect()
 }
 
-/// What `tests affected` says of an earlier run, as keeping its verdicts and
-/// its progress reads it: the test files a change since may have reached,
-/// the tests it found unaffected (a test that failed in it counts where the
-/// change reaches nothing that run covered), every test it had, and the
-/// files changed.
+/// What changed since an earlier run, as keeping its verdicts and its
+/// progress reads it: what `tests affected` says of that run -- the test
+/// files a change since may have reached, the tests it found unaffected (a
+/// test that failed in it counts where the change reaches nothing that run
+/// covered), every test it had, the files changed and those whose code
+/// changed -- and what each test file loads now.
+#[derive(Default)]
 struct Reach {
     reached_files: BTreeSet<String>,
     unaffected: BTreeSet<(String, String)>,
     known: BTreeSet<(String, String)>,
+    /// Every file not byte for byte as it was.
     changed: BTreeSet<String>,
+    /// The files whose code changed: changed in more than comments and
+    /// layout, or removed, or changed where no parser reads them.
+    code_changed: BTreeSet<String>,
+    /// The files of the run's tests.
+    test_files: BTreeSet<String>,
+    /// What each test file of a candidate loads now (`test_loads`), where
+    /// its imports can be read.
+    loads: std::collections::BTreeMap<String, Option<supercov_engine::test_loads::Loads>>,
+    /// The tests, by name, that processes serving them reached code for.
+    served: BTreeSet<String>,
+    /// The checkout's code against the earlier run's record of it: what a
+    /// test with a mutant switched on could reach of what changed.
+    program: Option<supercov_engine::strong_reach::Program>,
 }
 
 impl Reach {
@@ -3113,88 +3389,249 @@ impl Reach {
             .cloned()
             .chain(reached.iter().map(named))
             .collect::<BTreeSet<_>>();
-        let changed = affected["changedFiles"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let changed_files = entries("changedFiles");
+        let changed = changed_files
+            .iter()
             .map(|entry| entry["file"].as_str().unwrap_or_default().to_owned())
             .collect::<BTreeSet<_>>();
+        // Comments and layout alone change nothing a program can tell.
+        let code_changed = changed_files
+            .iter()
+            .filter(|entry| entry["change"] != "formatting")
+            .map(|entry| entry["file"].as_str().unwrap_or_default().to_owned())
+            .collect::<BTreeSet<_>>();
+        let test_files = known.iter().map(|(file, _)| file.clone()).collect();
         Self {
             reached_files,
             unaffected,
             known,
             changed,
+            code_changed,
+            test_files,
+            ..Self::default()
         }
     }
 
-    /// Whether a test runs as it did: the earlier run had it and found it
-    /// unaffected, and no test of its file was reached (they share the
-    /// file's state).
-    fn runs_as_it_did(&self, test: &supercov_engine::strong_plan::PlannedTest) -> bool {
-        let file = test.file.clone().unwrap_or_default();
-        !self.reached_files.contains(&file) && self.unaffected.contains(&(file, test.name.clone()))
+    /// The same, with what each candidate's test file of the mutants still
+    /// undecided loads now, the files the earlier run recorded, and the
+    /// tests processes serving them reached code for.
+    fn with_loads(
+        mut self,
+        root: &Path,
+        earlier: &StoredRun,
+        undecided: &[&PlannedMutant],
+        tests: &[supercov_engine::strong_plan::PlannedTest],
+    ) -> Self {
+        let stored = supercov_engine::source_manifest::load_manifest(earlier).ok();
+        let configurations = stored
+            .iter()
+            .flat_map(|stored| stored.manifest.files.keys())
+            .filter(|file| supercov_engine::run_currency::configuration_file(file))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.program = stored.map(|stored| {
+            supercov_engine::strong_reach::Program::new(root.to_owned(), stored.manifest.files)
+        });
+        let ran = supercov_engine::run_currency::Ran::of(earlier);
+        self.served = ran
+            .support
+            .as_ref()
+            .map(|support| support.names.values().cloned().collect())
+            .unwrap_or_default();
+        let checkout = supercov_engine::run_currency::Checkout::new(root, &self.test_files);
+        let files = undecided
+            .iter()
+            .flat_map(|mutant| &mutant.candidates)
+            .filter_map(|candidate| tests[candidate.test].file.clone())
+            .collect::<BTreeSet<_>>();
+        self.loads = files
+            .into_iter()
+            .map(|file| {
+                let loads = checkout.loads(
+                    &BTreeSet::from([file.clone()]),
+                    ran.runners.as_ref(),
+                    &configurations,
+                );
+                (file, loads)
+            })
+            .collect();
+        self
+    }
+
+    /// Whether a test runs as it did with `mutant` switched on, and if not,
+    /// why. The earlier run had it, and no code a mutant could lead it into
+    /// changed. Once a mutant changes what a test does, the test may run code
+    /// it never ran before, so what it ran without the mutant does not bound
+    /// what it runs with it. Where the test runs the mutant's code in its own
+    /// process, from files its imports load (`test_loads`, every import
+    /// followed), the bound is what that code can name
+    /// (`strong_reach::Program`): no declaration it could run changed. Where
+    /// it does not -- a browser test driving a server, a mutant a server
+    /// starts with, a test a serving process answered, imports that cannot
+    /// all be followed -- the earlier run found it unaffected, and no test of
+    /// its file was reached (they share the file's state), and no code
+    /// changed but tests'.
+    fn stands(
+        &self,
+        test: &supercov_engine::strong_plan::PlannedTest,
+        mutant: &PlannedMutant,
+    ) -> Result<(), &'static str> {
+        let key = named(test);
+        if !self.known.contains(&key) {
+            return Err(NEW_TEST);
+        }
+        let affected = !self.unaffected.contains(&key) || self.reached_files.contains(&key.0);
+        // A directory loaded whole holds files no import names.
+        let bounded = self
+            .loads
+            .get(&key.0)
+            .and_then(Option::as_ref)
+            .filter(|loads| {
+                test.runner != "playwright"
+                    && mutant.server_wide.is_none()
+                    && !self.served.contains(&test.name)
+                    && loads.open.is_none()
+                    && loads.directories.is_empty()
+                    && loads.includes(&mutant.file)
+            });
+        let reaches = match (bounded, &self.program) {
+            (Some(loads), Some(program)) => program.reaches_change(&key.0, &loads.files),
+            _ => {
+                affected
+                    || !self
+                        .code_changed
+                        .iter()
+                        .all(|file| self.test_files.contains(file))
+            }
+        };
+        match (reaches, affected) {
+            (false, _) => Ok(()),
+            (true, true) => Err(TEST_REACHED),
+            (true, false) => Err(LOADS_CHANGED),
+        }
     }
 }
 
-/// The verdicts of `earlier` that no change since could move, by mutant id,
-/// given what `tests affected` says of that run (`affected`), and why each
-/// other was not kept: a mutant keeps its verdict (killed, survived or
-/// timeout; an error runs again) where its file is byte for byte as it was,
-/// and every candidate test it has now is one the earlier run had and found
-/// unaffected, as is every test of their files (they share the file's
-/// state) and of the files it runs whole. A test file's edit reaches its
-/// tests, a source edit the tests that ran the changed code; a new test that
-/// could kill it is a candidate the earlier run did not have. A test that
-/// failed in the earlier run left a record cut short: what it could have
-/// reached is bounded by what the run covered, so it is unaffected where the
-/// change reaches none of that, and its failing, which varies from run to
-/// run, moves no verdict.
+/// The test `killed_by` names among `tests`: by its id, or by its name
+/// where one test alone has it.
+fn killer(tests: &[supercov_engine::strong_plan::PlannedTest], killed_by: &str) -> Option<usize> {
+    tests
+        .iter()
+        .position(|test| test.id == killed_by)
+        .or_else(|| {
+            let mut named = tests
+                .iter()
+                .enumerate()
+                .filter(|(_, test)| test.name == killed_by);
+            match (named.next(), named.next()) {
+                (Some((index, _)), None) => Some(index),
+                _ => None,
+            }
+        })
+}
+
+/// The verdicts of `earlier` that no change since could move, by mutant id
+/// now, given what changed since that run (`reach`) and each mutant's id
+/// then (`matched`), and why each other was not kept. A mutant keeps its
+/// verdict where the code of its file did not change (its comments and
+/// layout may have: its verdict is found by its anchor), no file it runs
+/// whole was reached, and:
+///
+/// - killed: the test that killed it is a candidate now, and runs as it did
+///   with the mutant switched on (`Reach::stands`). A kill needs one test.
+/// - survived: every candidate it has now was a candidate then, and runs as
+///   it did. A new test that could kill it, or one the earlier run did not
+///   run with it, runs.
+///
+/// A timeout runs again, as does a mutant that did not compile and an
+/// error. A test that failed in the earlier run left a record cut short:
+/// what it could have reached is bounded by what the run covered, so it is
+/// unaffected where the change reaches none of that, and its failing, which
+/// varies from run to run, moves no verdict.
 fn kept_verdicts(
-    undecided: &[&supercov_engine::strong_plan::PlannedMutant],
+    undecided: &[&PlannedMutant],
     tests: &[supercov_engine::strong_plan::PlannedTest],
-    earlier: &std::collections::BTreeMap<String, Verdict>,
+    earlier: &StrongVerdicts,
+    matched: &std::collections::BTreeMap<String, String>,
     reach: &Reach,
+    candidates_then: &dyn Fn(&str) -> Option<BTreeSet<TestName>>,
 ) -> Vec<(String, Result<Verdict, &'static str>)> {
-    let Reach {
-        reached_files,
-        known,
-        changed,
-        ..
-    } = reach;
-    let named_test = |index: usize| {
-        let test = &tests[index];
-        (test.file.clone().unwrap_or_default(), test.name.clone())
-    };
+    // The files the earlier run has verdicts in, for a mutant it cannot be
+    // matched to: run again because its code moved.
+    let with_verdicts = undecided
+        .iter()
+        .map(|mutant| mutant.file.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|file| {
+            let prefix = format!("{file}:");
+            earlier
+                .mutants
+                .range(prefix.clone()..)
+                .next()
+                .is_some_and(|(id, _)| id.starts_with(&prefix))
+        })
+        .collect::<BTreeSet<_>>();
     let mut judgments = Vec::new();
     for mutant in undecided {
-        let Some(verdict) = earlier.get(&mutant.id) else {
+        let Some(verdict) = matched
+            .get(&mutant.id)
+            .and_then(|id| earlier.mutants.get(id))
+        else {
+            if with_verdicts.contains(mutant.file.as_str()) {
+                let why = if reach.code_changed.contains(&mutant.file) {
+                    FILE_CHANGED
+                } else {
+                    MOVED
+                };
+                judgments.push((mutant.id.clone(), Err(why)));
+            }
             continue;
         };
-        let candidates = mutant
-            .candidates
-            .iter()
-            .map(|candidate| named_test(candidate.test))
-            .collect::<Vec<_>>();
+        let then = &matched[&mutant.id];
         let judgment = judged(verdict).and_then(|verdict| {
-            // Whether a mutant compiles rests on more than its file.
+            let stands = |index: usize| reach.stands(&tests[index], mutant);
+            // Whether a mutant compiles rests on more than its file, and
+            // whether it ends in time on the new run's limits.
             if verdict.status == "unviable" {
                 Err(UNVIABLE_CHANGED)
-            } else if changed.contains(mutant.file.as_str()) {
-                Err(FILE_CHANGED)
+            } else if verdict.status == "timeout" {
+                Err(TIMEOUT_RUNS_AGAIN)
             } else if mutant
                 .whole_files
                 .iter()
-                .any(|file| reached_files.contains(file))
+                .any(|file| reach.reached_files.contains(file))
             {
                 Err(WHOLE_FILE_CHANGED)
-            } else if candidates.iter().any(|test| !known.contains(test)) {
-                Err(NEW_TEST)
-            } else if candidates
-                .iter()
-                .any(|test| reached_files.contains(&test.0))
-            {
-                Err(TEST_REACHED)
+            } else if verdict.status == "killed" {
+                let Some(index) = verdict
+                    .killed_by
+                    .as_deref()
+                    .and_then(|killed_by| killer(tests, killed_by))
+                else {
+                    return Err(KILLER_UNKNOWN);
+                };
+                stands(index)?;
+                if mutant
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.test == index)
+                {
+                    Ok(verdict)
+                } else {
+                    Err(KILLER_GONE)
+                }
             } else {
+                let Some(then) = candidates_then(then) else {
+                    return Err(CANDIDATES_UNKNOWN);
+                };
+                mutant.candidates.iter().try_for_each(|candidate| {
+                    if then.contains(&named(&tests[candidate.test])) {
+                        stands(candidate.test)
+                    } else {
+                        Err(NEW_TEST)
+                    }
+                })?;
                 Ok(verdict)
             }
         });
@@ -3573,7 +4010,7 @@ mod tests {
         let text = plan_text(&json!({
             "run": "r1", "summary": summary,
             "scope": {"diff": "main", "files": ["a.js", "b.js"], "mutants": 3, "of": 9},
-            "carried": {"from": ["r0"], "mutants": 4},
+            "carried": {"from": ["r0"], "runs": [{"run": "r0", "commit": null, "mutants": 4}], "mutants": 4},
         }));
         assert!(
             text.starts_with(
@@ -3588,11 +4025,13 @@ mod tests {
         );
         let shards = plan_text(&json!({
             "run": "r3", "summary": summary,
-            "carried": {"from": ["r2", "r1"], "mutants": 193},
+            "carried": {"from": ["r2", "r1"], "mutants": 193, "runs": [
+                {"run": "r2", "commit": "1a2b3c4d", "mutants": 190},
+                {"run": "r1", "commit": "5e6f7a8b", "mutants": 3}]},
         }));
         assert!(
             shards.contains(
-                "  193 verdict(s) kept from runs r2, r1: nothing they depend on changed\n"
+                "  193 verdict(s) kept from 2 runs, 190 from run r2 (commit 1a2b3c4), 3 from run r1 (commit 5e6f7a8): nothing they depend on changed\n"
             ),
             "{shards}"
         );
@@ -3641,21 +4080,22 @@ mod tests {
         // Kept from runs of the files as they are, and why the rest were not,
         // the reason most said first.
         let unchanged = plan_text(&json!({"run": "r3", "summary": summary,
-            "carried": {"from": ["r2"], "mutants": 9, "unchanged": true, "notKept": {
+            "carried": {"from": ["r2"], "runs": [{"run": "r2", "mutants": 9}], "mutants": 9, "unchanged": true, "notKept": {
                 ERROR_RUNS_AGAIN: 1, FILE_CHANGED: 4, WHOLE_FILE_CHANGED: 1, NEW_TEST: 1,
                 TEST_REACHED: 1, UNVIABLE_CHANGED: 1, NOT_RUN_THEN: 1}},
             "measurement": {"derivedFrom": "r2"}}));
         assert!(
             unchanged.contains("  9 verdict(s) kept from run r2: the checkout is unchanged since it\n")
-                && unchanged.contains("  10 earlier verdict(s) not kept, so run again: 4 their file changed, 1 were errors, which run again, 1 a test that could kill them is new, 1 no test could kill them in that run, 1 a test that could kill them could reach a change, 1 did not compile, and the code they compile with changed, 1 a file they run whole changed\n")
+                && unchanged.contains("  10 earlier verdict(s) not kept, so run again: 4 code in their file changed, 1 were errors, which run again, 1 a test that could kill them is new, or was not run with them, 1 no test could kill them in that run, 1 a test that could kill them could reach a change, 1 did not compile, and the code they compile with changed, 1 a file they run whole changed\n")
                 && unchanged.contains("  not measured: the checkout is unchanged since run r2, which this run was made from\n"),
             "{unchanged}"
         );
         let both = plan_text(&json!({"run": "r3", "summary": summary,
-            "carried": {"from": ["r2", "r1"], "mutants": 9, "unchanged": true}}));
+            "carried": {"from": ["r2", "r1"], "mutants": 9, "unchanged": true, "runs": [
+                {"run": "r2", "mutants": 5}, {"run": "r1", "mutants": 4}]}}));
         assert!(
             both.contains(
-                "  9 verdict(s) kept from runs r2, r1: the checkout is unchanged since them\n"
+                "  9 verdict(s) kept from 2 runs, 5 from run r2, 4 from run r1: the checkout is unchanged since them\n"
             ),
             "{both}"
         );
@@ -3677,202 +4117,543 @@ mod tests {
         assert!(!whole.contains("kept from"), "{whole}");
     }
 
-    /// An earlier verdict is kept where its mutant's file and every test
-    /// that could kill it are as they were: not an error's, not a changed
-    /// file's, not where a candidate, its file's other tests, or a file run
-    /// whole was reached, nor where a candidate is new; each other says why.
-    /// A test that failed in the earlier run is reached only where the change
-    /// reaches what the run covered.
-    #[test]
-    fn a_verdict_is_kept_where_nothing_it_rests_on_changed() {
-        use supercov_engine::strong_plan::{Candidate, CandidateReason, PlannedTest};
-        let test = |file: &str, name: &str| PlannedTest {
-            id: name.into(),
-            file: Some(file.into()),
+    /// A test as the carry tests name it: its id is not its name, so a kill
+    /// can name its killer by either.
+    fn carry_test(
+        file: &str,
+        name: &str,
+        runner: &str,
+    ) -> supercov_engine::strong_plan::PlannedTest {
+        supercov_engine::strong_plan::PlannedTest {
+            id: format!("id:{name}"),
+            file: (!file.is_empty()).then(|| file.to_owned()),
             name: name.into(),
             title: None,
-            runner: "jest".into(),
+            runner: runner.into(),
             duration_ms: None,
             span: None,
             runnable: true,
             failed: false,
-        };
-        let tests = vec![
-            test("t/a.test.js", "a1"),
-            test("t/b.test.js", "b1"),
-            test("t/c.test.js", "c1"),
-            test("t/a.test.js", "new"),
-            PlannedTest {
-                file: None,
-                ..test("", "fileless")
-            },
-            test("t/d.test.js", "d1"),
-        ];
-        let mut plan = plan_of(&[], &[]);
-        let mutant = |id: &str, file: &str, candidates: &[usize], whole: &[&str]| {
-            let mut planned = plan_of(&[], &["infected"]).mutants.remove(0);
-            planned.id = id.into();
-            planned.file = file.into();
-            planned.candidates = candidates
-                .iter()
-                .map(|test| Candidate {
-                    test: *test,
-                    reason: CandidateReason::Infected,
-                })
-                .collect();
-            planned.whole_files = whole.iter().map(|file| (*file).to_owned()).collect();
-            planned
-        };
-        plan.mutants = vec![
-            mutant("kept", "src/a.js", &[0], &[]),
-            mutant("timeout-kept", "src/a.js", &[0], &["t/a.test.js"]),
-            mutant("never-run", "src/a.js", &[0], &[]),
-            mutant("error", "src/a.js", &[0], &[]),
-            mutant("file-changed", "src/b.js", &[0], &[]),
-            mutant("whole-reached", "src/a.js", &[0], &["t/b.test.js"]),
-            mutant("candidate-reached", "src/a.js", &[1], &[]),
-            mutant("file-mate-reached", "src/a.js", &[2], &[]),
-            mutant("new-candidate", "src/a.js", &[3], &[]),
-            mutant("fileless", "src/a.js", &[4], &[]),
-            mutant("failed-then", "src/a.js", &[5], &[]),
-            mutant("unviable", "src/a.js", &[0], &[]),
-            mutant("no-coverage", "src/a.js", &[0], &[]),
-        ];
-        let verdict = |status: &str| Verdict {
+        }
+    }
+
+    /// A mutant of `file` with these candidates and files it runs whole.
+    fn carry_mutant(id: &str, file: &str, candidates: &[usize], whole: &[&str]) -> PlannedMutant {
+        use supercov_engine::strong_plan::{Candidate, CandidateReason};
+        let mut planned = plan_of(&[], &["infected"]).mutants.remove(0);
+        planned.id = id.into();
+        planned.file = file.into();
+        planned.candidates = candidates
+            .iter()
+            .map(|test| Candidate {
+                test: *test,
+                reason: CandidateReason::Infected,
+            })
+            .collect();
+        planned.whole_files = whole.iter().map(|file| (*file).to_owned()).collect();
+        planned
+    }
+
+    fn carry_verdict(status: &str, killed_by: Option<&str>) -> Verdict {
+        Verdict {
             status: status.into(),
-            killed_by: None,
+            killed_by: killed_by.map(str::to_owned),
             tests: 1,
             duration_ms: 1,
             reason: None,
+        }
+    }
+
+    fn loads(files: &[&str]) -> Option<supercov_engine::test_loads::Loads> {
+        Some(supercov_engine::test_loads::Loads {
+            files: files.iter().map(|file| (*file).to_owned()).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// An earlier verdict is kept where nothing it rests on changed, and
+    /// each other says why. A kill keeps where the test that killed it is
+    /// a candidate still and runs as it did with the mutant switched on; a
+    /// survival where every candidate now was one then and runs as it did.
+    /// A test runs as it did where the earlier run found it unaffected, with
+    /// its file's other tests, and no code the mutant could lead it into
+    /// changed: what its own imports load, where it runs the mutant's code
+    /// in its own process from them, and otherwise any code but tests'. A
+    /// timeout, an error and a mutant that did not compile run again. A
+    /// mutant that cannot be matched to the earlier run's is run again
+    /// where that run had verdicts in its file. A test that failed in the
+    /// earlier run is reached only where the change reaches what the run
+    /// covered.
+    #[test]
+    fn a_verdict_is_kept_where_nothing_it_rests_on_changed() {
+        let tests = vec![
+            carry_test("t/a.test.js", "a1", "jest"),
+            carry_test("t/b.test.js", "b1", "jest"),
+            carry_test("t/c.test.js", "c1", "jest"),
+            carry_test("t/a.test.js", "new", "jest"),
+            carry_test("", "fileless", "jest"),
+            carry_test("t/d.test.js", "d1", "jest"),
+            carry_test("t/e.test.js", "e1", "jest"),
+            carry_test("t/p.spec.js", "p1", "playwright"),
+            carry_test("t/s.test.js", "s1", "jest"),
+            carry_test("t/g.test.js", "g1", "jest"),
+            carry_test("t/u.test.js", "u1", "jest"),
+            carry_test("t/h.test.js", "h1", "jest"),
+            carry_test("t/e2.test.js", "e2", "jest"),
+            carry_test("t/o.test.js", "o1", "jest"),
+            carry_test("t/b2.test.js", "b2", "jest"),
+        ];
+        let mut server_wide = carry_mutant("server-wide", "src/a.js", &[0], &[]);
+        server_wide.server_wide = Some(supercov_engine::strong_plan::ServerWide::ModuleLevel);
+        let mutants = vec![
+            carry_mutant("kept", "src/a.js", &[0], &[]),
+            carry_mutant("kept-by-name", "src/a.js", &[0], &[]),
+            carry_mutant("timeout", "src/a.js", &[0], &[]),
+            carry_mutant("error", "src/a.js", &[0], &[]),
+            carry_mutant("unviable", "src/a.js", &[0], &[]),
+            carry_mutant("no-coverage", "src/a.js", &[0], &[]),
+            carry_mutant("file-changed", "src/b.js", &[12], &[]),
+            carry_mutant("sibling-changed", "src/b.js", &[14], &[]),
+            carry_mutant("whole-reached", "src/a.js", &[0], &["t/b.test.js"]),
+            carry_mutant("killer-reached", "src/a.js", &[1], &[]),
+            carry_mutant("killer-gone", "src/a.js", &[0], &[]),
+            carry_mutant("killer-unknown", "src/a.js", &[0], &[]),
+            carry_mutant("killer-unnamed", "src/a.js", &[0], &[]),
+            carry_mutant("survived-kept", "src/a.js", &[0, 11], &[]),
+            carry_mutant("survived-new", "src/a.js", &[3], &[]),
+            carry_mutant("survived-not-run-then", "src/a.js", &[0], &[]),
+            carry_mutant("survived-unknown", "src/a.js", &[0], &[]),
+            carry_mutant("file-mate-reached", "src/a.js", &[2], &[]),
+            carry_mutant("fileless", "src/a.js", &[4], &[]),
+            carry_mutant("failed-then", "src/a.js", &[5], &[]),
+            carry_mutant("loads-changed", "src/a.js", &[12], &[]),
+            carry_mutant("playwright", "src/a.js", &[7], &[]),
+            carry_mutant("served", "src/a.js", &[8], &[]),
+            carry_mutant("directory", "src/a.js", &[9], &[]),
+            carry_mutant("unrecorded", "src/a.js", &[10], &[]),
+            carry_mutant("open", "src/a.js", &[13], &[]),
+            carry_mutant("elsewhere", "src/q.js", &[0], &[]),
+            server_wide,
+            carry_mutant("src/c.js:5:1-5:2:M:x", "src/c.js", &[0], &[]),
+            carry_mutant("src/b.js:9:1-9:2:M:x", "src/b.js", &[0], &[]),
+            carry_mutant("src/n.js:1:1-1:2:M:x", "src/n.js", &[0], &[]),
+        ];
+        let killed_by = |id: &str| match id {
+            "kept-by-name" => Some("a1"),
+            "killer-reached" => Some("id:b1"),
+            "killer-gone" => Some("id:e1"),
+            "killer-unknown" => Some("nobody"),
+            "killer-unnamed" => None,
+            "file-mate-reached" => Some("id:c1"),
+            "fileless" => Some("id:fileless"),
+            "failed-then" => Some("id:d1"),
+            "loads-changed" => Some("id:e2"),
+            "playwright" => Some("id:p1"),
+            "served" => Some("id:s1"),
+            "directory" => Some("id:g1"),
+            "unrecorded" => Some("id:u1"),
+            "open" => Some("id:o1"),
+            "file-changed" => Some("id:e2"),
+            "sibling-changed" => Some("id:b2"),
+            _ => Some("id:a1"),
         };
-        let earlier = plan
+        let mut earlier = StrongVerdicts {
+            schema_version: 1,
+            run: "r1".into(),
+            mutant_set: "set".into(),
+            mutants: Default::default(),
+            progress: Default::default(),
+            lived: Default::default(),
+            anchors: Default::default(),
+            carried: Default::default(),
+        };
+        for mutant in &mutants {
+            let status = match mutant.id.as_str() {
+                "timeout" => "timeout",
+                "error" | "unviable" | "no-coverage" => mutant.id.as_str(),
+                id if id.starts_with("survived") => "survived",
+                _ => "killed",
+            };
+            earlier.mutants.insert(
+                mutant.id.clone(),
+                carry_verdict(status, killed_by(&mutant.id)),
+            );
+        }
+        // The two mutants that cannot be matched: the earlier run has others
+        // of their files.
+        for unmatched in [
+            "src/c.js:5:1-5:2:M:x",
+            "src/b.js:9:1-9:2:M:x",
+            "src/n.js:1:1-1:2:M:x",
+        ] {
+            earlier.mutants.remove(unmatched);
+        }
+        earlier
             .mutants
+            .insert("src/c.js:3:1-3:2:M:x".into(), carry_verdict("killed", None));
+        earlier
+            .mutants
+            .insert("src/b.js:1:1-1:2:M:x".into(), carry_verdict("killed", None));
+        let matched = mutants
             .iter()
-            .filter(|mutant| mutant.id != "never-run")
-            .map(|mutant| {
-                let status = match mutant.id.as_str() {
-                    "error" | "unviable" | "no-coverage" => mutant.id.as_str(),
-                    "timeout-kept" => "timeout",
-                    _ => "killed",
-                };
-                (mutant.id.clone(), verdict(status))
+            .filter(|mutant| earlier.mutants.contains_key(&mutant.id))
+            .map(|mutant| (mutant.id.clone(), mutant.id.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let unaffected = [
+            "a1", "c1", "e1", "p1", "s1", "g1", "u1", "h1", "e2", "o1", "b2",
+        ]
+        .iter()
+        .map(|name| {
+            let test = tests.iter().find(|test| test.name == *name).unwrap();
+            json!({"file": test.file, "name": name})
+        })
+        .chain([
+            json!({"file": "", "name": "fileless"}),
+            json!({"name": "unnamed file"}),
+        ])
+        .collect::<Vec<_>>();
+        let affected = |changed: Value| {
+            json!({
+                "affected": [
+                    {"file": "t/b.test.js", "name": "b1", "reasons": ["t/b.test.js changed"]},
+                    {"file": "t/d.test.js", "name": "d1", "reasons": [supercov_engine::source_manifest::DID_NOT_PASS]}
+                ],
+                "undetermined": [{"file": "t/c.test.js", "name": "c2"}],
+                "unaffected": unaffected,
+                "changedFiles": changed,
             })
+        };
+        // The checkout: `src/b.js`'s `b` changed since the earlier run, its
+        // `keep` did not.
+        let root = std::env::temp_dir().join(format!("carry-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = [
+            ("src/a.js", "export function a() {\n  return 1;\n}\n"),
+            (
+                "src/b.js",
+                "export function b() {\n  return 2;\n}\nexport function keep() {\n  return 1;\n}\n",
+            ),
+            ("src/z.js", "export function z() {\n  return 1;\n}\n"),
+            ("t/a.test.js", "a();\n"),
+            ("t/b2.test.js", "keep();\n"),
+            ("t/d.test.js", "a();\n"),
+            ("t/e.test.js", "a();\n"),
+            ("t/e2.test.js", "b();\n"),
+            ("t/h.test.js", "a();\n"),
+            ("t/u.test.js", "a();\n"),
+            ("src/unrecorded.js", "export const u = 1;\n"),
+            ("vitest.config.js", "export default {};\n"),
+            ("package.json", "{}\n"),
+        ];
+        for (file, text) in files {
+            std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            std::fs::write(root.join(file), text).unwrap();
+        }
+        let manifest = |b_changed: bool| {
+            files
+                .iter()
+                .filter(|(file, _)| {
+                    !["src/unrecorded.js", "vitest.config.js", "package.json"].contains(file)
+                })
+                .map(|(file, text)| {
+                    let text = if b_changed && *file == "src/b.js" {
+                        text.replace("return 2", "return 1")
+                    } else {
+                        (*text).to_owned()
+                    };
+                    (
+                        (*file).to_owned(),
+                        supercov_engine::source_manifest::FileFingerprint::read(file, &text),
+                    )
+                })
+                .collect::<supercov_engine::source_manifest::FileManifest>()
+        };
+        let with_loads = |mut reach: Reach, b_changed: bool| {
+            reach.program = Some(supercov_engine::strong_reach::Program::new(
+                root.clone(),
+                manifest(b_changed),
+            ));
+            reach.served = BTreeSet::from(["s1".to_owned()]);
+            let mut directory = loads(&["t/g.test.js", "src/a.js"]).unwrap();
+            directory.directories.insert("t/fixtures".into());
+            let mut open = loads(&["t/o.test.js", "src/a.js"]).unwrap();
+            open.open = Some("t/o.test.js imports a computed path".into());
+            reach.loads = [
+                ("t/a.test.js", loads(&["t/a.test.js", "src/a.js"])),
+                ("t/b2.test.js", loads(&["t/b2.test.js", "src/b.js"])),
+                (
+                    "t/e.test.js",
+                    loads(&["t/e.test.js", "src/a.js", "src/z.js"]),
+                ),
+                (
+                    "t/e2.test.js",
+                    loads(&["t/e2.test.js", "src/a.js", "src/b.js"]),
+                ),
+                (
+                    "t/h.test.js",
+                    loads(&[
+                        "t/h.test.js",
+                        "src/a.js",
+                        "vitest.config.js",
+                        "package.json",
+                    ]),
+                ),
+                ("t/p.spec.js", loads(&["t/p.spec.js", "src/a.js"])),
+                ("t/s.test.js", loads(&["t/s.test.js", "src/a.js"])),
+                ("t/g.test.js", Some(directory)),
+                (
+                    "t/u.test.js",
+                    loads(&["t/u.test.js", "src/a.js", "src/unrecorded.js"]),
+                ),
+                ("t/o.test.js", Some(open)),
+            ]
+            .into_iter()
+            .map(|(file, loads)| (file.to_owned(), loads))
             .collect();
-        let mut affected = json!({
-            "affected": [
-                {"file": "t/b.test.js", "name": "b1", "reasons": ["t/b.test.js changed"]},
-                {"file": "t/d.test.js", "name": "d1", "reasons": [supercov_engine::source_manifest::DID_NOT_PASS]}
-            ],
-            "undetermined": [{"file": "t/c.test.js", "name": "c2"}],
-            "unaffected": [
-                {"file": "t/a.test.js", "name": "a1"},
-                {"file": "t/c.test.js", "name": "c1"},
-                {"file": "", "name": "fileless"},
-                {"name": "unnamed file"}
-            ],
-            "changedFiles": [{"file": "src/b.js"}, {"change": "no file"}],
-        });
-        let undecided = plan.mutants.iter().collect::<Vec<_>>();
-        let judged = |affected: &Value| {
-            kept_verdicts(&undecided, &tests, &earlier, &Reach::of(affected))
+            reach
+        };
+        let undecided = mutants.iter().collect::<Vec<_>>();
+        let then = |id: &str| match id {
+            "survived-kept" => Some(BTreeSet::from([
+                ("t/a.test.js".to_owned(), "a1".to_owned()),
+                ("t/h.test.js".to_owned(), "h1".to_owned()),
+            ])),
+            "survived-unknown" => None,
+            _ => Some(BTreeSet::new()),
+        };
+        let judged = |reach: &Reach| {
+            kept_verdicts(&undecided, &tests, &earlier, &matched, reach, &then)
                 .into_iter()
                 .map(|(id, judgment)| (id, judgment.map(|verdict| verdict.status)))
-                .collect::<Vec<_>>()
+                .collect::<std::collections::BTreeMap<_, _>>()
         };
-        let said = |id: &str, judgment: Result<&str, &'static str>| {
-            (id.to_owned(), judgment.map(str::to_owned))
+        let source_changed = json!([
+            {"file": "src/b.js", "change": "bodies"},
+            {"file": "src/c.js", "change": "formatting"},
+            {"file": "t/b.test.js", "change": "bodies"},
+            {"change": "no file"}
+        ]);
+        let reach = with_loads(Reach::of(&affected(source_changed.clone())), true);
+        let said = |pairs: &[(&str, Result<&str, &'static str>)]| {
+            pairs
+                .iter()
+                .map(|(id, judgment)| ((*id).to_owned(), judgment.map(str::to_owned)))
+                .collect::<std::collections::BTreeMap<_, _>>()
         };
         assert_eq!(
-            judged(&affected),
-            [
-                said("kept", Ok("killed")),
-                said("timeout-kept", Ok("timeout")),
-                said("error", Err(ERROR_RUNS_AGAIN)),
-                said("file-changed", Err(FILE_CHANGED)),
-                said("whole-reached", Err(WHOLE_FILE_CHANGED)),
-                said("candidate-reached", Err(TEST_REACHED)),
-                said("file-mate-reached", Err(TEST_REACHED)),
-                said("new-candidate", Err(NEW_TEST)),
-                said("fileless", Ok("killed")),
-                said("failed-then", Ok("killed")),
-                said("unviable", Err(UNVIABLE_CHANGED)),
-                said("no-coverage", Err(NOT_RUN_THEN)),
-            ]
+            judged(&reach),
+            said(&[
+                ("kept", Ok("killed")),
+                ("kept-by-name", Ok("killed")),
+                ("timeout", Err(TIMEOUT_RUNS_AGAIN)),
+                ("error", Err(ERROR_RUNS_AGAIN)),
+                ("unviable", Err(UNVIABLE_CHANGED)),
+                ("no-coverage", Err(NOT_RUN_THEN)),
+                ("file-changed", Err(LOADS_CHANGED)),
+                ("sibling-changed", Ok("killed")),
+                ("whole-reached", Err(WHOLE_FILE_CHANGED)),
+                ("killer-reached", Err(TEST_REACHED)),
+                ("killer-gone", Err(KILLER_GONE)),
+                ("killer-unknown", Err(KILLER_UNKNOWN)),
+                ("killer-unnamed", Err(KILLER_UNKNOWN)),
+                ("survived-kept", Ok("survived")),
+                ("survived-new", Err(NEW_TEST)),
+                ("survived-not-run-then", Err(NEW_TEST)),
+                ("survived-unknown", Err(CANDIDATES_UNKNOWN)),
+                ("file-mate-reached", Err(TEST_REACHED)),
+                ("fileless", Err(LOADS_CHANGED)),
+                ("failed-then", Err(LOADS_CHANGED)),
+                ("loads-changed", Err(LOADS_CHANGED)),
+                ("playwright", Err(LOADS_CHANGED)),
+                ("served", Err(LOADS_CHANGED)),
+                ("directory", Err(LOADS_CHANGED)),
+                ("unrecorded", Err(LOADS_CHANGED)),
+                ("open", Err(LOADS_CHANGED)),
+                ("elsewhere", Err(LOADS_CHANGED)),
+                ("server-wide", Err(LOADS_CHANGED)),
+                ("src/c.js:5:1-5:2:M:x", Err(MOVED)),
+                ("src/b.js:9:1-9:2:M:x", Err(FILE_CHANGED)),
+            ])
         );
-        // The change reaches code the run covered: a test that failed in it
-        // could have reached it.
-        affected["beyondTheRun"] = json!(["src/b.js changed (the run covered code in it)"]);
-        assert!(judged(&affected).contains(&said("failed-then", Err(TEST_REACHED))));
-        // A run that says nothing of its tests: every candidate is new.
+        // Where only tests changed, a test whose process loads code no
+        // import says, or whose code runs elsewhere, runs as it did too.
+        let tests_only = with_loads(
+            Reach::of(&affected(json!([
+                {"file": "t/b.test.js", "change": "bodies"}
+            ]))),
+            false,
+        );
+        let judged_now = judged(&tests_only);
+        for id in [
+            "fileless",
+            "playwright",
+            "served",
+            "open",
+            "elsewhere",
+            "server-wide",
+            "loads-changed",
+            "file-changed",
+            "failed-then",
+        ] {
+            assert_eq!(judged_now[id], Ok("killed".to_owned()), "{id}");
+        }
+        // But a file its imports load that the earlier run did not record
+        // may have changed.
+        assert_eq!(judged_now["directory"], Ok("killed".to_owned()));
+        assert_eq!(judged_now["unrecorded"], Err(LOADS_CHANGED));
+        // With no record of the earlier run's files, nothing is bounded.
+        let mut unread = Reach::of(&affected(json!([])));
+        unread.loads = with_loads(Reach::default(), false).loads;
+        assert_eq!(
+            judged(&unread)["kept"],
+            Ok("killed".to_owned()),
+            "nothing changed but tests: no bound is needed"
+        );
+        let mut unread = Reach::of(&affected(json!([{"file": "src/z.js", "change": "bodies"}])));
+        unread.loads = with_loads(Reach::default(), false).loads;
+        assert_eq!(judged(&unread)["kept"], Err(LOADS_CHANGED));
+        // The change reaches code the run covered: a test that failed in it,
+        // whose process no import bounds, could have reached it.
+        let mut covered = affected(json!([{"file": "t/b.test.js", "change": "bodies"}]));
+        covered["beyondTheRun"] = json!(["t/b.test.js changed (the run covered code in it)"]);
+        assert_eq!(
+            judged(&with_loads(Reach::of(&covered), false))["failed-then"],
+            Err(TEST_REACHED)
+        );
+        // A run that says nothing of its tests: every test is new.
         assert!(
-            judged(&json!({}))
+            judged(&Reach::of(&json!({})))
                 .iter()
                 .all(|(_, judgment)| judgment.is_err())
         );
-        assert!(kept_verdicts(&[], &tests, &earlier, &Reach::of(&affected)).is_empty());
+        assert!(kept_verdicts(&[], &tests, &earlier, &matched, &reach, &then).is_empty());
         // On the files as they are, every verdict a pass reached is kept.
-        let unchanged = unchanged_verdicts(&undecided, &earlier)
+        let unchanged = unchanged_verdicts(&undecided, &earlier.mutants)
             .into_iter()
             .filter(|(_, judgment)| judgment.is_err())
             .map(|(id, judgment)| (id, judgment.map(|verdict| verdict.status)))
-            .collect::<Vec<_>>();
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(
             unchanged,
+            said(&[
+                ("error", Err(ERROR_RUNS_AGAIN)),
+                ("no-coverage", Err(NOT_RUN_THEN))
+            ])
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An earlier run's verdict and progress are found by the mutant's
+    /// anchor where both runs have one, and otherwise by its id where its
+    /// file is byte for byte as it was; on the files as they are, by its
+    /// id. Only what the earlier run has a verdict or progress for.
+    #[test]
+    fn an_earlier_verdict_is_found_by_its_mutant_s_anchor() {
+        let mutants = [
+            carry_mutant("src/a.js:5:1-5:2:M:x", "src/a.js", &[], &[]),
+            carry_mutant("src/a.js:9:1-9:2:M:x", "src/a.js", &[], &[]),
+            carry_mutant("src/b.js:1:1-1:2:M:x", "src/b.js", &[], &[]),
+            carry_mutant("src/c.js:1:1-1:2:M:x", "src/c.js", &[], &[]),
+            carry_mutant("src/d.js:1:1-1:2:M:x", "src/d.js", &[], &[]),
+        ];
+        let undecided = mutants.iter().collect::<Vec<_>>();
+        let anchors = [
+            ("src/a.js:5:1-5:2:M:x", "moved"),
+            ("src/a.js:9:1-9:2:M:x", "edited"),
+            ("src/c.js:1:1-1:2:M:x", "same"),
+        ]
+        .map(|(id, anchor)| (id.to_owned(), anchor.to_owned()))
+        .into();
+        let mut earlier = StrongVerdicts {
+            schema_version: 1,
+            run: "r1".into(),
+            mutant_set: "set".into(),
+            mutants: [
+                "src/a.js:3:1-3:2:M:x",
+                "src/a.js:9:1-9:2:M:x",
+                "src/b.js:1:1-1:2:M:x",
+                "src/c.js:1:1-1:2:M:x",
+            ]
+            .map(|id| (id.to_owned(), carry_verdict("killed", None)))
+            .into(),
+            progress: [(
+                "src/d.js:1:1-1:2:M:x".to_owned(),
+                BTreeSet::from(["t".to_owned()]),
+            )]
+            .into(),
+            lived: Default::default(),
+            anchors: [
+                ("src/a.js:3:1-3:2:M:x", "moved"),
+                ("src/a.js:9:1-9:2:M:x", "before"),
+            ]
+            .map(|(id, anchor)| (id.to_owned(), anchor.to_owned()))
+            .into(),
+            carried: Default::default(),
+        };
+        let reach = Reach::of(&json!({"changedFiles": [
+            {"file": "src/a.js", "change": "formatting"},
+            {"file": "src/b.js", "change": "bodies"}
+        ]}));
+        let pairs = |found: std::collections::BTreeMap<String, String>| {
+            found.into_iter().collect::<Vec<_>>()
+        };
+        let pair = |now: &str, then: &str| (now.to_owned(), then.to_owned());
+        // Moved by two lines: its anchor finds it. Edited in its own
+        // declaration: neither its anchor nor its id, its file having
+        // changed. A file as it was: by its id, with no anchor then.
+        assert_eq!(
+            pairs(matched(&undecided, &anchors, &earlier, Some(&reach))),
             [
-                said("error", Err(ERROR_RUNS_AGAIN)),
-                said("no-coverage", Err(NOT_RUN_THEN))
+                pair("src/a.js:5:1-5:2:M:x", "src/a.js:3:1-3:2:M:x"),
+                pair("src/c.js:1:1-1:2:M:x", "src/c.js:1:1-1:2:M:x"),
+                pair("src/d.js:1:1-1:2:M:x", "src/d.js:1:1-1:2:M:x"),
+            ]
+        );
+        // On the files as they are: each by its id.
+        assert_eq!(
+            pairs(matched(&undecided, &anchors, &earlier, None)),
+            [
+                pair("src/a.js:9:1-9:2:M:x", "src/a.js:9:1-9:2:M:x"),
+                pair("src/b.js:1:1-1:2:M:x", "src/b.js:1:1-1:2:M:x"),
+                pair("src/c.js:1:1-1:2:M:x", "src/c.js:1:1-1:2:M:x"),
+                pair("src/d.js:1:1-1:2:M:x", "src/d.js:1:1-1:2:M:x"),
+            ]
+        );
+        // An earlier run with no anchors: ids alone, where files are as they
+        // were.
+        earlier.anchors.clear();
+        assert_eq!(
+            pairs(matched(&undecided, &anchors, &earlier, Some(&reach))),
+            [
+                pair("src/c.js:1:1-1:2:M:x", "src/c.js:1:1-1:2:M:x"),
+                pair("src/d.js:1:1-1:2:M:x", "src/d.js:1:1-1:2:M:x"),
             ]
         );
     }
 
-    /// A pass is kept candidate by candidate. After an edit: on the rules
-    /// verdicts are kept by, the candidate a change reached loses its pass
-    /// and the others keep theirs; a test that is no candidate now lends
-    /// nothing, nor a mutant whose file changed. On the files as they are,
-    /// every pass of a test that is a candidate still. Never a mutant that
-    /// runs a test file whole under a runner that does not run its
-    /// candidates one by one.
+    /// A pass is kept candidate by candidate, found as its verdict would be.
+    /// After an edit: on the rules verdicts are kept by, the candidate a
+    /// change reached loses its pass and the others keep theirs; a test that
+    /// is no candidate now lends nothing, nor a mutant whose file's code
+    /// changed. On the files as they are, every pass of a test that is a
+    /// candidate still. Never a mutant that runs a test file whole under a
+    /// runner that does not run its candidates one by one.
     #[test]
     fn a_pass_is_kept_candidate_by_candidate() {
-        use supercov_engine::strong_plan::{Candidate, CandidateReason, PlannedTest};
-        let test = |file: &str, name: &str| PlannedTest {
-            id: name.into(),
-            file: Some(file.into()),
-            name: name.into(),
-            title: None,
-            runner: "jest".into(),
-            duration_ms: None,
-            span: None,
-            runnable: true,
-            failed: false,
-        };
         let tests = vec![
-            test("t/a.test.js", "a1"),
-            test("t/b.test.js", "b1"),
-            test("t/c.test.js", "c1"),
-            test("t/n.test.js", "new"),
+            carry_test("t/a.test.js", "a1", "jest"),
+            carry_test("t/b.test.js", "b1", "jest"),
+            carry_test("t/c.test.js", "c1", "jest"),
+            carry_test("t/n.test.js", "new", "jest"),
         ];
-        let mutant = |id: &str, file: &str, candidates: &[usize], whole: &[&str]| {
-            let mut planned = plan_of(&[], &["infected"]).mutants.remove(0);
-            planned.id = id.into();
-            planned.file = file.into();
-            planned.candidates = candidates
-                .iter()
-                .map(|test| Candidate {
-                    test: *test,
-                    reason: CandidateReason::Infected,
-                })
-                .collect();
-            planned.whole_files = whole.iter().map(|file| (*file).to_owned()).collect();
-            planned
-        };
         let mutants = [
-            mutant("partial", "src/a.js", &[0, 1], &[]),
-            mutant("never-run", "src/a.js", &[0], &[]),
-            mutant("file-changed", "src/b.js", &[0], &[]),
-            mutant("whole", "src/a.js", &[0], &["t/a.test.js"]),
-            mutant("new-candidate", "src/a.js", &[3], &[]),
-            mutant("untouched", "src/a.js", &[2], &[]),
+            carry_mutant("partial", "src/a.js", &[0, 1], &[]),
+            carry_mutant("never-run", "src/a.js", &[0], &[]),
+            carry_mutant("file-changed", "src/b.js", &[0], &[]),
+            carry_mutant("whole", "src/a.js", &[0], &["t/a.test.js"]),
+            carry_mutant("new-candidate", "src/a.js", &[3], &[]),
+            carry_mutant("untouched", "src/a.js", &[2], &[]),
+            carry_mutant("unmatched", "src/a.js", &[0], &[]),
         ];
         let undecided = mutants.iter().collect::<Vec<_>>();
         let passed = |of: &[(&str, &[&str])]| -> Passed {
@@ -3880,32 +4661,69 @@ mod tests {
                 .map(|(id, tests)| {
                     (
                         (*id).to_owned(),
-                        tests.iter().map(|test| (*test).to_owned()).collect(),
+                        tests.iter().map(|test| format!("id:{test}")).collect(),
                     )
                 })
                 .collect()
         };
         let earlier = passed(&[
-            ("partial", &["a1", "b1"]),
+            ("partial-then", &["a1", "b1"]),
             ("never-run", &["a1", "gone"]),
             ("file-changed", &["a1"]),
             ("whole", &["a1"]),
             ("new-candidate", &["new"]),
+            ("unmatched", &["a1"]),
         ]);
-        let reach = Reach::of(&json!({
+        let matched = [
+            ("partial", "partial-then"),
+            ("never-run", "never-run"),
+            ("file-changed", "file-changed"),
+            ("whole", "whole"),
+            ("new-candidate", "new-candidate"),
+        ]
+        .map(|(now, then)| (now.to_owned(), then.to_owned()))
+        .into();
+        let mut reach = Reach::of(&json!({
             "affected": [{"file": "t/b.test.js", "name": "b1"}],
             "unaffected": [
                 {"file": "t/a.test.js", "name": "a1"},
                 {"file": "t/c.test.js", "name": "c1"}
             ],
-            "changedFiles": [{"file": "src/b.js"}],
+            "changedFiles": [{"file": "src/b.js", "change": "bodies"}],
         }));
+        reach.loads = [(
+            "t/a.test.js".to_owned(),
+            loads(&["t/a.test.js", "src/a.js"]),
+        )]
+        .into();
+        // The files the test loads, as the earlier run recorded them.
+        let root = std::env::temp_dir().join(format!("carry-progress-{}", std::process::id()));
+        let files = [
+            ("t/a.test.js", "a();\n"),
+            ("src/a.js", "export function a() {}\n"),
+        ];
+        for (file, text) in files {
+            std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            std::fs::write(root.join(file), text).unwrap();
+        }
+        reach.program = Some(supercov_engine::strong_reach::Program::new(
+            root.clone(),
+            files
+                .iter()
+                .map(|(file, text)| {
+                    (
+                        (*file).to_owned(),
+                        supercov_engine::source_manifest::FileFingerprint::read(file, text),
+                    )
+                })
+                .collect(),
+        ));
         assert_eq!(
-            kept_progress(&undecided, &tests, &earlier, Some(&reach)),
+            kept_progress(&undecided, &tests, &earlier, &matched, Some(&reach)),
             passed(&[("never-run", &["a1"]), ("partial", &["a1"])])
         );
         assert_eq!(
-            kept_progress(&undecided, &tests, &earlier, None),
+            kept_progress(&undecided, &tests, &earlier, &matched, None),
             passed(&[
                 ("file-changed", &["a1"]),
                 ("never-run", &["a1"]),
@@ -3913,6 +4731,78 @@ mod tests {
                 ("partial", &["a1", "b1"]),
             ])
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// What a pass kept is said with each run's commit, how many each gave
+    /// where several gave some, and what reaching them took.
+    #[test]
+    fn kept_verdicts_are_said_with_their_runs_and_commits() {
+        let kept = |run: &str, commit: Option<&str>, ids: &[&str], tests: u64| KeptFrom {
+            run: run.into(),
+            commit: commit.map(str::to_owned),
+            verdicts: ids
+                .iter()
+                .map(|id| {
+                    let mut verdict = carry_verdict("killed", None);
+                    verdict.tests = tests;
+                    ((*id).to_owned(), verdict)
+                })
+                .collect(),
+        };
+        let carried = Carried {
+            from: vec![
+                kept("r2", Some("0123456789abcdef"), &["a", "b"], 3),
+                kept("r1", None, &["c"], 4),
+            ],
+            not_kept: [(TIMEOUT_RUNS_AGAIN, 1)].into(),
+            ..Carried::default()
+        };
+        let data = carried_json(&carried);
+        assert_eq!(
+            data,
+            json!({
+                "from": ["r2", "r1"],
+                "runs": [
+                    {"run": "r2", "commit": "0123456789abcdef", "mutants": 2},
+                    {"run": "r1", "commit": null, "mutants": 1}
+                ],
+                "mutants": 3,
+                "testRuns": 10,
+                "unchanged": false,
+                "notKept": {"timeout": 1},
+            })
+        );
+        let summary = json!({"killed": 3, "timeout": 0, "survived": 0, "noCoverage": 0,
+            "equivalent": 0, "error": 0, "unviable": 0, "ran": 0, "durationMs": 5,
+            "mutationScore": 1.0});
+        let text = plan_text(&json!({"run": "r3", "summary": summary, "carried": data}));
+        assert!(
+            text.contains("  3 verdict(s) kept from 2 runs, 2 from run r2 (commit 0123456), 1 from run r1, which took 10 test run(s) to reach: nothing they depend on changed\n")
+                && text.contains("  1 earlier verdict(s) not kept, so run again: 1 timed out, which runs again after an edit: a time limit is the new run's\n"),
+            "{text}"
+        );
+        assert_eq!(short_commit("abc"), "abc");
+        // Kept verdicts no test run reached (a plan's), and every reason
+        // the rest run again.
+        let reasons = [
+            MOVED,
+            LOADS_CHANGED,
+            KILLER_GONE,
+            KILLER_UNKNOWN,
+            CANDIDATES_UNKNOWN,
+        ];
+        let text = plan_text(&json!({"run": "r3", "summary": summary, "carried": {
+            "runs": [{"run": "r2", "mutants": 1}], "mutants": 1, "testRuns": 0,
+            "notKept": reasons.iter().map(|reason| (*reason, 1)).collect::<std::collections::BTreeMap<_, _>>(),
+        }}));
+        assert!(
+            text.contains("  1 verdict(s) kept from run r2: nothing they depend on changed\n"),
+            "{text}"
+        );
+        for reason in reasons {
+            assert!(text.contains(not_kept_said(reason)), "{reason}: {text}");
+        }
     }
 
     /// A pass that resumes mutants says so as it starts (the median

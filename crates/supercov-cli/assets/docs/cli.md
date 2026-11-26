@@ -585,11 +585,15 @@ phpunit`). See `docs/design/strong-mutation.md`,
   mutant is a `timeout`. `SUPERCOV_STRONG_TIMEOUT_FACTOR` sets it where the
   option is not given.
 - After an edit, `supercov mutants` measures the checkout again and keeps an
-  earlier run's verdict for each mutant whose file is as it was and whose
-  candidate tests, and their test files, nothing changed could reach (as
-  `tests affected` reads a change: a test file's edit reaches its tests, a
-  source's edit the tests that ran the changed code). The rest run; the
-  summary says how many verdicts were kept, and from which run.
+  earlier run's verdict for each mutant nothing changed could move: found by
+  its code, not its line; a kill where the test that killed it still reaches
+  it and runs as it did, a survival where every candidate now ran with it
+  then and runs as it did, a test running as it did where nothing it could
+  run with the mutant switched on changed (`docs/design/strong-mutation.md`,
+  "After an edit"). Timeouts and errors run again. The rest run; the summary
+  says how many verdicts were kept, from which runs and commits, and why the
+  others run, and `runs <id> mutants` says where each kept verdict was
+  reached (`carried from run r5 (commit 1a2b3c4)`).
 - `--diff` and `--file` answer about the mutants they ask for: the summary's
   counts and score are theirs, and its first line says how many of the run's
   mutants that is. `--format markdown` (with `--output <file>`) writes the

@@ -233,6 +233,26 @@ pub struct StrongVerdicts {
     /// whose progress a budget cut short is open, not one of these.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub lived: std::collections::BTreeSet<String>,
+    /// Each verdict's anchor (`strong_anchors`): what its mutant is by its
+    /// code, which a later pass finds it by after an edit moved its lines.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub anchors: BTreeMap<String, String>,
+    /// The verdicts a pass kept from an earlier run rather than reached
+    /// (`docs/design/strong-mutation.md`, "After an edit"), by mutant id:
+    /// the run that reached each, and its commit.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub carried: BTreeMap<String, CarriedFrom>,
+}
+
+/// The run that reached a verdict a later run kept, and the commit it
+/// measured where git said: the first run of a chain of keeps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CarriedFrom {
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// A mutant's candidate tests that passed with it, by mutant id: what

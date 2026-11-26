@@ -194,20 +194,36 @@ mutants the tests let survive.
   code, which those are. A test that failed in the baseline is no candidate.
   It needs a merged run made by this release, which keeps what its runs
   answer with.
-- **After an edit.** It measures the checkout again and keeps an earlier
-  verdict for each mutant whose file is as it was and whose candidate tests,
-  and their test files, nothing changed could reach, as `runs latest tests
-  affected` reads a change: a test file's edit reaches its tests, a source's
-  edit the tests that ran the changed code. Each mutant's verdict comes from
-  the newest earlier run of the same command, dependencies and configuration
-  that holds one it can keep, so a pass split across jobs, each holding part
-  of the verdicts in its own run, is kept whole. A test that failed in the
-  earlier run counts as reached only where the change reaches code that run
-  covered. The rest run, and the summary says how many verdicts were kept and
-  from which runs (`193 verdict(s) kept from runs r2, r1: nothing they depend
-  on changed`), and how many were not, by why (`6 earlier verdict(s) not kept,
-  so run again: 4 their file changed, 2 a test that could kill them could
-  reach a change`). An error is never kept: it runs again.
+- **After an edit.** A new commit runs only the mutants whose verdict could
+  have changed. `supercov mutants` measures the checkout again and keeps an
+  earlier run's verdict for each mutant where nothing it depends on changed;
+  the earlier runs are those of the same command, dependencies and
+  configuration in `.supercov/runs` (a baseline restored there among them),
+  newest first, so a pass split across jobs, each holding part of the
+  verdicts in its own run, is kept whole. A verdict is found by its mutant's
+  code, not its line: a line added above a function keeps its mutants'
+  verdicts. A kill is kept where the test that killed it still reaches the
+  mutated code and runs as it did; a survival where every candidate test it
+  has now ran with it then and runs as it did; a timeout, an error, a kill
+  no record names a test for, and a mutant whose own declaration changed run
+  again. A test runs as it did where nothing changed that it could run with
+  the mutant switched on, which may be code it never ran without (a function
+  no test calls that a mutant sends a test into counts): for a JavaScript or
+  TypeScript test run in its runner's process (Jest, Vitest, Mocha, ...),
+  nothing its imports load and its code can name; for a Python or Ruby test,
+  no code its imports load; for any other (a Playwright test, a mutant a
+  server starts with), `runs latest tests affected` finds it unaffected and
+  no code but tests' changed. The summary says how many verdicts were kept,
+  from which runs and commits (`26 verdict(s) kept from run r5 (commit
+  1a2b3c4), which took 25 test run(s) to reach: nothing they depend on
+  changed`), and
+  how many were not, by why (`13 earlier verdict(s) not kept, so run again:
+  13 a test that could kill them loads code that changed, which they could
+  lead it into`); `runs <id> mutants` says where each kept verdict was
+  reached (`carried from run r5 (commit 1a2b3c4)`). On a fixture's eight
+  commits it ran 72 mutants where passes from nothing ran 201, every verdict
+  the same; `docs/design/strong-mutation.md` ("After an edit") has the rules
+  and why they hold.
 - **Interrupted.** Each verdict is saved as it is made. A pass stopped by
   Ctrl-C, a killed job or a test worker that never ended keeps what it
   decided, and the next pass runs only the rest. Sent SIGINT or SIGTERM, the

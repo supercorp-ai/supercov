@@ -140,6 +140,11 @@ type CandidateMutant, written and read = closed {
   logOnly?: boolean
 }
 
+type CarriedFrom, written and read = {
+  run: string
+  commit?: string | null
+}
+
 type ChainLink, written and read = closed {
   id: string
   earlier?: [string]
@@ -709,6 +714,8 @@ type StrongVerdicts, written and read = {
   mutants: {string: Verdict}
   progress?: {string: [string]}
   lived?: [string]
+  anchors?: {string: string}
+  carried?: {string: CarriedFrom}
 }
 
 type StructuralSource, written and read = "owned-probes" | "native-import" | "mixed"
