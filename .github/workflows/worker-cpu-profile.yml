@@ -65,6 +65,13 @@ jobs:
           path: binaries
       - run: chmod +x binaries/*/supercov
       - run: npx -y playwright@1.49.1 install-deps chromium
+      # samply, for a native profile of the Supercov process of each measured run.
+      - continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/samply"
+          curl -fsSL https://github.com/mstange/samply/releases/download/samply-v0.13.1/samply-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C "$RUNNER_TEMP/samply"
+          echo "SPEED_SAMPLY=$(find "$RUNNER_TEMP/samply" -name samply -type f | head -1)" >> "$GITHUB_ENV"
+          sudo sysctl kernel.perf_event_paranoid=1
       - name: Measure
         timeout-minutes: 8
         env:
@@ -100,4 +107,5 @@ jobs:
             ${{ runner.temp }}/speed/profile.md
             ${{ runner.temp }}/speed/profile-*.txt
             ${{ runner.temp }}/speed/logs/
+            ${{ runner.temp }}/speed/samply-*
           retention-days: 7
