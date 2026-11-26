@@ -24,6 +24,29 @@ permissions:
   id-token: write
 
 jobs:
+  # Nothing is published that did not pass both tiers in full: the `Fast
+  # tier` and `Slow tier` statuses GitHub Actions posted, each saying "Passed
+  # in full", on this commit or on another of the same tree -- the release
+  # pull request's head, whose squash merge this is. Its results stand for
+  # this tree, and nothing runs again on main. With none, nothing is
+  # published (scripts/ci-tiers.mjs verify-release says what is missing).
+  verified:
+    name: Both tiers passed on this tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - run: node scripts/ci-tiers.mjs verify-release "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   # The release pull request built this tree's native matrix while its CI ran
   # (release-native.yml); a squash merge leaves main with that tree. A run of
   # it that succeeded on the same tree is reused, and nothing is built again.
@@ -59,7 +82,7 @@ jobs:
           echo "No release pull request built this tree ($tree)."
 
   native-artifacts:
-    needs: prebuilt
+    needs: [verified, prebuilt]
     uses: ./.github/workflows/native-artifacts.yml
     with:
       build-targets: ${{ inputs.reuse-run-id == '' && needs.prebuilt.outputs.run-id == '' && inputs.rebuild-native }}

@@ -18,10 +18,12 @@
 //     summary. The directory holds the answer: affected.json (`--json`),
 //     names.txt (`--names`) and files.txt (`--files`). Without it, or with an
 //     answer that cannot be trusted, every job runs in full.
-//   node scripts/ci-affected.mjs nextest <selection.json> <nextest-list.json>
+//   node scripts/ci-affected.mjs nextest <selection.json> <nextest-list.json> [<part> <parts> [--all]]
 //     The nextest filter for a partial run: the affected tests and every test
 //     in a file the pull request changed (new ones), as a profile appended to
-//     .config/nextest.toml. Prints how many tests it picked.
+//     .config/nextest.toml (or to a copy of it named by NEXTEST_CONFIG_OUT).
+//     With a part, only that part's share of them, dealt by their recorded
+//     seconds; with --all, a share of every test. Prints how many it picked.
 //   node scripts/ci-affected.mjs cargo-test <selection.json> <slice> <slices>
 //     A partial Self Coverage slice's `cargo test` filter: its share of the
 //     affected tests, by their recorded seconds.
@@ -33,8 +35,10 @@
 //     (`supercov runs <id> gaps --format jsonl`); exits 1 when there is one.
 //
 // Context comes from the environment GitHub Actions sets, plus CHANGED (a
-// file listing the pull request's changed paths, one per line) and
-// MAP_REASON (why there is no map, where there is none).
+// file listing the pull request's changed paths, one per line), MAP_REASON
+// (why there is no map, where there is none) and CI_TEST_SECONDS (the test
+// seconds of main's newest Self Coverage run, which outrank the committed
+// .github/test-seconds.tsv; .github/actions/affected fetches them).
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -55,6 +59,7 @@ const RUNS_EVERYTHING = [
   '.config/**',
   'scripts/ci-affected.mjs',
   'scripts/engine-integrations-group.mjs',
+  'scripts/ci-tiers.mjs',
 ];
 
 /** `**` any depth, `*` within one path segment. */
@@ -81,6 +86,8 @@ function changedFiles() {
 // A pull request labelled for it runs every job on every platform, as a
 // release pull request does.
 export const FULL_LABEL = 'full-ci';
+// The label that asks for the slow tier on a pull request ready to merge.
+export const READY_LABEL = 'ready';
 // What a corpus pull request changes: the compatibility corpus's records. Its
 // check is the workspace's `compat` tests, on Linux.
 const CORPUS = ['tests/compat/**'];
@@ -95,8 +102,10 @@ export function triage(name = process.env.GITHUB_EVENT_NAME, payload = event(), 
   }
   const pull = payload.pull_request ?? {};
   // A label that asks this workflow for nothing is a run of its own: it runs
-  // nothing, and the run of the push goes on.
-  const asks = workflow === 'self-coverage' ? [FULL_LABEL, 'self-coverage', 'self-coverage-macos'] : [FULL_LABEL];
+  // nothing, and the run of the push goes on. The slow tier's workflows run
+  // when the slow tier calls them, which the `ready` label does
+  // (scripts/ci-tiers.mjs); CI, the fast tier, ran on the push already.
+  const asks = workflow === 'ci' || workflow === '' ? [FULL_LABEL] : [FULL_LABEL, READY_LABEL];
   if (payload.action === 'labeled' && !asks.includes(payload.label?.name)) {
     return { platforms: 'linux', mode: 'skip', reason: `the label ${payload.label?.name} asks for nothing here` };
   }
@@ -255,17 +264,51 @@ export function testsInFiles(changed, readFile = read) {
   return [...names];
 }
 
-/** Seconds each test or gate took in Self Coverage, where recorded. */
-function seconds() {
+/**
+ * Seconds each test or gate took in Self Coverage, where recorded: the larger
+ * of its seconds and its processor seconds. Those of main's newest run
+ * (CI_TEST_SECONDS, where the plan found them) outrank the committed ones,
+ * which go stale as tests are added and grow.
+ */
+export function seconds(fresh = process.env.CI_TEST_SECONDS) {
   const table = new Map();
-  for (const path of ['.github/test-seconds.tsv', '.github/gate-seconds.tsv']) {
-    for (const line of read(path).split('\n')) {
+  const add = (text, replace) => {
+    for (const line of text.split('\n')) {
       if (!line || line.startsWith('#')) continue;
       const [name, wall, cpu] = line.split('\t');
-      table.set(name, Math.max(Number(wall) || 0, Number(cpu) || 0, table.get(name) ?? 0));
+      const cost = Math.max(Number(wall) || 0, Number(cpu) || 0);
+      table.set(name, replace ? cost : Math.max(cost, table.get(name) ?? 0));
     }
-  }
+  };
+  for (const path of ['.github/test-seconds.tsv', '.github/gate-seconds.tsv']) add(read(path), false);
+  if (fresh && existsSync(fresh)) add(readFileSync(fresh, 'utf8'), true);
   return table;
+}
+
+/** A test's nextest seconds: about half its Self Coverage seconds. */
+const nextestSeconds = (timing, name) => (timing.has(name) ? timing.get(name) / 2 : UNTIMED_SECONDS);
+
+/** How many parts of CI's check job hold these tests at a few minutes each. */
+export function partsFor(names, timing = seconds()) {
+  const total = [...new Set(names)].reduce((sum, name) => sum + nextestSeconds(timing, name), 0);
+  return Math.max(1, Math.min(MAX_PARTS, Math.ceil(total / PART_SECONDS)));
+}
+
+/**
+ * Items dealt into `parts` piles of about equal cost: dearest first, each to
+ * the lightest pile (ties by key, so every job deals the same). The first
+ * pile may start with a head start of cost. Returns the piles' items.
+ */
+export function deal(items, parts, headStart = 0) {
+  const loads = Array.from({ length: parts }, (_, index) => (index === 0 && parts > 1 ? headStart : 0));
+  const piles = Array.from({ length: parts }, () => []);
+  const sorted = [...items].sort((a, b) => b.cost - a.cost || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  for (const item of sorted) {
+    const lightest = loads.indexOf(Math.min(...loads));
+    loads[lightest] += item.cost;
+    piles[lightest].push(item);
+  }
+  return piles;
 }
 
 /**
@@ -324,19 +367,21 @@ const LINUX = 'ubuntu-latest';
 
 const WORKFLOWS = {
   ci: {
-    // A pull request's affected tests run on one Node (24); every Node runs
-    // them all on a release, main and `full-ci`.
-    check: { nextest: true, paths: TOOLING, matrix: (partial) => ({ node: partial ? [24] : [22, 24, 25], part: partial ? [1] : [1, 2] }) },
+    // A pull request's affected tests run on one Node (24), in as many parts
+    // as keep each to a few minutes, dealt by their recorded seconds; every
+    // Node runs them all on a release, main and `full-ci`, in three parts.
+    check: {
+      nextest: true,
+      shards: true,
+      paths: TOOLING,
+      matrix: (partial, parts = 1) => ({ node: partial ? [24] : [22, 24, 25], part: Array.from({ length: partial ? parts : FULL_PARTS }, (_, index) => index + 1) }),
+    },
     'bun-bootstrap': { os: ['ubuntu-latest', 'macos-latest'], tests: (name, files) => files.has('crates/supercov-cli/tests/cli.rs') && name.startsWith('bun_') },
     'launch-arguments': { os: ['ubuntu-latest', 'macos-latest', 'windows-latest'], gates: ['rust_direct_node', 'node_test', 'rust_direct_vitest', 'rust_direct_jest'], paths: LAUNCHERS },
     lint: { paths: ['**/*.rs', 'Cargo.toml', 'Cargo.lock', '**/Cargo.toml', 'clippy.toml', 'rustfmt.toml', '.rustfmt.toml'] },
     'engine-integrations': { engineIntegrations: true },
-    'release-gates': {
-      gates: ['watchdog', 'engine_contract', 'agent_query_eval', 'rust_child_attribution', 'rust_host_loader'],
-      paths: ['packaging/**', 'npm/**', 'bin/**', 'Cargo.toml', 'scripts/native-*.mjs', 'scripts/packed-npx-integration.mjs',
-        'scripts/rust-transform-benchmark.mjs', 'crates/supercov-engine/src/js_*.rs', 'crates/supercov-engine/src/javascript*.rs',
-        'crates/supercov-engine/runtime-assets/javascript/**', 'tests/fixtures/no-build-node/**'],
-    },
+    // The release gates (a release build, the packed install, the benchmark
+    // against the last release) are the slow tier's: release-gates.yml.
     // Apple clang's own MC/DC is its oracle, so it runs on macOS alone: on a
     // pull request, only when its own files change.
     'clang-mcdc-oracle': { os: ['macos-latest'], ownPlatform: true, paths: ['scripts/clang-mcdc-oracle.mjs', 'tests/fixtures/clang-mcdc/**'] },
@@ -385,6 +430,20 @@ const WORKFLOWS = {
 
 const SLICE_SECONDS = 900;
 const MAX_SLICES = 10;
+// CI's check job: a part's share of the tests, in nextest seconds, which are
+// about half of Self Coverage's (no instrumentation): some three minutes on
+// the runner's four processors. Every Node runs every test in three parts.
+const PART_SECONDS = 700;
+const MAX_PARTS = 6;
+const FULL_PARTS = 3;
+// A test no run has timed, in nextest seconds.
+const UNTIMED_SECONDS = 3;
+// The first part also runs the doctests and the tooling checks, about two
+// and a half minutes on four processors: it starts with that much.
+const FIRST_PART_HEAD_START = 500;
+// Engine integrations: a group's share of the affected scripts, in seconds.
+const GROUP_SECONDS = 420;
+const MAX_GROUPS = 6;
 
 /** Each job of `workflow`: whether it runs, its matrix, why, and the tests of a partial one. */
 export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map', reason: '' }, changed = changedFiles() ?? []) {
@@ -418,12 +477,12 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       const check = name === 'check';
       if (check) selection.binaries = ['compat'];
       jobs[name] = check
-        ? { run: true, mode: 'partial', why: mode.reason, matrix: spec.matrix(true) }
+        ? { run: true, mode: 'partial', why: mode.reason, matrix: spec.matrix(true), parts: 1 }
         : { run: false, mode: 'skip', why: mode.reason, matrix: spec.matrix?.(true), os };
       continue;
     }
     if (everything) {
-      jobs[name] = { run: true, mode: 'full', why: `${why}${mode.platforms === 'linux' && spec.os ? ' (Linux: a pull request runs no other platform)' : ''}`, matrix: fullMatrix(spec), os };
+      jobs[name] = { run: true, mode: 'full', why: `${why}${mode.platforms === 'linux' && spec.os ? ' (Linux: a pull request runs no other platform)' : ''}`, matrix: fullMatrix(spec), os, ...(spec.shards ? { parts: FULL_PARTS } : {}) };
       continue;
     }
     const reasons = [];
@@ -442,9 +501,12 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       const rustChanged = changed.some((file) => file.endsWith('.rs'));
       if (ownTests) reasons.push(`${unit.length} workspace test(s) affected`);
       else if (rustChanged) reasons.push('Rust changed: tests new since the map run');
+      // As many parts as hold the affected tests and the ones written in
+      // the changed files at a few minutes each.
+      const parts = spec.shards ? partsFor([...unit, ...testsInFiles(changed)], timing) : 1;
       jobs[name] = reasons.length === 0
         ? { run: false, mode: 'skip', why: 'none of its tests is affected', matrix: spec.matrix(true) }
-        : { run: true, mode: 'partial', why: reasons.join('; '), matrix: spec.matrix(true) };
+        : { run: true, mode: 'partial', why: `${reasons.join('; ')}${parts > 1 ? `; in ${parts} parts` : ''}`, matrix: spec.matrix(true, parts), parts };
       continue;
     }
     if (spec.engineIntegrations) {
@@ -458,7 +520,7 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
         continue;
       }
       const total = picked.reduce((sum, command) => sum + (timing.get(byCommand.get(command)) ?? 60), 0);
-      const groups = Math.max(1, Math.min(4, Math.ceil(total / 600)));
+      const groups = Math.max(1, Math.min(MAX_GROUPS, Math.ceil(total / GROUP_SECONDS)));
       selection.scripts = picked;
       jobs[name] = {
         run: true,
@@ -553,27 +615,39 @@ function sourceFiles(suite, name, root) {
 /**
  * A nextest filter for a partial run: the affected tests, and every test in
  * a file the pull request changed -- a test added since the map is in one,
- * and the map cannot name it.
+ * and the map cannot name it. With `part` of `parts`, that part's share of
+ * them, dealt by their recorded seconds so the parts take about as long;
+ * with `all`, a share of every test.
  */
-export function nextestFilter(selection, listing, root = repository) {
+export function nextestFilter(selection, listing, root = repository, { part = 1, parts = 1, all = false, timing } = {}) {
   const wanted = new Set(selection.names);
   const changed = new Set(selection.changed);
   const binaries = new Set(selection.binaries ?? []);
-  const terms = [];
-  let picked = 0;
+  const chosen = [];
+  const sizes = new Map();
   for (const [binary, suite] of Object.entries(listing['rust-suites'] ?? {})) {
     const cases = Object.entries(suite.testcases ?? {}).filter(([, test]) => !test.ignored);
-    const whole = binaries.has(suite['binary-name']);
-    const chosen = cases
-      .filter(([name]) => whole || wanted.has(name) || sourceFiles(suite, name, root).some((file) => changed.has(file)))
-      .map(([name]) => name);
-    if (chosen.length === 0) continue;
-    picked += chosen.length;
-    terms.push(chosen.length === cases.length
-      ? `binary_id(${binary})`
-      : `(binary_id(${binary}) & (${chosen.map((name) => `test(=${name})`).join(' | ')}))`);
+    sizes.set(binary, cases.length);
+    const whole = all || binaries.has(suite['binary-name']);
+    for (const [name] of cases) {
+      if (whole || wanted.has(name) || sourceFiles(suite, name, root).some((file) => changed.has(file))) chosen.push({ binary, name });
+    }
   }
-  return { expression: terms.join(' | '), picked };
+  let mine = chosen;
+  if (parts > 1) {
+    const table = timing ?? seconds();
+    const items = chosen.map((test) => ({ ...test, key: `${test.binary} ${test.name}`, cost: nextestSeconds(table, test.name) }));
+    mine = deal(items, parts, FIRST_PART_HEAD_START)[part - 1];
+  }
+  const byBinary = new Map();
+  for (const test of mine) byBinary.set(test.binary, [...(byBinary.get(test.binary) ?? []), test.name]);
+  const terms = [];
+  for (const [binary, names] of [...byBinary].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    terms.push(names.length === sizes.get(binary)
+      ? `binary_id(${binary})`
+      : `(binary_id(${binary}) & (${names.sort().map((name) => `test(=${name})`).join(' | ')}))`);
+  }
+  return { expression: terms.join(' | '), picked: mine.length, of: chosen.length };
 }
 
 /** The tests of one slice of a partial Self Coverage run, dealt by seconds. */
@@ -649,10 +723,14 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${report.join('\n')}\n`);
     process.exit(gaps.length === 0 ? 0 : 1);
   } else if (command === 'nextest') {
-    const [selectionPath, listingPath] = rest;
-    const { expression, picked } = nextestFilter(JSON.parse(readFileSync(selectionPath, 'utf8')), JSON.parse(readFileSync(listingPath, 'utf8')));
-    appendFileSync(resolve(repository, '.config/nextest.toml'), `\n[profile.affected]\ndefault-filter = '''${expression || 'none()'}'''\n`);
-    console.log(`[ci-affected] ${picked} test(s) picked`);
+    const all = rest.includes('--all');
+    const [selectionPath, listingPath, part = '1', parts = '1'] = rest.filter((word) => word !== '--all');
+    const { expression, picked, of } = nextestFilter(JSON.parse(readFileSync(selectionPath, 'utf8')), JSON.parse(readFileSync(listingPath, 'utf8')), repository, { part: Number(part), parts: Number(parts), all });
+    const config = resolve(repository, '.config/nextest.toml');
+    const out = process.env.NEXTEST_CONFIG_OUT ? resolve(process.env.NEXTEST_CONFIG_OUT) : config;
+    if (out !== config) writeFileSync(out, readFileSync(config, 'utf8'));
+    appendFileSync(out, `\n[profile.affected]\ndefault-filter = '''${expression || 'none()'}'''\n`);
+    console.log(`[ci-affected] ${picked} test(s) picked${Number(parts) > 1 ? ` for part ${part} of ${parts} (${of} in all)` : ''}`);
   } else if (command === 'tests-in') {
     // The tests a Self Coverage run of a pull request measures beside the
     // affected ones: those written in the files named.
@@ -662,7 +740,7 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     const names = sliceTests(JSON.parse(readFileSync(selectionPath, 'utf8')), Number(slice), Number(slices));
     console.log(names.length > 0 ? names.join(' ') : 'no_test_was_dealt_to_this_slice');
   } else {
-    console.error('usage: ci-affected.mjs triage | plan <workflow> [answer directory] | nextest <selection.json> <list.json> | cargo-test <selection.json> <slice> <slices> | tests-in <file>... | changed-gaps <base> <gaps.jsonl>...');
+    console.error('usage: ci-affected.mjs triage | plan <workflow> [answer directory] | nextest <selection.json> <list.json> [<part> <parts> [--all]] | cargo-test <selection.json> <slice> <slices> | tests-in <file>... | changed-gaps <base> <gaps.jsonl>...');
     process.exit(2);
   }
 }

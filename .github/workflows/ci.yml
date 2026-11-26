@@ -1,10 +1,15 @@
 name: CI
 
+# The fast tier: every push to a pull request, drafts included, says in about
+# ten minutes whether its build, lint and affected tests pass, as the `Fast
+# tier` status. The slow tier (slow-tier.yml: Self Coverage, Compatibility,
+# React, Next.js and the release gates) runs once the pull request is ready.
+# CONTRIBUTING.md says how each is asked for.
 on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated jobs to run (check, bun-bootstrap, launch-arguments, lint, engine-integrations, release-gates, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm). Empty runs them all."
+        description: "Comma-separated jobs to run (check, bun-bootstrap, launch-arguments, lint, engine-integrations, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm). Empty runs them all."
         default: ""
         type: string
   # The gate every change is expected to pass, on the change itself. It ran
@@ -16,6 +21,12 @@ on:
   # platform (scripts/ci-affected.mjs).
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  # The fast tier each night on main, every job on every platform: a gate
+  # whose own pull requests are rare goes stale where nothing runs it, and a
+  # release then finds it broken. Its `Fast tier` status on main's commit is
+  # what a release of that commit reads (publish.yml).
+  schedule:
+    - cron: "0 1 * * *"
 
 permissions:
   contents: read
@@ -42,6 +53,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       jobs: ${{ steps.affected.outputs.jobs }}
+      mode: ${{ steps.affected.outputs.mode }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -62,15 +74,16 @@ jobs:
         # Every supported Node, here only: the Compatibility workflow's Node
         # jobs ran the same check again on 22 and 24.
         node: ${{ fromJSON(needs.plan.outputs.jobs).check.matrix.node }}
-        # The workspace's tests in two halves, each a share of every test
-        # binary by name, run under nextest with the binaries side by side:
-        # `cargo test` ran them one after another, six of the job's seven
-        # minutes.
-        # One part of the affected tests alone (the plan's), or two halves of
-        # every test.
+        # The tests in parts that take about as long, dealt by the seconds
+        # each took in main's newest Self Coverage run (scripts/ci-affected.mjs
+        # nextest): the affected ones in as many parts as keep each to a few
+        # minutes, or every test in three. Split by a hash of their names,
+        # the affected tests' one part took fifteen minutes and a half of
+        # every test eighteen, the other half eight.
         part: ${{ fromJSON(needs.plan.outputs.jobs).check.matrix.part }}
     env:
       AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).check.mode == 'partial' }}
+      PARTS: ${{ fromJSON(needs.plan.outputs.jobs).check.parts || 1 }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -98,30 +111,29 @@ jobs:
         with:
           step: restore
       - run: npm ci
-      # The affected tests, and every test of a file the change touched (a
-      # test new since the map is in one): a nextest profile of them alone,
-      # named by --profile, as NEXTEST_PROFILE would reach the nextest a test
-      # starts in its own fixture, which has no such profile.
-      - if: env.AFFECTED == 'true'
-        uses: actions/download-artifact@v5
+      # This part's share of the affected tests and every test of a file the
+      # change touched (a test new since the map is in one), or of every
+      # test: a nextest profile of them alone, named by --profile, as
+      # NEXTEST_PROFILE would reach the nextest a test starts in its own
+      # fixture, which has no such profile.
+      - uses: actions/download-artifact@v5
         with:
-          name: affected-selection
-      - if: env.AFFECTED == 'true'
-        run: |
+          name: affected-selection-ci
+      - run: |
           cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
-          node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          CI_TEST_SECONDS="$PWD/test-seconds.tsv" node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" ${{ matrix.part }} "$PARTS" ${{ env.AFFECTED != 'true' && '--all' || '' }} | tee -a "$GITHUB_STEP_SUMMARY"
       # Formatting and clippy are the same on every Node: the lint job's.
       # A test that fails runs once more: one that then passes is flaky, and
       # is named (below, and on the tracking issue) rather than failing the
       # job; one that fails twice fails it, on a release as anywhere.
-      - run: cargo nextest run --workspace ${{ env.AFFECTED == 'true' && '--profile affected' || '' }} --retries 1 --no-fail-fast --no-tests=pass --partition hash:${{ matrix.part }}/${{ env.AFFECTED == 'true' && 1 || 2 }}
+      - run: cargo nextest run --workspace --profile affected --retries 1 --no-fail-fast --no-tests=pass
       - if: ${{ !cancelled() }}
         uses: ./.github/actions/flaky-tests
         with:
           job: check (${{ matrix.node }}, ${{ matrix.part }})
           id: check-${{ matrix.node }}-${{ matrix.part }}
       # Doctests, which nextest does not run, and the tooling checks: with
-      # the first half.
+      # the first part, which is dealt that much less of the tests.
       - if: matrix.part == 1
         run: cargo test --workspace --doc && npm run check:tooling
       # What this run fetched, kept for the next, even after a failure; by
@@ -329,69 +341,6 @@ jobs:
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
 
-  # The rest of the release check: the steps no other job ran, so a pull
-  # request's green tick covers everything a release checks and a release
-  # needs no long local run. They ran only in `release:check` on a busy
-  # machine, where the timing gates (the watchdog's timeout exit) and the
-  # fixtures on fixed ports failed for reasons of their own.
-  release-gates:
-    needs: plan
-    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',release-gates,')) && fromJSON(needs.plan.outputs.jobs)['release-gates'].run }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: x86_64-unknown-linux-gnu
-          components: clippy, rustfmt
-      # The toolchain's one Rust cache, kept by main; restored only.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The packed-install check holds the binary to the glibc 2.28 floor the
-      # release promises; this runner's own glibc is 2.39, so the binary is
-      # linked the way native-artifacts.yml links it, with cargo-zigbuild.
-      - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
-      - run: npm ci
-      - run: npm run test:watchdog
-      - run: npm run test:engine-contract
-      - run: npm run test:agent
-      - run: npm run test:child-attribution
-      - run: npm run test:host-loader
-      # Thin LTO in sixteen units: the published build's fat LTO in one unit
-      # took six minutes here, and what these gates check is behaviour. The
-      # benchmark below still holds this build to the last release.
-      - run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
-        env:
-          CARGO_PROFILE_RELEASE_LTO: thin
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-      - run: node scripts/native-package-integration.mjs --target x86_64-unknown-linux-gnu --binary target/x86_64-unknown-linux-gnu/release/supercov
-      - run: node scripts/native-release-set-integration.mjs
-      # The packed install, run with the release build above rather than a
-      # second release build of the same source.
-      - run: node scripts/packed-npx-integration.mjs
-        env:
-          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
-      # The benchmark, likewise with the release build above, and held to the
-      # last release built from its tag the same way: against the published
-      # fat-LTO build, the profile alone read 1.05x.
-      - run: node scripts/rust-transform-benchmark.mjs
-        env:
-          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
-          SUPERCOV_BENCHMARK_REFERENCE_BUILD: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
-          SUPERCOV_BENCHMARK_REFERENCE_BUILT: x86_64-unknown-linux-gnu/release/supercov
-          CARGO_PROFILE_RELEASE_LTO: thin
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-      # A failure here ends this commit's other runs too: no waiting on them.
-      - if: failure() && github.event_name == 'pull_request'
-        uses: ./.github/actions/stop-on-failure
-
   # clang's own MC/DC as the oracle for Supercov's: the golden file was made
   # with Apple's toolchain, which the script finds through `xcrun`.
   clang-mcdc-oracle:
@@ -592,3 +541,31 @@ jobs:
       - run: node scripts/flaky-tests.mjs report "$RUNNER_TEMP/flaky"
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # The fast tier's answer for this commit, as the `Fast tier` commit status
+  # that branch protection requires: every job above passed or was not
+  # affected. A status, not this job's check: a label's run of this workflow
+  # runs nothing, and a check of the same name from it would stand for the
+  # commit. "in full" when every test ran, as a release needs
+  # (publish.yml); a run of some jobs by hand (`only`) says nothing.
+  verdict:
+    name: Fast tier
+    needs: [plan, check, bun-bootstrap, launch-arguments, lint, engine-integrations, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm]
+    if: ${{ !cancelled() && inputs.only == '' && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Whether this run was cancelled, and which run set the status last.
+      actions: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - run: node scripts/ci-tiers.mjs report "Fast tier"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          FULL: ${{ needs.plan.outputs.mode == 'full' }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
