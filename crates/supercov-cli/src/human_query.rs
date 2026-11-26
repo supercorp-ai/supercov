@@ -1061,6 +1061,27 @@ pub(crate) fn strong_verdict(mutant: &supercov_engine::mutants_query::MutantEntr
         .to_owned()
 }
 
+/// Where a strong verdict kept from an earlier run was reached (`  carried
+/// from run r3 (commit 1a2b3c4)`); empty for one this run's passes reached.
+pub(crate) fn carried_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    let Some(from) = mutant
+        .strong
+        .as_ref()
+        .map(|verdict| &verdict["carriedFrom"])
+        .filter(|from| from.is_object())
+    else {
+        return String::new();
+    };
+    let run = from["run"].as_str().unwrap_or_default();
+    match from["commit"].as_str() {
+        Some(commit) => format!(
+            "  carried from run {run} (commit {})",
+            crate::mutants_test_command::short_commit(commit)
+        ),
+        None => format!("  carried from run {run}"),
+    }
+}
+
 /// The hint that a mutant not infected is practically untestable.
 fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
     let log_line = if mutant.log_only {
@@ -1600,7 +1621,7 @@ fn mutants_text(
                     mutant.status.name(),
                     match strong_verdict(mutant) {
                         verdict if verdict.is_empty() => String::new(),
-                        verdict => format!("  strong: {verdict}"),
+                        verdict => format!("  strong: {verdict}{}", carried_suffix(mutant)),
                     },
                     untestable_suffix(mutant),
                     stryker(&mutant.stryker)
@@ -1660,7 +1681,7 @@ fn mutants_text(
                 format!("{:<strong_width$}  ", strong_verdict(mutant))
             };
             format!(
-                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {strong}{}{}{}",
+                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {strong}{}{}{}{}",
                 position(mutant),
                 mutant.mutator,
                 change(mutant),
@@ -1670,6 +1691,7 @@ fn mutants_text(
                 supercov_engine::mutation_report::compiled_reason(mutant)
                     .unwrap_or_else(|| mutant.weak.reason.clone()),
                 untestable_suffix(mutant),
+                carried_suffix(mutant),
                 stryker(&mutant.stryker)
             )
         }));

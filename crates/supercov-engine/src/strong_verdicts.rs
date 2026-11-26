@@ -789,6 +789,14 @@ mod tests {
             mutants: verdicts(&[("a", "killed")]),
             progress: Progress::new(),
             lived: BTreeSet::new(),
+            anchors: BTreeMap::from([("a".to_owned(), "0123456789abcdef".to_owned())]),
+            carried: BTreeMap::from([(
+                "a".to_owned(),
+                crate::strong_plan::CarriedFrom {
+                    run: "r0".into(),
+                    commit: Some("abc1234".into()),
+                },
+            )]),
         };
         save(&path, &document).unwrap();
         let read = serde_json::from_slice::<StrongVerdicts>(&std::fs::read(&path).unwrap());

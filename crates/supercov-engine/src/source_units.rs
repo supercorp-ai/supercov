@@ -644,6 +644,23 @@ pub fn code(path: &str, source: &str) -> Option<Code> {
     Some(build(source, outline))
 }
 
+/// A JavaScript or TypeScript file's source with each comment's characters
+/// blanked, line breaks kept: every offset is where it was, and no comment
+/// is left to read a name in. `None` where the file does not parse.
+pub fn javascript_without_comments(path: &str, source: &str) -> Option<String> {
+    let outline = javascript(path, source)?;
+    let mut bytes = source.as_bytes().to_vec();
+    for (start, end) in outline.comments {
+        for byte in bytes.iter_mut().take(end).skip(start) {
+            // A character's every byte, so the text stays UTF-8.
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    Some(String::from_utf8(bytes).expect("ASCII spaces in place of whole characters"))
+}
+
 fn short_digest(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()

@@ -1732,6 +1732,7 @@ fn kept_verdicts(
             document.lived,
             tests,
             other_bytes,
+            (document.anchors, document.carried),
         ));
     });
     if lending.is_empty() {
@@ -1741,7 +1742,7 @@ fn kept_verdicts(
     let lent = lending
         .iter()
         .map(
-            |(_, verdicts, progress, lived, tests, other_bytes)| crate::strong_verdicts::Lent {
+            |(_, verdicts, progress, lived, tests, other_bytes, _)| crate::strong_verdicts::Lent {
                 verdicts,
                 progress,
                 lived,
@@ -1755,6 +1756,32 @@ fn kept_verdicts(
     // the merged run, or a later round carrying it over, resumes there.
     let progress = crate::strong_verdicts::merged_progress(&plan, &lent, &mutants);
     let lived = crate::strong_verdicts::merged_lived(&lent, &progress);
+    // Each verdict's anchor and, where a run kept it from an earlier one,
+    // where it was reached: as the first run that lends that very verdict
+    // for a file it recorded with the merged run's bytes says.
+    let files = plan
+        .mutants
+        .iter()
+        .map(|mutant| (mutant.id.as_str(), mutant.file.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut anchors = BTreeMap::new();
+    let mut carried = BTreeMap::new();
+    for (id, verdict) in &mutants {
+        let lender = lending.iter().find(|(_, verdicts, .., other_bytes, _)| {
+            verdicts.get(id) == Some(verdict)
+                && files
+                    .get(id.as_str())
+                    .is_some_and(|file| !other_bytes.contains(*file))
+        });
+        if let Some((.., (lent_anchors, lent_carried))) = lender {
+            if let Some(anchor) = lent_anchors.get(id) {
+                anchors.insert(id.clone(), anchor.clone());
+            }
+            if let Some(from) = lent_carried.get(id) {
+                carried.insert(id.clone(), from.clone());
+            }
+        }
+    }
     let document = StrongVerdicts {
         schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: merged_run_id.to_owned(),
@@ -1762,6 +1789,8 @@ fn kept_verdicts(
         mutant_set: plan.mutant_set,
         progress,
         lived,
+        anchors,
+        carried,
     };
     let from = lending
         .iter()
