@@ -5,7 +5,7 @@ name: Overhead diagnostic
 
 on:
   push:
-    branches: [diag/coverage-overhead]
+    branches: [diag/probe-cost]
 
 permissions:
   contents: read
@@ -25,7 +25,7 @@ jobs:
           - variant: base
             ref: d25da687b1362dc99c6ec403470ef8220d5bacba
           - variant: new
-            ref: ${{ github.sha }}
+            ref: 3a8d8ec2c1bebe911f8e12abe72403e09c8b56cb
     steps:
       - uses: actions/checkout@v6
         with:
@@ -44,6 +44,40 @@ jobs:
           name: supercov-${{ matrix.variant }}
           path: target/measure/supercov
           retention-days: 3
+
+  probe:
+    needs: build
+    name: probe ${{ matrix.pair }} ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pair: 'plain base', mode: abba, count: 18 }
+          - { pair: 'plain new', mode: abba, count: 18 }
+          - { pair: 'base new', mode: abba, count: 22 }
+          - { pair: 'plain base', mode: trace, count: 5 }
+          - { pair: 'base new', mode: trace, count: 5 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3
+      - run: npx -y playwright@1.49.1 install-deps chromium
+      - name: Compare
+        timeout-minutes: 9
+        env:
+          BINARIES: ${{ github.workspace }}/binaries
+        run: benchmarks/probe-diag/run.sh ${{ matrix.pair }} ${{ matrix.mode }} ${{ matrix.count }} | tee "$RUNNER_TEMP/probe.txt"
+      - if: always()
+        run: tail -40 "$RUNNER_TEMP"/probe-diag/server-*.log || true
 
   measure:
     needs: build
