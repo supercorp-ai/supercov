@@ -72,6 +72,8 @@ jobs:
           curl -fsSL https://github.com/mstange/samply/releases/download/samply-v0.13.1/samply-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C "$RUNNER_TEMP/samply"
           echo "SPEED_SAMPLY=$(find "$RUNNER_TEMP/samply" -name samply -type f | head -1)" >> "$GITHUB_ENV"
           sudo sysctl kernel.perf_event_paranoid=1
+          # samply attaching to a running process maps more than the default allows.
+          sudo sysctl kernel.perf_event_mlock_kb=16384
       - name: Measure
         timeout-minutes: 8
         env:
