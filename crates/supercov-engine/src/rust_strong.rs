@@ -31,12 +31,19 @@
 //! test that fails there cannot tell a mutant apart, and its time sets the
 //! mutant's limit, 3 times the baseline and 10 s. A mutant's tests run
 //! cheapest first and stop at the first that fails: `killed`. One that runs
-//! past its limit is stopped: `timeout`. Where `SUPERCOV_MUTANT_HIT_LIMIT`
+//! past its limit beside other tests runs again alone, after a run of its
+//! test without the mutant that sets its limit there: past that, `timeout`.
+//! Where `SUPERCOV_MUTANT_HIT_LIMIT`
 //! is set, a test whose mutant was evaluated more often than that stops at
 //! once, also a `timeout`. Every test passing is `survived`.
 //!
 //! Doctests are compiled by rustdoc against the switched library and run in
 //! one `cargo test --doc` per mutant, after its libtest candidates.
+//!
+//! A pass told to stop (its budget, a signal: `stopped-at` beside its
+//! results) starts nothing more, ends the processes it runs, and judges
+//! nothing they said; each candidate a mutant passed is written as it
+//! passes (`progress`), so the next pass runs it against the rest.
 //!
 //! Verdicts are written to the results as each mutant ends, one JSON line
 //! each (`{ id, status, killedBy, tests, durationMs, reason }`), and a last
@@ -174,6 +181,10 @@ enum Outcome {
     TimedOut,
     /// Stopped at the hit limit.
     HitLimit,
+    /// Stopped because the pass is stopping: it says nothing of its mutant.
+    Stopped,
+    /// Its process could not be started: it ran nothing.
+    Unstarted,
 }
 
 struct Ran {
@@ -225,6 +236,14 @@ impl Results {
         let _ = file.flush();
     }
 
+    /// Candidates `id` passed with its mutant on: a pass that stops before
+    /// its verdict leaves them, and the next runs it against the rest
+    /// (`docs/mutation.md`, partial progress). Each test runs in a process of
+    /// its own, so its passing holds whatever runs beside or after it.
+    fn passed(&self, id: &str, tests: &[&str]) {
+        self.write(&json!({"progress": true, "id": id, "passed": tests}));
+    }
+
     fn verdict(
         &self,
         id: &str,
@@ -269,10 +288,62 @@ pub fn run_strong_rust(
     request: &StrongRustRequest,
     diagnostics: &mut dyn Write,
 ) -> Result<i32, String> {
-    let outcome = pass(request, diagnostics);
+    let stop = Stop::beside(&request.results);
+    let outcome = pass(request, &stop, diagnostics);
+    if stop.now() {
+        // Told to stop, it ends as the signal ends a command, in time: its
+        // copies are put aside at once and removed behind it (or by the
+        // next pass), and what it decided is saved.
+        let _ = crate::lifecycle::remove_scratch_tree_deferred(
+            &request.root,
+            &request.root.join(".supercov/strong/rust"),
+        );
+        crate::lifecycle::sweep_trash_in_background(&request.root);
+        return Ok(crate::process_supervision::interruption()
+            .map_or(STOPPED_EXIT, |signal| signal.exit_code()));
+    }
     discard(&request.root, ".supercov/strong/rust");
     outcome
 }
+
+/// How a mutant's run against its candidates ended.
+enum Ended {
+    /// Its verdict is written: which.
+    Decided(&'static str),
+    /// The stop cut it short: no verdict, for the next pass.
+    Stopped,
+    /// A test ran past its limit beside the pass's other tests, where the
+    /// limit may be the machine's load: no verdict yet, it is judged again
+    /// alone.
+    Slow(Slow),
+}
+
+/// A mutant to judge again alone: the tests whose process ran past its
+/// limit (one libtest case, or a package's doctests), and the candidates it
+/// already passed, which it does not run again.
+struct Slow {
+    tests: Vec<usize>,
+    passed: Vec<usize>,
+}
+
+/// Why a test's run with a mutant is a `timeout`.
+fn timeout_reason(limit: Duration, again: Option<&Slow>, outcome: Outcome) -> String {
+    match (outcome, again) {
+        (Outcome::HitLimit, _) => "evaluated its mutant past the hit limit".to_owned(),
+        (_, Some(_)) => format!(
+            "ran past {} ms, alone, after its test ran again without the mutant",
+            limit.as_millis()
+        ),
+        (_, None) => format!("ran past {} ms", limit.as_millis()),
+    }
+}
+
+/// What a pass its budget stopped ends with: a termination's, as the
+/// command of a JavaScript pass does.
+const STOPPED_EXIT: i32 = 143;
+
+/// The error a build the stop cut short ends with.
+const STOPPED: &str = "the pass was told to stop";
 
 /// Remove a pass's copies and builds, whatever its end: they hold no
 /// verdict (the results are the driver's, beside its plan), and a switched
@@ -283,7 +354,11 @@ fn discard(root: &Path, relative: &str) {
 }
 
 /// [`run_strong_rust`], leaving its copies and builds behind.
-fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32, String> {
+fn pass(
+    request: &StrongRustRequest,
+    stop: &Stop,
+    diagnostics: &mut dyn Write,
+) -> Result<i32, String> {
     let started = Instant::now();
     let plan: Value = serde_json::from_slice(
         // fault-site: rust-strong.pass.read
@@ -411,6 +486,7 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
         &build_invocation,
         &runner_environment,
         diagnostics,
+        stop,
     )?;
     for (at, error) in &unviable {
         results.verdict(
@@ -450,6 +526,7 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
             )?),
             RustCargoCommandKind::CargoTest => None,
         },
+        stop: stop.clone(),
     };
 
     // Baselines: every test a mutant runs against, with no mutant.
@@ -459,6 +536,10 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
         .flat_map(|at| jobs[*at].candidates.iter().copied())
         .collect::<BTreeSet<_>>();
     let baselines = baselines(&runner, &tests, &needed, request.workers);
+    // Baselines a stop cut short tell no mutant's candidates.
+    if stop.now() {
+        return Ok(0);
+    }
     let usable = |test: usize| {
         tests[test].runnable
             && baselines
@@ -475,14 +556,25 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
     // The switched mutants, side by side.
     let next = AtomicUsize::new(0);
     let counts = Mutex::new(BTreeMap::<&'static str, usize>::new());
+    let count = |ended: Ended| match ended {
+        Ended::Decided(status) => {
+            *counts.lock().expect("counts").entry(status).or_default() += 1;
+            None
+        }
+        Ended::Stopped => None,
+        Ended::Slow(slow) => Some(slow),
+    };
+    let slow = Mutex::new(Vec::<(usize, Slow)>::new());
     pool(request.workers.min(switchable.len()), || {
         // Each worker takes the next mutant until none is left (a worker
         // started after the others took them all takes none).
-        std::iter::from_fn(|| switchable.get(next.fetch_add(1, Ordering::Relaxed))).for_each(
-            |at| {
+        // A stop starts no other.
+        std::iter::from_fn(|| switchable.get(next.fetch_add(1, Ordering::Relaxed)))
+            .take_while(|_| !stop.now())
+            .for_each(|at| {
                 let job = &jobs[*at];
                 let named = format!("{}#{}", job.file, job.ordinal);
-                let status = run_job(
+                let ended = run_job(
                     job,
                     &tests,
                     &runner,
@@ -490,14 +582,43 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
                     &limit_of,
                     Some(&named),
                     &results,
+                    None,
                 );
-                *counts.lock().expect("counts").entry(status).or_default() += 1;
-            },
-        );
+                if let Some(again) = count(ended) {
+                    slow.lock().expect("slow").push((*at, again));
+                }
+            });
     });
+
+    // Each mutant whose test ran past its limit beside others, again alone,
+    // one at a time.
+    let mut slow = slow.into_inner().expect("slow");
+    slow.sort_by_key(|(at, _)| *at);
+    for (at, again) in &slow {
+        if stop.now() {
+            break;
+        }
+        let job = &jobs[*at];
+        let named = format!("{}#{}", job.file, job.ordinal);
+        let ended = judge_alone(
+            job,
+            again,
+            &tests,
+            &runner,
+            &runner,
+            &usable,
+            &baselines,
+            Some(&named),
+            &results,
+        );
+        count(ended);
+    }
 
     // The mutants built on their own, one at a time.
     for (at, why) in &alone {
+        if stop.now() {
+            break;
+        }
         let job = &jobs[*at];
         let mutant_started = Instant::now();
         let (source, _) = sources[&job.file].as_ref().expect("a job's file was read");
@@ -508,7 +629,10 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
             &runner_environment,
             job,
             source,
+            stop,
         ) {
+            // The stop cut its build short: it is left for the next pass.
+            Err(_) if stop.now() => break,
             Err(error) => {
                 results.verdict(
                     &job.id,
@@ -558,8 +682,9 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
                         )?),
                         RustCargoCommandKind::CargoTest => None,
                     },
+                    stop: stop.clone(),
                 };
-                let status = run_job(
+                let ended = run_job(
                     job,
                     &tests,
                     &alone_runner,
@@ -567,8 +692,23 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
                     &limit_of,
                     None,
                     &results,
+                    None,
                 );
-                *counts.lock().expect("counts").entry(status).or_default() += 1;
+                // Its build holds it with no switch: its tests run again
+                // without it in the switched build.
+                if let Some(again) = count(ended) {
+                    count(judge_alone(
+                        job,
+                        &again,
+                        &tests,
+                        &runner,
+                        &alone_runner,
+                        &usable,
+                        &baselines,
+                        None,
+                        &results,
+                    ));
+                }
             }
         }
     }
@@ -801,10 +941,11 @@ struct Built {
 fn cargo_build(
     project: &crate::rust_project::PreparedRustProject,
     invocation: &CargoTestInvocation,
+    stop: &Stop,
 ) -> Result<Result<Vec<Artifact>, Vec<CompileError>>, String> {
     let mut arguments = invocation.arguments.clone();
     arguments.extend(["--no-run".into(), "--message-format=json".into()]);
-    let output = crate::child_signal_guard::output(
+    let output = supervised(
         Command::new(&invocation.program)
             .args(&arguments)
             .current_dir(&project.workspace_root)
@@ -813,8 +954,14 @@ fn cargo_build(
                 "RUSTFLAGS",
                 crate::rust_test_runner::capped_rustflags(project, invocation),
             ),
+        None,
+        stop,
     )
     .map_err(|error| format!("cargo: {error}"))?;
+    // A build the stop cut short says nothing of its mutants.
+    let Some(status) = output.status.filter(|_| !output.stopped) else {
+        return Err(STOPPED.into());
+    };
     let workspace = &project.workspace_root;
     let mut artifacts = Vec::new();
     let mut errors = Vec::new();
@@ -852,7 +999,7 @@ fn cargo_build(
             _ => {}
         }
     }
-    if !output.status.success() {
+    if !status.success() {
         if errors.is_empty() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }
@@ -915,6 +1062,7 @@ fn switched_build(
     jobs: &[Job],
     chosen: &[usize],
     invocation: &CargoTestInvocation,
+    stop: &Stop,
 ) -> Result<(crate::rust_project::StrongWorkspace, BuildOutcome), String> {
     // fault-site: rust-strong.switched-build
     sync_project(root, &places.switched)?;
@@ -929,7 +1077,7 @@ fn switched_build(
     let mut prepared = crate::rust_project::prepare_rust_strong_project(&places.switched, &by_file)
         .map_err(|error| error.to_string())?;
     prepared.project.target_directory = places.switched_target.clone();
-    let built = cargo_build(&prepared.project, invocation)?;
+    let built = cargo_build(&prepared.project, invocation, stop)?;
     Ok((prepared, built))
 }
 
@@ -947,6 +1095,7 @@ fn build_switched(
     invocation: &CargoTestInvocation,
     runner_environment: &[(String, String)],
     diagnostics: &mut dyn Write,
+    stop: &Stop,
 ) -> Result<Built, String> {
     let mut builds = 0usize;
     loop {
@@ -956,7 +1105,7 @@ fn build_switched(
             "[supercov] building {} switched mutant(s) (build {builds})",
             switchable.len()
         );
-        let (prepared, built) = switched_build(root, places, jobs, switchable, invocation)?;
+        let (prepared, built) = switched_build(root, places, jobs, switchable, invocation, stop)?;
         if !prepared.declined.is_empty() {
             let declined = prepared
                 .declined
@@ -1031,7 +1180,8 @@ fn build_switched(
         // The first `low` switched mutants build; the first `high` do not
         // (it is the build that just failed).
         let fails = |count: usize| -> Result<bool, String> {
-            let (_, built) = switched_build(root, places, jobs, &switchable[..count], invocation)?;
+            let (_, built) =
+                switched_build(root, places, jobs, &switchable[..count], invocation, stop)?;
             Ok(built.is_err())
         };
         builds += 1;
@@ -1376,6 +1526,7 @@ fn build_alone(
     runner_environment: &[(String, String)],
     job: &Job,
     source: &str,
+    stop: &Stop,
 ) -> Result<Result<Built, String>, String> {
     // fault-site: rust-strong.build-alone.sync-project
     sync_project(root, &places.plain)?;
@@ -1395,7 +1546,7 @@ fn build_alone(
         .map_err(|error| format!("{}: {error}", places.plain.display()))?;
     let mut project = crate::rust_project::PreparedRustProject::plain(workspace);
     project.target_directory = places.plain_target.clone();
-    match cargo_build(&project, invocation)? {
+    match cargo_build(&project, invocation, stop)? {
         Err(errors) => Ok(Err(errors
             .first()
             .map(|error| first_line(&error.rendered))
@@ -1432,6 +1583,7 @@ struct TestRunner<'b> {
     /// For a `cargo nextest run` command, how nextest runs a test of this
     /// build, with its configuration.
     nextest: Option<Nextest>,
+    stop: Stop,
 }
 
 /// `cargo nextest run` of one test of a build already made: nextest's
@@ -1675,10 +1827,12 @@ impl TestRunner<'_> {
                 None => command.env_remove(ACTIVE_MUTANT_ENV),
             };
             command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
-            let (mut ran, _, stderr) = timed_with_streams(&mut command, limit);
+            let (mut ran, _, stderr) = timed(&mut command, limit, &self.stop);
             // nextest's own timeout ends the test as a timeout, and a filter
             // that matched nothing ran nothing.
-            if stderr.contains("TIMEOUT") {
+            if ran.outcome == Outcome::Stopped {
+                return Some(ran);
+            } else if stderr.contains("TIMEOUT") {
                 ran.outcome = Outcome::TimedOut;
             } else if stderr.contains("Starting 0 tests") {
                 return None;
@@ -1704,7 +1858,7 @@ impl TestRunner<'_> {
                 &artifact.executable,
             ));
         command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
-        Some(timed(&mut command, limit))
+        Some(timed(&mut command, limit, &self.stop).0)
     }
 
     /// Runs doctests of one package together, with `mutant` active.
@@ -1722,7 +1876,7 @@ impl TestRunner<'_> {
             None => command.env_remove(ACTIVE_MUTANT_ENV),
         };
         command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
-        let (ran, stdout) = timed_with_output(&mut command, limit);
+        let (ran, stdout, _) = timed(&mut command, limit, &self.stop);
         let failed = stdout.lines().find_map(|line| {
             line.strip_prefix("test ")
                 .and_then(|rest| rest.strip_suffix(" ... FAILED"))
@@ -1732,36 +1886,62 @@ impl TestRunner<'_> {
     }
 }
 
-fn timed(command: &mut Command, limit: Duration) -> Ran {
-    timed_with_output(command, limit).0
+/// Whether the pass has been told to stop. The CLI writes `stopped-at`
+/// beside the results before it signals the pass, for its budget or for a
+/// signal alike (`docs/design/strong-mutation.md`, the budget). From then on
+/// the pass starts nothing, stops what it runs, and judges nothing a stop
+/// cut short: such a test says nothing of its mutant, which is left for the
+/// next pass.
+#[derive(Debug, Clone)]
+struct Stop {
+    marker: PathBuf,
 }
 
-fn timed_with_output(command: &mut Command, limit: Duration) -> (Ran, String) {
-    let (ran, stdout, _) = timed_with_streams(command, limit);
-    (ran, stdout)
+impl Stop {
+    /// The stop the CLI says beside `results`.
+    fn beside(results: &Path) -> Self {
+        Self {
+            marker: results.with_file_name(crate::strong_driver::STOPPED_AT),
+        }
+    }
+
+    fn now(&self) -> bool {
+        self.marker.exists()
+    }
 }
 
-/// Runs `command` for at most `limit`, and how it ended, with its standard
-/// output and error.
-fn timed_with_streams(command: &mut Command, limit: Duration) -> (Ran, String, String) {
+/// How a process the pass started ended.
+struct Supervised {
+    /// Its exit, or `None` where the limit or the stop ended it.
+    status: Option<std::process::ExitStatus>,
+    /// The stop ended it, or it ended by a stopping signal once the pass
+    /// was stopping.
+    stopped: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    duration: Duration,
+}
+
+/// Runs `command` to its end, its limit (where it has one) or the pass's
+/// stop, whichever comes first, in a process group of its own: a limit or a
+/// stop ends the group, so what a test started (nextest's test process
+/// under `cargo nextest`, rustdoc's under `cargo test --doc`) ends with it,
+/// and a terminal's Ctrl-C, sent to Supercov's group, reaches the pass alone,
+/// which stops it as its budget does.
+fn supervised(
+    command: &mut Command,
+    limit: Option<Duration>,
+    stop: &Stop,
+) -> std::io::Result<Supervised> {
     let started = Instant::now();
-    let child = command
+    process_group(command);
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        // fault-site: rust-strong.timed-with-streams
-        .launch();
-    let Ok(mut child) = child else {
-        return (
-            Ran {
-                outcome: Outcome::Failed,
-                duration: started.elapsed(),
-            },
-            String::new(),
-            String::new(),
-        );
-    };
-    let _registered = crate::child_signal_guard::register(&child);
+        // fault-site: rust-strong.supervised
+        .launch()?;
+    let _registered = crate::child_signal_guard::register_group(&child);
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let out = std::thread::spawn(move || {
@@ -1774,23 +1954,113 @@ fn timed_with_streams(command: &mut Command, limit: Duration) -> (Ran, String, S
         let _ = stderr.read_to_end(&mut text);
         text
     });
+    // The stop is a file: looked for every 50 ms, not at every poll.
+    let mut looked = Instant::now();
+    let mut stopped = false;
     // A child that cannot be waited on runs, as far as this can tell, until
-    // its limit.
+    // its limit or the stop.
     let status = loop {
         if let Some(status) = child.try_wait().ok().flatten() {
             break Some(status);
         }
-        if started.elapsed() > limit {
-            let _ = child.kill();
+        if looked.elapsed() >= STOP_POLL {
+            looked = Instant::now();
+            stopped = stop.now();
+        }
+        if stopped || limit.is_some_and(|limit| started.elapsed() > limit) {
+            kill_group(&mut child);
             let _ = child.wait();
             break None;
         }
         std::thread::sleep(Duration::from_millis(5));
     };
     let duration = started.elapsed();
-    let stdout = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
-    let outcome = match status {
+    // A process ended by a signal that stops a pass, which reached it before
+    // the pass heard of it, is the stop's: given a moment, the stop shows.
+    if status.is_some_and(stopping_signal) {
+        let since = Instant::now();
+        while !stopped && since.elapsed() < STOP_SETTLE {
+            stopped = stop.now();
+            std::thread::sleep(STOP_POLL);
+        }
+    }
+    Ok(Supervised {
+        status,
+        stopped,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+        duration,
+    })
+}
+
+/// How often a running process's pass looks for its stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// How long a process ended by a stopping signal waits for the pass's stop
+/// to show (the CLI writes it within a second of the signal).
+const STOP_SETTLE: Duration = Duration::from_secs(2);
+
+/// Whether `status` is an end by SIGINT, SIGTERM or SIGHUP, which stop a
+/// pass, or the exit code a process gives for one (`cargo` and nextest pass
+/// their test's on).
+fn stopping_signal(status: std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status
+            .signal()
+            .is_some_and(|signal| [libc::SIGINT, libc::SIGTERM, libc::SIGHUP].contains(&signal))
+        {
+            return true;
+        }
+    }
+    status
+        .code()
+        .is_some_and(|code| matches!(code, 129 | 130 | 143))
+}
+
+/// A process the pass starts leads a process group of its own.
+#[cfg(unix)]
+fn process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn process_group(_command: &mut Command) {}
+
+/// Ends `child` and every process of its group.
+#[cfg(unix)]
+fn kill_group(child: &mut std::process::Child) {
+    // SAFETY: kill(2) with a negative pid signals a process group: the
+    // child's own, made for it at its start.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+/// Runs a test's `command` for at most `limit`, or until the pass stops,
+/// and how it ended, with its standard output and error.
+fn timed(command: &mut Command, limit: Duration, stop: &Stop) -> (Ran, String, String) {
+    let Ok(ended) = supervised(command, Some(limit), stop) else {
+        return (
+            Ran {
+                outcome: Outcome::Unstarted,
+                duration: Duration::ZERO,
+            },
+            String::new(),
+            String::new(),
+        );
+    };
+    let stdout = String::from_utf8_lossy(&ended.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&ended.stderr).into_owned();
+    let outcome = match ended.status {
+        _ if ended.stopped => Outcome::Stopped,
         None => Outcome::TimedOut,
         Some(_) if stderr.contains(TIMEOUT_MARKER) || stdout.contains(TIMEOUT_MARKER) => {
             Outcome::HitLimit
@@ -1798,7 +2068,14 @@ fn timed_with_streams(command: &mut Command, limit: Duration) -> (Ran, String, S
         Some(status) if status.success() && !libtest_ran_nothing(&stdout) => Outcome::Passed,
         Some(_) => Outcome::Failed,
     };
-    (Ran { outcome, duration }, stdout, stderr)
+    (
+        Ran {
+            outcome,
+            duration: ended.duration,
+        },
+        stdout,
+        stderr,
+    )
 }
 
 /// A libtest run that matched no test: `running 0 tests`.
@@ -1817,28 +2094,121 @@ fn baselines(
     let next = AtomicUsize::new(0);
     let found = Mutex::new(BTreeMap::new());
     pool(workers.min(needed.len()), || {
-        // As the mutants: each worker takes the next test until none is left.
-        std::iter::from_fn(|| needed.get(next.fetch_add(1, Ordering::Relaxed))).for_each(|test| {
-            let planned = &tests[*test];
-            let ran = if planned.runner == "rustdoc" {
-                let package = planned.project.clone().unwrap_or_default();
-                runner
-                    .run_doctests(&package, &[&planned.name], None, Duration::from_secs(600))
-                    .0
-            } else {
-                match runner.run(planned, None, 0, Duration::from_secs(600)) {
-                    Some(ran) => ran,
-                    None => return,
+        // As the mutants: each worker takes the next test until none is
+        // left, or the pass stops.
+        std::iter::from_fn(|| needed.get(next.fetch_add(1, Ordering::Relaxed)))
+            .take_while(|_| !runner.stop.now())
+            .for_each(|test| {
+                let planned = &tests[*test];
+                let ran = if planned.runner == "rustdoc" {
+                    let package = planned.project.clone().unwrap_or_default();
+                    runner
+                        .run_doctests(&package, &[&planned.name], None, Duration::from_secs(600))
+                        .0
+                } else {
+                    match runner.run(planned, None, 0, Duration::from_secs(600)) {
+                        Some(ran) => ran,
+                        None => return,
+                    }
+                };
+                if ran.outcome != Outcome::Stopped {
+                    found.lock().expect("baselines").insert(*test, ran);
                 }
-            };
-            found.lock().expect("baselines").insert(*test, ran);
-        });
+            });
     });
     found.into_inner().expect("baselines")
 }
 
+/// Judges again, alone, a mutant whose test ran past its limit beside the
+/// pass's other tests: that test (or package's doctests) runs again without
+/// the mutant first, in `plain`, and its limit is then 3 times the slower of
+/// that run and its baseline, and 10 s; then the mutant runs, in `mutated`,
+/// against the candidates it has not passed. Only a test past that limit is
+/// a `timeout`: one baseline measured while the machine was quieter does not
+/// make a slow test a timeout once it is busier. A test that does not pass
+/// without the mutant now says nothing of it: an `error`.
+#[allow(clippy::too_many_arguments)]
+fn judge_alone(
+    job: &Job,
+    again: &Slow,
+    tests: &[PlannedTest],
+    plain: &TestRunner<'_>,
+    mutated: &TestRunner<'_>,
+    usable: &dyn Fn(usize) -> bool,
+    baselines: &BTreeMap<usize, Ran>,
+    ordinal: Option<&str>,
+    results: &Results,
+) -> Ended {
+    let started = Instant::now();
+    let first = &tests[again.tests[0]];
+    let now = if first.runner == "rustdoc" {
+        let names = again
+            .tests
+            .iter()
+            .map(|test| tests[*test].name.as_str())
+            .collect::<Vec<_>>();
+        let package = first.project.clone().unwrap_or_default();
+        plain
+            .run_doctests(&package, &names, None, Duration::from_secs(600))
+            .0
+    } else {
+        match plain.run(first, None, 0, Duration::from_secs(600)) {
+            Some(ran) => ran,
+            None => Ran {
+                outcome: Outcome::Unstarted,
+                duration: Duration::ZERO,
+            },
+        }
+    };
+    match now.outcome {
+        Outcome::Passed => {}
+        Outcome::Stopped => return Ended::Stopped,
+        _ => {
+            results.verdict(
+                &job.id,
+                "error",
+                None,
+                again.passed.len(),
+                started,
+                Some(format!(
+                    "{} ran past its limit with the mutant, and did not pass without it when run again",
+                    first.id
+                )),
+            );
+            return Ended::Decided("error");
+        }
+    }
+    // The run without the mutant, shared among the tests that ran in it.
+    let share = now.duration / again.tests.len() as u32;
+    let limit_of = |test: usize| {
+        let baseline = baselines
+            .get(&test)
+            .map_or(Duration::from_secs(10), |ran| ran.duration);
+        let base = if again.tests.contains(&test) {
+            baseline.max(share)
+        } else {
+            baseline
+        };
+        base * 3 + Duration::from_secs(10)
+    };
+    run_job(
+        job,
+        tests,
+        mutated,
+        usable,
+        &limit_of,
+        ordinal,
+        results,
+        Some(again),
+    )
+}
+
 /// Runs one mutant against its candidates and writes its verdict: in the
 /// switched build with `ordinal` active, or in a build of its own (`None`).
+/// Judged `again` (`judge_alone`), it skips the candidates it passed and a
+/// test past its limit is a `timeout`; otherwise such a test leaves it
+/// [`Ended::Slow`].
+#[allow(clippy::too_many_arguments)]
 fn run_job(
     job: &Job,
     tests: &[PlannedTest],
@@ -1847,15 +2217,17 @@ fn run_job(
     limit_of: &dyn Fn(usize) -> Duration,
     ordinal: Option<&str>,
     results: &Results,
-) -> &'static str {
+    again: Option<&Slow>,
+) -> Ended {
     let started = Instant::now();
+    let passed_before = again.map(|slow| slow.passed.as_slice()).unwrap_or_default();
     let mut candidates = job
         .candidates
         .iter()
         .copied()
-        .filter(|test| usable(*test))
+        .filter(|test| usable(*test) && !passed_before.contains(test))
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
+    if candidates.is_empty() && again.is_none() {
         // Tests the measured run saw fail cannot tell a mutant apart: it
         // lives, as StrykerJS's rule has it. Tests that passed there and
         // cannot run here say nothing of it: an error.
@@ -1868,7 +2240,7 @@ fn run_job(
                 started,
                 Some("its tests did not pass without a mutant in the pass's build".into()),
             );
-            return "error";
+            return Ended::Decided("error");
         }
         let reason = if job.candidates.is_empty() {
             "no test can kill it"
@@ -1876,13 +2248,14 @@ fn run_job(
             "every test that reaches it failed in the measured run"
         };
         results.verdict(&job.id, "survived", None, 0, started, Some(reason.into()));
-        return "survived";
+        return Ended::Decided("survived");
     }
     candidates.sort_by_key(|test| limit_of(*test));
     let (doctests, libtests): (Vec<_>, Vec<_>) = candidates
         .into_iter()
         .partition(|test| tests[*test].runner == "rustdoc");
-    let mut ran = 0usize;
+    let mut ran = passed_before.len();
+    let mut passed = passed_before.to_vec();
     for test in libtests {
         let planned = &tests[test];
         let limit = limit_of(test);
@@ -1891,10 +2264,36 @@ fn run_job(
         };
         ran += 1;
         match outcome.outcome {
-            Outcome::Passed => {}
+            Outcome::Passed => {
+                results.passed(&job.id, &[&planned.id]);
+                passed.push(test);
+            }
+            // A test the stop cut short says nothing: the mutant is left for
+            // the next pass, which runs it against the candidates it has not
+            // passed.
+            Outcome::Stopped => return Ended::Stopped,
+            Outcome::Unstarted => {
+                results.verdict(
+                    &job.id,
+                    "error",
+                    None,
+                    ran,
+                    started,
+                    Some(format!("could not start its test {}", planned.id)),
+                );
+                return Ended::Decided("error");
+            }
             Outcome::Failed => {
                 results.verdict(&job.id, "killed", Some(&planned.id), ran, started, None);
-                return "killed";
+                return Ended::Decided("killed");
+            }
+            // Past its limit, beside other tests: the limit may be the
+            // machine's load. It is judged again alone.
+            Outcome::TimedOut if again.is_none() => {
+                return Ended::Slow(Slow {
+                    tests: vec![test],
+                    passed,
+                });
             }
             Outcome::TimedOut | Outcome::HitLimit => {
                 results.verdict(
@@ -1903,9 +2302,9 @@ fn run_job(
                     Some(&planned.id),
                     ran,
                     started,
-                    Some(format!("ran past {} ms", limit.as_millis())),
+                    Some(timeout_reason(limit, again, outcome.outcome)),
                 );
-                return "timeout";
+                return Ended::Decided("timeout");
             }
         }
     }
@@ -1927,7 +2326,27 @@ fn run_job(
         // As for a libtest case: the doctest that failed kills the mutant,
         // and one that ran past its limit or hit the limit is a timeout.
         let (status, killed_by, reason) = match outcome.outcome {
-            Outcome::Passed => continue,
+            Outcome::Passed => {
+                let ids = members
+                    .iter()
+                    .map(|test| tests[*test].id.as_str())
+                    .collect::<Vec<_>>();
+                results.passed(&job.id, &ids);
+                passed.extend(&members);
+                continue;
+            }
+            Outcome::TimedOut if again.is_none() => {
+                return Ended::Slow(Slow {
+                    tests: members,
+                    passed,
+                });
+            }
+            Outcome::Stopped => return Ended::Stopped,
+            Outcome::Unstarted => (
+                "error",
+                None,
+                Some(format!("could not start its doctests in {package}")),
+            ),
             Outcome::Failed => (
                 "killed",
                 Some(failed.unwrap_or(tests[members[0]].id.clone())),
@@ -1936,14 +2355,17 @@ fn run_job(
             Outcome::TimedOut | Outcome::HitLimit => (
                 "timeout",
                 failed,
-                Some(format!("doctests ran past {} ms", limit.as_millis())),
+                Some(format!(
+                    "doctests {}",
+                    timeout_reason(limit, again, outcome.outcome)
+                )),
             ),
         };
         results.verdict(&job.id, status, killed_by.as_deref(), ran, started, reason);
-        return status;
+        return Ended::Decided(status);
     }
     results.verdict(&job.id, "survived", None, ran, started, None);
-    "survived"
+    Ended::Decided("survived")
 }
 
 #[cfg(test)]
@@ -2742,6 +3164,200 @@ mod tests {
         let untested = &found["src/lib.rs:5:7-5:8:BinaryOperator:*"];
         assert_eq!(untested["reason"], "no test can kill it", "{found:?}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A pass told to stop (the CLI's `stopped-at` beside its results)
+    /// starts nothing more, ends the test it runs with every process of its
+    /// group, and judges nothing that test said: its mutant is left for the
+    /// next pass, with the candidate it already passed, and the pass ends at
+    /// once as a terminated command does.
+    #[test]
+    fn a_pass_told_to_stop_ends_its_tests_and_judges_nothing_they_said() {
+        // The tests run in the pass's copy: `b` says it started where this
+        // test looks, by an absolute path.
+        let said = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-stop-said-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&said).unwrap();
+        let tests = format!(
+            concat!(
+                "#[test] fn a() {{ assert!(fixture::small(3)); }}\n",
+                // Slower than `a` without a mutant (2 s), so it runs after `a`;
+                // with one, it says so and waits: what ends it is the stop.
+                "#[test] fn b() {{ std::thread::sleep(std::time::Duration::from_secs(2)); if std::env::var_os(\"SUPERCOV_ACTIVE_MUTANT\").is_some() {{ std::fs::write(std::path::Path::new({:?}).join(format!(\"started-{{}}\", std::process::id())), \"\").unwrap(); std::thread::sleep(std::time::Duration::from_secs(300)); }} assert!(!fixture::small(10)); }}\n",
+            ),
+            said.display().to_string()
+        );
+        let (root, request) = crate_with(
+            "stop",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+                ),
+                (
+                    "src/lib.rs",
+                    "pub fn small(v: u32) -> bool {\n    v < 10\n}\n",
+                ),
+                ("tests/t.rs", &tests),
+            ],
+            &["src/lib.rs"],
+        );
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopper = {
+            let said = said.clone();
+            let done = done.clone();
+            let marker = request
+                .results
+                .with_file_name(crate::strong_driver::STOPPED_AT);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    let started = std::fs::read_dir(&said)
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .find_map(|entry| {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            name.strip_prefix("started-")?.parse::<u32>().ok()
+                        });
+                    if let Some(pid) = started {
+                        std::fs::write(&marker, "0").unwrap();
+                        return Some((pid, Instant::now()));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                None
+            })
+        };
+        let outcome = run_strong_rust(&request, &mut Vec::new());
+        let ended = Instant::now();
+        done.store(true, Ordering::SeqCst);
+        let records = std::fs::read_to_string(&request.results)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let (pid, stopped) = stopper
+            .join()
+            .unwrap()
+            .unwrap_or_else(|| panic!("no test started with a mutant: {records:?}"));
+        assert_eq!(outcome, Ok(STOPPED_EXIT));
+        assert!(
+            ended.duration_since(stopped) < Duration::from_secs(10),
+            "{:?} after the stop",
+            ended.duration_since(stopped)
+        );
+        // No verdict: the one test that said anything was cut short.
+        assert!(
+            records.iter().all(|record| record["status"].is_null()),
+            "{records:?}"
+        );
+        // The first mutant, `true`, passed `a` before `b` held it.
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["progress"] == true)
+                .collect::<Vec<_>>(),
+            [
+                &json!({"progress": true, "id": "src/lib.rs:2:5-2:11:FnValue:true", "passed": ["tests/t.rs::a"]})
+            ]
+        );
+        // The held test is gone, and so are the pass's copies.
+        #[cfg(unix)]
+        {
+            // SAFETY: signal 0 only asks whether the process exists.
+            let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+            assert!(!alive, "test process {pid} outlived the stop");
+        }
+        #[cfg(not(unix))]
+        let _ = pid;
+        assert!(!root.join(".supercov/strong/rust").exists());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(said);
+    }
+
+    /// A test past its limit beside others runs again alone, after a run
+    /// without the mutant, and its limit is then that run's: a machine that
+    /// slows down once the baselines have run (each of `b`'s runs after its
+    /// first takes 11 s, against a baseline of a moment) makes no timeout of
+    /// a kill or a survivor. A mutant that never ends is a `timeout` there.
+    #[test]
+    fn a_timeout_is_judged_again_alone_at_the_machine_s_speed() {
+        let said = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-slow-said-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&said).unwrap();
+        let tests = format!(
+            concat!(
+                "#[test] fn b() {{ let seen = std::path::Path::new({:?}).join(\"seen\"); if seen.exists() {{ std::thread::sleep(std::time::Duration::from_secs(11)); }} else {{ std::fs::write(seen, \"\").unwrap(); }} assert!(fixture::small(3)); }}\n",
+                "#[test] fn h() {{ assert_eq!(fixture::spin(3), 3); }}\n",
+            ),
+            said.display().to_string()
+        );
+        let (root, mut request) = crate_with(
+            "slow",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+                ),
+                (
+                    "src/lib.rs",
+                    "pub fn small(v: u32) -> bool {\n    v < 10\n}\npub fn spin(n: u32) -> u32 {\n    let mut i = 0;\n    while i != n {\n        i += 1;\n    }\n    i\n}\n",
+                ),
+                ("tests/t.rs", &tests),
+            ],
+            &["src/lib.rs"],
+        );
+        // `true` lives through `b`, `false` dies of it, `*=` never ends.
+        let kept = [
+            ("src/lib.rs:2:5-2:11:FnValue:true", 0),
+            ("src/lib.rs:2:5-2:11:FnValue:false", 0),
+            ("src/lib.rs:7:11-7:13:BinaryOperator:*=", 1),
+        ];
+        let mut plan: Value =
+            serde_json::from_slice(&std::fs::read(&request.plan).unwrap()).unwrap();
+        plan["mutants"] = Value::Array(
+            plan["mutants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|mutant| {
+                    let (_, test) = kept.iter().find(|(id, _)| mutant["id"] == *id)?;
+                    let mut mutant = mutant.clone();
+                    mutant["candidates"] = json!([{"test": test}]);
+                    Some(mutant)
+                })
+                .collect(),
+        );
+        assert_eq!(plan["mutants"].as_array().unwrap().len(), 3, "{plan}");
+        std::fs::write(&request.plan, serde_json::to_vec(&plan).unwrap()).unwrap();
+        request.workers = 3;
+        assert_eq!(run_strong_rust(&request, &mut Vec::new()), Ok(0));
+        let found = verdicts(&request);
+        let status = |id: &str| found[id]["status"].as_str().unwrap().to_owned();
+        assert_eq!(status(kept[0].0), "survived", "{found:?}");
+        assert_eq!(status(kept[1].0), "killed", "{found:?}");
+        let endless = &found[kept[2].0];
+        assert_eq!(endless["status"], "timeout", "{found:?}");
+        assert!(
+            endless["reason"]
+                .as_str()
+                .unwrap()
+                .ends_with("alone, after its test ran again without the mutant"),
+            "{endless}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(said);
     }
 
     /// Under nextest: a test nextest stops at its own timeout is a timeout, a

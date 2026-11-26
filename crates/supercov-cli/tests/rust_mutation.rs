@@ -267,3 +267,123 @@ fn a_nextest_rust_run_s_mutants_run_with_its_setup_scripts() {
     assert_eq!(added["killedBy"], "tests/flag.rs::scales_with_the_flag");
     assert_eq!(reply["summary"]["killed"], 4, "{reply}");
 }
+
+/// Interrupted while a test runs a mutant, a pass ends at once with the
+/// signal's exit code: the test is stopped with it and says nothing of its
+/// mutant, which keeps the candidate it already passed. The next pass runs
+/// it against the rest, and reaches the verdict a whole pass does.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_rust_pass_judges_nothing_it_cut_short_and_resumes() {
+    let project = Project::empty("strong-rust-interrupted");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"held\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn small(v: u32) -> bool {\n    v < 10\n}\n",
+    );
+    // `b`, with a mutant on, says it started and waits while `hold` is
+    // there: only the interruption ends it. It runs in the pass's copy, so
+    // both are named by their absolute paths in the project. Without a
+    // mutant it is the slower, so `a` runs first.
+    let place = |name: &str| format!("{:?}", project.root.join(name).display().to_string());
+    project.write(
+        "tests/t.rs",
+        &format!(
+            concat!(
+                "#[test]\nfn a() {{\n    assert!(held::small(3));\n}}\n\n",
+                "#[test]\nfn b() {{\n",
+                "    std::thread::sleep(std::time::Duration::from_secs(2));\n",
+                "    if std::env::var_os(\"SUPERCOV_ACTIVE_MUTANT\").is_some() {{\n",
+                "        std::fs::write({started}, std::process::id().to_string()).unwrap();\n",
+                "        let begun = std::time::Instant::now();\n",
+                "        while std::path::Path::new({hold}).exists() && begun.elapsed().as_secs() < 300 {{\n",
+                "            std::thread::sleep(std::time::Duration::from_millis(20));\n",
+                "        }}\n",
+                "    }}\n",
+                "    assert!(!held::small(10));\n",
+                "}}\n",
+            ),
+            started = place("started"),
+            hold = place("hold"),
+        ),
+    );
+    project.write(".gitignore", "target\n.supercov\nhold\nstarted\n");
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+
+    project.write("hold", "");
+    let pass = project
+        .supercov_command(&["runs", "latest", "mutants", "test", "--json"])
+        .env("SUPERCOV_STRONG_JOBS", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = project.root.join("started");
+    let begun = std::time::Instant::now();
+    while !started.exists() {
+        assert!(
+            begun.elapsed() < std::time::Duration::from_secs(300),
+            "no test started with a mutant"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let test_process: i32 = std::fs::read_to_string(&started).unwrap().parse().unwrap();
+    // SAFETY: a signal to the pass alone, as `kill -INT` sends it.
+    unsafe { libc::kill(pass.id() as i32, libc::SIGINT) };
+    let interrupted = std::time::Instant::now();
+    let output = pass.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(130), "{said}");
+    assert!(
+        interrupted.elapsed() < std::time::Duration::from_secs(8),
+        "{:?}: {said}",
+        interrupted.elapsed()
+    );
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_ne!(
+        unsafe { libc::kill(test_process, 0) },
+        0,
+        "the test outlived the pass"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    assert!(
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["strong"].is_null()),
+        "{listed}"
+    );
+
+    // The rest: `true` runs `b` alone, which kills it as it does `<=`.
+    std::fs::remove_file(project.root.join("hold")).unwrap();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(
+        said.contains(
+            "1 mutant(s) resume where earlier passes left them, with 1 of 2 candidates left"
+        ),
+        "{said}"
+    );
+    assert_eq!(reply["summary"]["killed"], 5, "{reply}\n{said}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    for id in [
+        "src/lib.rs:2:5-2:11:FnValue:true",
+        "src/lib.rs:2:7-2:8:BinaryOperator:<=",
+    ] {
+        assert_eq!(
+            strong_of(&listed, id)["killedBy"],
+            "tests/t.rs::b",
+            "{listed}"
+        );
+    }
+}

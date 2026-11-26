@@ -2220,7 +2220,7 @@ impl Progress {
                     // ends after it (a poll earlier, for a signal the
                     // supervisor heard first).
                     let _ = std::fs::write(
-                        results.with_file_name(STOPPED_AT),
+                        results.with_file_name(supercov_engine::strong_driver::STOPPED_AT),
                         now_ms()
                             .saturating_sub(SAVE_INTERVAL.as_millis() as u64)
                             .to_string(),
@@ -2248,10 +2248,6 @@ impl Drop for Progress {
         let _ = self.thread.take().map(std::thread::JoinHandle::join);
     }
 }
-
-/// The file beside a pass's results that says when the pass began to stop,
-/// in milliseconds since the epoch (`playwrightStrongReporter.mjs` reads it).
-const STOPPED_AT: &str = "stopped-at";
 
 /// Now, in milliseconds since the epoch.
 fn now_ms() -> u64 {

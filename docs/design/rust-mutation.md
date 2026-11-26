@@ -216,9 +216,39 @@ options given to `cargo test`. Then:
   (`<binary> --exact <name> --test-threads=1`), each in its own process,
   through the target runner Cargo would use, in the package's directory, as
   a measured run runs them. A mutant's candidates run cheapest first and stop
-  at the first that fails: `killed`, `killedBy` that test. Past its limit:
-  `timeout`. All passing: `survived`. Mutants run side by side, half the
-  CPUs by default (`SUPERCOV_STRONG_JOBS`).
+  at the first that fails: `killed`, `killedBy` that test. All passing:
+  `survived`. Mutants run side by side, half the CPUs by default
+  (`SUPERCOV_STRONG_JOBS`), each test process in a process group of its
+  own, which its limit or the pass's stop ends whole (nextest's and
+  rustdoc's test processes with it).
+- **Timeouts, at the machine's speed.** A test past its limit beside the
+  pass's other tests decides nothing yet: once every switched mutant has
+  run, each such mutant runs again alone, one at a time. Its test first runs
+  again without the mutant, and its limit there is 3 times the slower of
+  that run and its baseline, and 10 s; the mutant then runs against the
+  candidates it has not passed. Only past that limit is it a `timeout`
+  (`ran past 10120 ms, alone, after its test ran again without the mutant`).
+  A baseline measured while the machine was quieter (the baselines run
+  first, side by side) does not make a slow test a timeout once a CI runner
+  is busier; a test that does not pass without the mutant then is an
+  `error`. A mutant that never ends costs its limit twice and one run of
+  its test. A test stopped at the hit limit counts evaluations, not time,
+  and is a `timeout` at once.
+- **Stopping.** The CLI writes `stopped-at` beside the pass's results before
+  it signals the pass, for `--budget` or a signal alike. From then the pass
+  starts nothing, ends the process groups it runs (a build among them), and
+  judges nothing they said: their mutants are left for the next pass. It
+  ends at once, with the signal's exit code (143 for the budget, which the
+  CLI reads as a finished pass). Each candidate a mutant passes is written
+  as it passes (`{"progress": true, "id": .., "passed": [..]}`), so the next
+  pass runs that mutant against the rest (`docs/mutation.md`, partial
+  progress): each test runs in a process of its own, so its passing holds
+  whatever runs beside or after it. A test process ended by SIGINT,
+  SIGTERM or SIGHUP waits up to 2 s for the stop to show before it is
+  judged. Up to this release, the Rust pass did not look for the stop: a
+  budget ran 8 s past and ended the command with exit 143, leaving its test
+  processes running; a Ctrl-C ended each test process of the terminal's
+  group, and the pass saved each of those mutants as `killed`.
 - **Doctests** are compiled by rustdoc against the switched library: a
   mutant's doctests run after its libtest candidates, in one
   `cargo test --doc -p <package> -- <names>` with the mutant on.

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Rust strong pass interrupted by Ctrl-C no longer saves the mutants whose tests were running as `killed`. The terminal's signal ended each test process with the pass, and the pass read each such end as a failing test: on a fixture, a mutant every test lets live was saved as killed. Each test process now runs in a process group of its own, the pass alone hears the signal, ends the groups it runs, judges nothing they said, and exits 130 at once; the next pass runs those mutants.
+- `--budget` now ends a Rust strong pass in time, as a finished pass. The Rust pass did not look for the stop: it ran on until the command ended it 8 s past its budget with exit 143, which failed the CI job, and left its test processes running. Once the budget is spent (`stopped-at`), the pass starts nothing more, ends what it runs, and leaves its undecided mutants for the next pass: on a fixture, 0.3 s past a 32 s budget, exit 0, `4 mutant(s) left without a verdict, for the next pass`.
+- A Rust strong pass no longer calls a mutant a `timeout` because the machine became busier after the baselines ran. A test past its limit beside other tests now runs again alone, after a run of its test without the mutant, and its limit there is 3× the slower of that run and its baseline, + 10 s; only past that is the mutant a `timeout` (`ran past … ms, alone, after its test ran again without the mutant`). On a fixture whose test takes 11 s once its baseline has run, a kill and a survivor were timeouts; they are now `killed` and `survived`, and a mutant that never ends is still a `timeout`.
+- A Rust test process that could not be started now makes its mutant an `error`, not `killed`.
+
+**Changed**
+
+- A Rust strong pass records each candidate a mutant passes as it passes it, so a pass stopped by its budget or a signal leaves the next pass only the rest of that mutant's candidates (`N mutant(s) resume where earlier passes left them`), as Playwright's pass does.
+
 ## 4.29.17
 
 **Fixed**
