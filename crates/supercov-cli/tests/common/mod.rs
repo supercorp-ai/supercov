@@ -63,6 +63,96 @@ test(\"shipping is free over fifty\", () => {
 });
 ";
 
+/// A port for a server a test's project starts on a port it names, held
+/// until the test drops it. Drawn from 20000-32767, below every system's
+/// ephemeral range (Linux's starts at 32768, macOS's and Windows' at 49152),
+/// so nothing the system hands a port to (a listener on port 0, an outgoing
+/// connection) is given it; claimed by a file of its number that names this
+/// process, which every other test and gate script (`scripts/free-ports.mjs`)
+/// draws against, so no two hold it at once; and free of a listener when
+/// drawn. A port the system picked was free when the test took it, and was
+/// handed out again before the project's server bound it: Playwright then
+/// refused to start the pass, its URL "already used" by another test's
+/// server.
+#[cfg(unix)]
+pub struct Port {
+    number: u16,
+    claim: PathBuf,
+}
+
+#[cfg(unix)]
+impl Port {
+    pub fn number(&self) -> u16 {
+        self.number
+    }
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for Port {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.number.fmt(formatter)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Port {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.claim);
+    }
+}
+
+/// Where ports are claimed: one file a port, holding its holder's pid.
+#[cfg(unix)]
+pub fn port_claims() -> PathBuf {
+    std::env::temp_dir().join("supercov-ports")
+}
+
+/// One free port (`Port`).
+#[cfg(unix)]
+pub fn free_port() -> Port {
+    use std::hash::{BuildHasher, Hasher};
+    const FIRST: u16 = 20000;
+    const COUNT: u16 = 12768;
+    let claims = port_claims();
+    fs::create_dir_all(&claims).unwrap();
+    for _ in 0..1000 {
+        let draw = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        let number = FIRST + (draw % u64::from(COUNT)) as u16;
+        let claim = claims.join(number.to_string());
+        let created = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&claim);
+        let mut file = match created {
+            Ok(file) => file,
+            Err(_) => {
+                // A claim whose process is gone (a test stopped by its
+                // runner) is stale: freed for a later draw.
+                let holder = fs::read_to_string(&claim)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<i32>().ok());
+                let gone = |pid: i32| {
+                    // SAFETY: signal 0 sends nothing; it asks whether `pid` is a process.
+                    let refused = unsafe { libc::kill(pid, 0) } != 0;
+                    refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                };
+                if holder.is_some_and(|pid| pid > 0 && gone(pid)) {
+                    let _ = fs::remove_file(&claim);
+                }
+                continue;
+            }
+        };
+        write!(file, "{}", std::process::id()).unwrap();
+        let port = Port { number, claim };
+        if TcpListener::bind(("127.0.0.1", number)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port in {FIRST}-{}", FIRST + COUNT - 1);
+}
+
 pub struct Project {
     pub root: PathBuf,
 }
