@@ -67,7 +67,8 @@ jobs:
           mine=$(( (runs + shards - 1) / shards ))
           for i in $(seq "$hogs"); do (while :; do :; done) & done
           mkdir -p "$RUNNER_TEMP/out"
-          binary=$(cargo test -q -p supercov --test "${TEST%%/*}" --no-run --message-format json | jq -r 'select(.executable != null) | .executable' | tail -1)
+          binary=$(cargo test -q -p supercov --test "${TEST%%/*}" --no-run --message-format json | jq -r --arg name "${TEST%%/*}" 'select(.target.kind == ["test"] and .target.name == $name and .executable != null) | .executable' | tail -1)
+          echo "binary: $binary"
           one() {
             local start=$(date +%s)
             if (cd crates/supercov-cli && "$binary" --include-ignored --exact "${TEST#*/}") > "$RUNNER_TEMP/out/$1.log" 2>&1 \
