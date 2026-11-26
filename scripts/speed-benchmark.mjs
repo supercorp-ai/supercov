@@ -224,6 +224,34 @@ export default {
       },
     };
   },
+  // A large Next.js app, generated (benchmarks/large-app/generate.mjs): heavy
+  // client chunks, pages read from node:sqlite, and 300 tests of six page
+  // loads or navigations each, every one in a context of its own. A suite of
+  // that size runs in parts on many machines, so SPEED_SHARD (`k/n`) runs
+  // one part, as a CI matrix's job does.
+  large() {
+    const project = join(output, 'large-app');
+    if (!existsSync(project)) {
+      run(output, process.execPath, [new URL('../benchmarks/large-app/generate.mjs', import.meta.url).pathname, project], 'generate');
+      run(project, 'git', ['init', '-q'], 'git-init');
+      run(project, 'npm', ['install', '--no-audit', '--no-fund'], 'install');
+      run(project, 'git', ['add', '-A'], 'git-add');
+      run(project, 'git', ['-c', 'user.name=speed', '-c', 'user.email=speed@example.com', 'commit', '-qm', 'generated'], 'git-commit');
+    }
+    run(project, 'npx', ['playwright', 'install', 'chromium'], 'browser');
+    return {
+      project,
+      description: process.env.SPEED_SHARD ? `part ${process.env.SPEED_SHARD} of the generated suite` : 'the generated suite once',
+      suites: [
+        {
+          name: 'e2e',
+          mayFail: true,
+          command: ['npx', 'playwright', 'test', '--config', 'tests/playwright.config.ts', ...(process.env.SPEED_SHARD ? ['--shard', process.env.SPEED_SHARD] : [])],
+        },
+      ],
+      reset() {},
+    };
+  },
   // Excalidraw, a large Vite app: its Vitest suite, and its Vite production
   // build alone, the build a measured end-to-end run serves its app from.
   excalidraw() {
