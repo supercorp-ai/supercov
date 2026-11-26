@@ -239,8 +239,10 @@ test("a page's watch keeps the timers, frames and sockets it has yet to run", as
   // An interval: its next time, from when it was set.
   const interval = run("setInterval(() => {}, 1)");
   await new Promise((done) => setTimeout(done, 20));
+  const asked = Date.now();
   const due = work().due;
-  assert.ok(due >= Date.now() && due <= Date.now() + 1, `${due}`);
+  const answered = Date.now();
+  assert.ok(due >= asked && due <= answered + 1, `${asked} ${due} ${answered}`);
   run(`clearInterval(${interval})`);
   run("setInterval(() => {}, 0)");
   assert.ok(work().due <= Date.now());
