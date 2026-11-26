@@ -80,6 +80,21 @@ function internally(owner, work) {
         Error.prepareStackTrace = prepareStackTrace;
     }
 }
+/**
+ * The Playwright object behind one of the collector's proxies (`wrap`). The
+ * suite's `page` fixture is the proxy of a page the collector registered
+ * already, when its context opened it: registered again by its proxy, every
+ * page and its context were known twice, and every action told the page and
+ * its cookies its phase twice, the context ran the runtime and the test's
+ * scripts twice, and a test's evidence was read twice and written twice.
+ */
+const proxiedTargets = new WeakMap();
+function unwrapped(value) {
+    // A proxy an earlier test's controller made, wrapped again by this one.
+    while (proxiedTargets.has(value))
+        value = proxiedTargets.get(value);
+    return value;
+}
 function bounded(promise, milliseconds) {
     let timer;
     return Promise.race([
@@ -461,6 +476,7 @@ class CoveragePhaseController {
     }
     /** Read a registered page's evidence while it can still be evaluated. */
     async snapshotBeforeClose(page) {
+        page = unwrapped(page);
         if (!this.pages.has(page) || this.snapshottedPages.has(page) || this.runtimeSnapshots)
             return;
         return internally(page, () => this.snapshotBeforeCloseNow(page));
@@ -552,6 +568,7 @@ class CoveragePhaseController {
      * know its phase, and its hits were left to be placed by their time.
      */
     registerPage(page) {
+        page = unwrapped(page);
         if (this.disposed)
             return Promise.resolve();
         let registration = this.pageRegistrations.get(page);
@@ -609,6 +626,7 @@ class CoveragePhaseController {
             void this.registerWorker(worker);
     }
     async registerContext(context, { adopted = false } = {}) {
+        context = unwrapped(context);
         if (this.contexts.has(context) || this.disposed)
             return;
         this.contexts.add(context);
@@ -713,6 +731,7 @@ class CoveragePhaseController {
             register(page);
     }
     async registerWorker(worker) {
+        worker = unwrapped(worker);
         if (this.workers.has(worker))
             return;
         this.workers.add(worker);
@@ -973,6 +992,7 @@ class CoveragePhaseController {
         });
         this.proxyCache.set(target, proxy);
         this.proxyTargets.set(proxy, target);
+        proxiedTargets.set(proxy, target);
         // Playwright's built-in `page` fixture is created through the wrapped
         // worker-scoped browser. The test-scoped fixture sees that proxy again;
         // treating our own proxy as a fresh target would nest wrappers, emit two
@@ -1436,6 +1456,7 @@ function liveTrackedContexts() {
 }
 /** The controller that registered `page`, whichever test it belongs to. */
 function controllerOwning(page) {
+    page = unwrapped(page);
     if (activeController?.pages.has(page))
         return activeController;
     for (const controller of controllers.values())
