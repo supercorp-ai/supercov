@@ -174,6 +174,36 @@ test("a job past its limit beside others runs again alone before it is a timeout
     assert.ok(summary.alone >= 1, JSON.stringify(summary));
 });
 
+// The machine slows down once the baselines have run (other work on it):
+// every job then takes 2.5 s, past the limit their 1 ms baselines set. One
+// job at a time, so none waited on another: each runs again alone, its limit
+// from its tests run again without the mutant, and the verdicts are the ones
+// a machine as slow throughout reaches. Before, every one was a timeout.
+test("a job past its limit on a machine slower than at its baseline is judged at the machine's speed now", async () => {
+    const tests = [test_("w1", "t/w.test.js"), test_("w2", "t/w.test.js")];
+    const mutants = Array.from({ length: 3 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }));
+    const listed = mutants.map(({ id }) => ({ id }));
+    const rules = { "*": { w1: "loaded" }, "src/a.js#0": { w1: "loaded,fail" }, "src/a.js#2": { w1: "hang" } };
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 1 });
+    const status = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id, verdict.status]));
+    assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "timeout" }, JSON.stringify(summary));
+    assert.equal(summary.alone, 3, JSON.stringify(summary));
+});
+
+// Once the pass is told to stop, its jobs are stopped under their tests: a
+// job that ends then (here, one that marks the stop and exits, as a job the
+// stop reached first) did not finish its file, and was taken for a kill.
+// Now nothing is judged from then on, and the mutant is left for the next
+// pass.
+test("a job that ends once the pass is told to stop decides nothing", async () => {
+    const tests = [test_("w1", "t/w.test.js")];
+    const mutants = [{ id: "m0", file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }];
+    const rules = { "src/a.js#0": { w1: "stops" } };
+    const { verdicts, summary } = await pass({ tests, mutants, listed: [{ id: "m0" }], rules, files: { "t/w.test.js": ["w1"] }, workers: 1 });
+    assert.deepEqual(verdicts, {}, JSON.stringify(summary));
+    assert.ok(summary, "the pass still says what it did");
+});
+
 // Alone work waits for the shared work under way, and holds back the work
 // that comes after it, first come first served; shared work knows whether it
 // had company.
