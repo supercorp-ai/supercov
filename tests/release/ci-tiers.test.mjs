@@ -58,3 +58,12 @@ test('a release needs both tiers in full, from GitHub Actions, as their newest s
   // Anyone who can push can post a status: only GitHub Actions' count.
   assert.deepEqual(missing([by('Fast tier', 'success', IN_FULL, 'someone'), by('Slow tier', 'success', IN_FULL, 'someone')]), ['no Fast tier status', 'no Slow tier status']);
 });
+
+test('the newest run that set a tier on a commit stands, and an older one does not set it again', async () => {
+  const { standingRun } = await import('../../scripts/ci-tiers.mjs');
+  const by = (context, run, login = 'github-actions[bot]') => ({ context, creator: { login }, target_url: `https://github.com/o/r/actions/runs/${run}` });
+  assert.equal(standingRun([by('Slow tier', 45833849393), by('Slow tier', 45833800101)], 'Slow tier'), 45833849393);
+  assert.equal(standingRun([by('Fast tier', 7)], 'Slow tier'), 0);
+  assert.equal(standingRun([by('Slow tier', 9, 'someone')], 'Slow tier'), 0);
+  assert.equal(standingRun([], 'Slow tier'), 0);
+});

@@ -113,6 +113,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # Whether this run was cancelled, and which run set the status last.
+      actions: read
       statuses: write
     steps:
       - uses: actions/checkout@v6

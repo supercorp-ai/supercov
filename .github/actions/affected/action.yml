@@ -96,28 +96,38 @@ runs:
         wait "$files" || true
         echo "tests affected answered in $(( $(date +%s) - started )) s"
         jq -c '{summary: .data.summary, workingTree: .data.workingTree, unmeasured: .data.unmeasured, error: .error}' "$answer/affected.json" | head -c 3000; echo
-    # Each test's seconds in main's newest Self Coverage run, which every job
+    # Each test's seconds in main's newest Self Coverage runs, which every job
     # of this run deals its tests by (scripts/ci-affected.mjs): the committed
     # .github/test-seconds.tsv goes stale as tests are added, and a test it
     # does not time landed in Self Coverage's first slice, which took twice
-    # as long as the others. Without them, the committed file is used. After
-    # the map is asked: the file is not one the map should see changed.
+    # as long as the others. The most a test took in any of the last three
+    # runs: one gate took 4 s in one run and 194 s in the next, and dealt by
+    # one run's seconds the slices still ended 12 to 20 minutes apart.
+    # Without them, the committed file is used. After the map is asked: the
+    # file is not one the map should see changed.
     - name: Fresh test seconds
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         : > test-seconds.tsv
+        kept=0
         while read -r id; do
           [ -n "$id" ] || continue
-          if gh run download "$id" --repo "$GITHUB_REPOSITORY" -n test-seconds -D "$RUNNER_TEMP/test-seconds" 2>/dev/null; then
-            cp "$RUNNER_TEMP/test-seconds/test-seconds.tsv" test-seconds.tsv
-            echo "Test seconds of Self Coverage run $id: $(wc -l < test-seconds.tsv) test(s)."
-            break
+          if gh run download "$id" --repo "$GITHUB_REPOSITORY" -n test-seconds -D "$RUNNER_TEMP/test-seconds/$id" 2>/dev/null; then
+            kept=$((kept + 1))
+            echo "Test seconds of Self Coverage run $id: $(wc -l < "$RUNNER_TEMP/test-seconds/$id/test-seconds.tsv") test(s)."
+            [ "$kept" -lt 3 ] || break
           fi
-        done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow self-coverage.yml --branch main --status success --limit 10 \
+        done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow self-coverage.yml --branch main --status success --limit 15 \
           --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
-        [ -s test-seconds.tsv ] || echo "No Self Coverage run of main kept its test seconds: the committed ones are used."
+        if [ "$kept" -gt 0 ]; then
+          cat "$RUNNER_TEMP"/test-seconds/*/test-seconds.tsv \
+            | awk -F'\t' '{ if ($2 > w[$1]) w[$1] = $2; if ($3 > c[$1]) c[$1] = $3 } END { for (n in w) printf "%s\t%.1f\t%.1f\n", n, w[n], c[n] }' \
+            | LC_ALL=C sort > test-seconds.tsv
+        else
+          echo "No Self Coverage run of main kept its test seconds: the committed ones are used."
+        fi
         echo "CI_TEST_SECONDS=$PWD/test-seconds.tsv" >> "$GITHUB_ENV"
     - name: Plan the jobs
       id: plan

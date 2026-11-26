@@ -103,6 +103,16 @@ export function missing(statuses) {
   return gaps;
 }
 
+/**
+ * The run whose status for `context` stands on a commit: the newest one
+ * GitHub Actions posted (the API lists them newest first), by the run id in
+ * its link, or 0 where there is none.
+ */
+export function standingRun(statuses, context) {
+  const status = statuses.find((each) => each.context === context && each.creator?.login === ACTIONS);
+  return Number(/\/actions\/runs\/(\d+)/u.exec(status?.target_url ?? '')?.[1] ?? 0);
+}
+
 // ------------------------------------------------------------------ GitHub
 
 const repository = () => process.env.GITHUB_REPOSITORY;
@@ -110,9 +120,36 @@ const gh = (...args) => execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 const runUrl = () => `${process.env.GITHUB_SERVER_URL}/${repository()}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
+const statusesOf = (sha) => gh('api', '--paginate', `repos/${repository()}/commits/${sha}/statuses?per_page=100`, '--jq', '.[] | @json')
+  .split('\n').filter(Boolean).map((line) => JSON.parse(line));
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Sets `context` on a commit for this run, unless a newer run has: run ids
+ * grow with each run, and the newest run that says anything about a commit
+ * is the one that stands. A run cancelled by a newer one (a push, then the
+ * `ready` label, seconds apart) posted after it, and left the commit pending
+ * where the newer run had said more. A run that is itself cancelled posts
+ * nothing. Read again after writing: of two runs writing at once, the newer
+ * one writes again, and the older finds it outranked.
+ */
 function post(sha, context, state, description) {
-  gh('api', `repos/${repository()}/statuses/${sha}`, '-f', `state=${state}`, '-f', `context=${context}`,
+  const me = Number(process.env.GITHUB_RUN_ID);
+  const write = () => gh('api', `repos/${repository()}/statuses/${sha}`, '-f', `state=${state}`, '-f', `context=${context}`,
     '-f', `description=${description.slice(0, 140)}`, '-f', `target_url=${runUrl()}`, '--silent');
+  const conclusion = gh('api', `repos/${repository()}/actions/runs/${me}`, '--jq', '.conclusion // ""').trim();
+  if (conclusion === 'cancelled') {
+    console.log(`${context} on ${sha}: not set, this run was cancelled`);
+    return;
+  }
+  const standing = standingRun(statusesOf(sha), context);
+  if (standing > me) {
+    console.log(`${context} on ${sha}: not set, run ${standing} is newer and has set it`);
+    return;
+  }
+  write();
+  pause(5000);
+  if (standingRun(statusesOf(sha), context) < me) write();
   console.log(`${context} on ${sha}: ${state}, ${description}`);
 }
 
@@ -195,8 +232,7 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
         }
       }
       if (git('rev-parse', `${candidate}^{tree}`) !== tree) continue;
-      const statuses = gh('api', '--paginate', `repos/${repository()}/commits/${candidate}/statuses?per_page=100`, '--jq', '.[] | @json')
-        .split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      const statuses = statusesOf(candidate);
       const gaps = missing(statuses);
       if (gaps.length === 0) {
         console.log(`Tree ${tree} passed both tiers in full on ${candidate}.`);
