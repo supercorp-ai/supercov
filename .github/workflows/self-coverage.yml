@@ -353,6 +353,10 @@ jobs:
           # their seconds.
           if [ "$AFFECTED" = true ]; then
             names=$(node scripts/ci-affected.mjs cargo-test "$RUNNER_TEMP/affected/selection.json" "$slice" "$AFFECTED_SLICES")
+            # Less what this platform cannot run: a change to the gates' file
+            # picks every gate in it.
+            names=$(printf '%s\n' $names | grep -vxF -f <(printf '%s\n' $elsewhere $tests_elsewhere) | tr '\n' ' ')
+            [ -n "${names// }" ] || names=no_test_was_dealt_to_this_slice
             echo "command=cargo test --workspace -- --include-ignored --exact $names" >> "$GITHUB_OUTPUT"
             exit 0
           fi
