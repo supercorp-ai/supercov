@@ -201,12 +201,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # One Rust cache per platform, saved by the job that builds the whole
-      # workspace and restored by the rest: every job compiled from nothing.
+      # The Compatibility jobs' Rust cache, kept by main
+      # (dependency-caches.yml), never saved by a pull request.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: ${{ matrix.partition == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # The workspace's tests run Maven and Gradle where a JDK is found, and
       # every runner here has one. Restored only: the JDK jobs below keep
@@ -270,10 +270,11 @@ jobs:
           python-version: ${{ matrix.python }}
           architecture: ${{ matrix.os == 'windows-11-arm' && (matrix.python == '3.9' || matrix.python == '3.10') && 'x64' || '' }}
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # Built in a step of its own: with no Rust cache yet for this platform
       # (a pull request's first run), the build alone took 14 of the test
@@ -330,10 +331,11 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # Before Ruby, and that order is the whole point. `ruby/setup-ruby`
       # installs an MSYS2 toolchain on arm64 Windows and puts its clang on
@@ -371,10 +373,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: ${{ matrix.os == 'ubuntu-latest' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # One of the nextest releases the gate runs under; it fetches the other,
       # 0.9.148, itself. Any release from 0.9.138 is accepted.
       - uses: taiki-e/install-action@v2
@@ -426,10 +429,11 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # Built in a step of its own: with no Rust cache yet for this platform
       # (a pull request's first run), the build alone took 14 of the test
@@ -530,10 +534,11 @@ jobs:
       # where the tests look, without Maven, which not every runner has.
       - uses: ./.github/actions/apache-ant
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # Built in a step of its own: with no Rust cache yet for this platform
       # (a pull request's first run), the build alone took 14 of the test

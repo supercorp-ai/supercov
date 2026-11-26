@@ -72,7 +72,8 @@ runs:
           mkdir -p "$(dirname "$HOME/.m2/repository/$jar")"
           cp "$kept/$jar" "$HOME/.m2/repository/$jar"
         done
-    - if: steps.kept.outputs.cache-hit != 'true'
+    # Not by a run on a branch other than main, which no pull request reads.
+    - if: steps.kept.outputs.cache-hit != 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
       uses: actions/cache/save@v4
       with:
         path: ~/.cache/supercov-ant

@@ -1,12 +1,17 @@
 name: Dependency caches
 
-# What the tests' Maven and Gradle builds fetch, and Apache Ant with the jars
-# its tests use, kept in main's Actions cache. A pull request's runs can read
-# main's caches and their own, never another pull request's: with nothing on
-# main, the first round of every pull request fetched it all from Maven
-# Central and Apache, which refused with HTTP 429 often enough on 2026-11-23
-# to fail whole rounds. Each pull request's runs add what they fetch beyond
-# this to caches of their own (.github/actions/jvm-dependencies).
+# The caches pull requests restore, kept in main's Actions cache: the Rust
+# builds' dependencies (CI's toolchain, and Compatibility's), npm's
+# packages, the system packages Chromium needs, what the tests' Maven and
+# Gradle builds fetch, and Apache Ant with the jars its tests use.
+#
+# A pull request's runs can read main's caches and their own, never another
+# pull request's. With nothing on main, every pull request saved a copy of
+# each for itself -- some forty caches, a Rust build's dependencies at
+# 400 MB each -- and the repository has 10 GB for all of them: main's were
+# the first evicted, so the next pull request found nothing either. Pull
+# requests now save only what main does not keep (the JVM caches grow by
+# what a run fetched beyond them), and this keeps main's.
 #
 # The tests are run here for what they fetch, not for their verdicts: a test
 # failing does not fail this workflow, and CI and Compatibility judge them.
@@ -14,16 +19,29 @@ name: Dependency caches
 on:
   push:
     branches: [main]
+    # What the caches' keys are made of: the lockfiles and manifests, the
+    # toolchains the workflows name, and these actions.
     paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+      - package-lock.json
       - .github/actions/jvm-dependencies/**
       - .github/actions/apache-ant/**
+      - .github/actions/system-packages/**
       - .github/fetch-verified.sh
       - .github/workflows/dependency-caches.yml
+      - .github/workflows/ci.yml
+      - .github/workflows/compatibility.yml
   # Weekly as well: a cache nothing reads for seven days is evicted, and new
   # tests fetch new things.
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
+    inputs:
+      os:
+        description: "JSON list of runners for the JVM job. Empty runs every platform it seeds."
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -33,21 +51,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  jvm:
-    name: JVM dependencies (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        # Every platform a pull request's JVM tests run on.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+  # CI's one Rust cache (shared key `ci`, toolchain 1.95.0): what each of its
+  # Linux jobs builds -- the workspace's tests, clippy, the CLI, the release
+  # build the release gates link with cargo-zigbuild -- in one target
+  # directory, so that every job restores what it needs from one cache.
+  rust:
+    name: CI's Rust cache and system packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
+          # npm's cache for main only: a run on another branch would keep a
+          # copy no pull request can read.
+          cache: ${{ github.ref == 'refs/heads/main' && 'npm' || '' }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - run: npm ci
+      # engine-integrations' and rust-wasm-js's Chromium libraries.
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx playwright install-deps chromium
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          prefix: apt-chromium-${{ runner.os }}-${{ runner.arch }}-
+      - run: cargo nextest run --workspace --no-run
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo build -p supercov
+      - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
+      - run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+  jvm:
+    name: JVM dependencies (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every platform a pull request's JVM tests run on.
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON('["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          # npm's cache for main only: a run on another branch would keep a
+          # copy no pull request can read.
+          cache: ${{ github.ref == 'refs/heads/main' && 'npm' || '' }}
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -55,29 +118,49 @@ jobs:
       - uses: ./.github/actions/jvm-dependencies
         with:
           step: restore
-      - uses: ./.github/actions/apache-ant
+      # As Compatibility's JDK jobs have them: the Kotlin compiler, the JUnit
+      # Platform console runner, and Apache Ant with its jars.
+      - name: Install the Kotlin compiler
+        shell: bash
+        run: |
+          version=2.2.20
+          bash .github/fetch-verified.sh \
+            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip" \
+            "$RUNNER_TEMP/kotlin.zip" sha256
+          unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/kotlinc/bin" >> "$GITHUB_PATH"
       - name: Fetch the JUnit Platform console runner
         shell: bash
         run: |
           path=org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
-          bash .github/fetch-verified.sh "https://repo1.maven.org/maven2/$path" "$HOME/.m2/repository/$path" sha1
+          jar="$HOME/.m2/repository/$path"
+          bash .github/fetch-verified.sh "https://repo1.maven.org/maven2/$path" "$jar" sha1
+          [ "$RUNNER_OS" = Windows ] && jar=$(cygpath -w "$jar")
+          echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/apache-ant
       - uses: dtolnay/rust-toolchain@stable
+      # Compatibility's Rust cache: the workspace's tests, built here.
       - uses: Swatinem/rust-cache@v2
         with:
-          # The Rust cache the Compatibility jobs restore, on main too: a pull
-          # request's first run compiled everything from nothing.
           shared-key: compatibility
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
       - run: npm ci
-      # What Compatibility's JDK jobs run.
+      - run: cargo nextest run --workspace --no-run && cargo test --no-run -p supercov-engine --test jvm_frontend --test jvm_run && cargo build -p supercov
+        timeout-minutes: 30
+      # What Compatibility's JDK jobs run, with the limit they give it.
       - run: npm run test:jvm
         continue-on-error: true
+        timeout-minutes: 28
+        env:
+          SUPERCOV_REQUIRE_JVM: "1"
       # The CLI's tests, which build Maven and Gradle projects of their own,
       # as CI's check and Compatibility's filesystem jobs run them.
       - run: cargo nextest run -p supercov --no-fail-fast
         continue-on-error: true
+        timeout-minutes: 30
       # The scripts engine-integrations runs that build with Maven.
       - if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
