@@ -164,6 +164,21 @@ pub(crate) fn list(
     if points_changed {
         return None;
     }
+    // What the instrumenter declares and cannot probe (a `const fn`'s body,
+    // which the compiler runs) is in the run's record and never hit: a link
+    // there would read the code as never run. Such a mutant is linked to
+    // nothing, and reached for all the run knows.
+    let declined = manifest
+        .unmeasured
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let measured = recorded
+        .iter()
+        .filter(|id| !declined.contains(id.as_str()))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let recorded = &measured;
     // The innermost recorded one of `candidates` whose range holds `range`.
     let innermost = |candidates: &[(String, TextRange)], range: TextRange| {
         candidates
@@ -1648,5 +1663,33 @@ mod tests {
         );
         assert!(probed.iter().any(|m| m.mutator == "StructField"));
         assert_eq!(arithmetic_code(""), ' ');
+    }
+
+    /// A `const fn`'s body is declared and never probed: the run records
+    /// its points, never hit, and a mutant there is linked to none of them,
+    /// so it is reached for all the run knows, not `not-reached`.
+    #[test]
+    fn a_mutant_in_a_const_fn_is_linked_to_nothing() {
+        let file = "src/lib.rs";
+        let source = "pub const fn named(s: &str) -> bool {\n    !s.is_empty()\n}\npub fn plain(s: &str) -> bool {\n    !s.is_empty()\n}\n";
+        let manifest = crate::rust_instrumenter::build_rust_manifest(file, source).unwrap();
+        let recorded = manifest
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .chain(manifest.unmeasured.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let listed = list(file, source, &recorded).unwrap();
+        let negations = listed
+            .iter()
+            .filter(|mutant| mutant.mutator == "UnaryOperator")
+            .collect::<Vec<_>>();
+        assert_eq!(negations.len(), 2, "{listed:?}");
+        assert!(
+            negations[0].statement.is_none() && negations[0].function.is_none(),
+            "{:?}",
+            negations[0]
+        );
+        assert!(negations[1].statement.is_some(), "{:?}", negations[1]);
     }
 }

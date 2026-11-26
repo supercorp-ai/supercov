@@ -106,7 +106,11 @@ a built-in integer, float, `bool` or `char`; anything else records
 can be borrowed. An operator's probe evaluates its operands a second time,
 so it goes only where they are pure: paths, fields, indexes, literals,
 casts, dereferences, parentheses and arithmetic of those, never a call. A
-literal takes the other operand's type, as the operator gives it. Probes go
+literal takes the other operand's type, as the operator gives it. An
+operand of literals alone (`1 << 83`) has no probe: it takes its type from
+where it stands, and evaluated apart it is an `i32`, which can overflow where
+the original does not (itoa's `n < 1 << 83`, `n` a `u128`, failed every
+`u128` test of the measured run). Probes go
 only where the instrumenter places probes at all: not in macros, test code,
 const contexts or an allocator. A returned value's wrapper goes around every
 wrapper the instrumenter placed at its range, and inside every one around it
@@ -198,6 +202,24 @@ only stop a loop sooner, and could not tell a loop the mutant made endless
 from code that evaluates the mutant many times and ends: such a test would
 read as a timeout where cargo-mutants, which has no limit of the kind, runs
 it to its end.
+
+## What the plan decides, and what still compiles
+
+The plan decides a mutant no test reaches (`no-coverage`) or none infects
+(`survived`) without running it. cargo-mutants builds every mutant first, and
+reports one that does not compile as `unviable` whatever the tests would do.
+So the CLI gives the Rust driver its plan-decided mutants too (`decided` in
+`plan.json`), and the driver switches those a switch can hold into its
+build, only to find whether they compile: one that does not is `unviable`
+(a body replaced by `Default::default()` where the type has no `Default`);
+one that does keeps the plan's verdict, and nothing runs it. One a switch
+cannot hold is not built on its own for this: it keeps the plan's verdict
+(semver's unreached `const`, below).
+
+A mutant in a `const fn` is linked to no statement: the instrumenter
+declares a `const fn`'s body (`unmeasured`) and cannot probe it, so its
+points are in the run's record and never hit. Linked to one, the mutant read
+as code no test ran, though the program calls the function at run time.
 
 ## The driver
 

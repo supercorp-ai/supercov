@@ -2866,6 +2866,24 @@ fn run_language(
     // The driver's time limit for an attempt goes with the plan it runs.
     let mut written = serde_json::to_value(&pass_plan).expect("plain data serializes");
     written["timeoutFactor"] = json!(factor);
+    // A Rust mutant the plan decided without running (no test reaches it,
+    // or none infects it) may not compile, which cargo-mutants reports as
+    // `unviable`: the driver switches it into its build too, to find out.
+    if language == supercov_engine::mutant_list::RUST {
+        written["decided"] = serde_json::to_value(
+            plan.mutants
+                .iter()
+                .filter(|mutant| {
+                    mutant.decided.is_some()
+                        && mutant.language == language
+                        && saved
+                            .get(&mutant.id)
+                            .is_none_or(|verdict| verdict.status != "unviable")
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("plain data serializes");
+    }
     // fault-site: mutants-test-command.run-language
     supercov_engine::fault_fs::write(
         &plan_path,

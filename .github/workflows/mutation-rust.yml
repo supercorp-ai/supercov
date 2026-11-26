@@ -73,7 +73,7 @@ jobs:
         run: |
           mkdir -p ../out
           # Stopped short of the job's limit, its outcomes so far are kept.
-          /usr/bin/time -v -o ../out/time.txt timeout 500 \
+          /usr/bin/time -v -o ../out/time.txt timeout 420 \
             cargo mutants -j "$JOBS" --no-shuffle ${{ matrix.args }} \
             --shard ${{ matrix.index }}/${{ matrix.shards }} --output ../out || echo "exit $?"
           cat ../out/time.txt | head -12
@@ -113,7 +113,7 @@ jobs:
           # The budget ends the pass in time; what it leaves would show as
           # mutants without a verdict.
           SUPERCOV_STRONG_JOBS="$JOBS" /usr/bin/time -v -o ../out/time.txt \
-            ../bin/supercov mutants --shard ${{ matrix.shard }}/${{ matrix.shards }} --budget 500 --json \
+            ../bin/supercov mutants --shard ${{ matrix.shard }}/${{ matrix.shards }} --budget 420 --json \
             -- ${{ matrix.test }} > ../out/strong.json 2> ../out/strong.log || echo "exit $?"
           head -12 ../out/time.txt; tail -15 ../out/strong.log
           ../bin/supercov runs latest mutants --format jsonl --output ../out/weak.jsonl || true
