@@ -63,19 +63,33 @@ jobs:
           runs=$(jq -r '.runs' .github/flake-proof.json)
           shards=$(jq -r '.shards' .github/flake-proof.json)
           hogs=$(jq -r '.hogs' .github/flake-proof.json)
+          parallel=$(jq -r '.parallel // 1' .github/flake-proof.json)
           mine=$(( (runs + shards - 1) / shards ))
           for i in $(seq "$hogs"); do (while :; do :; done) & done
           mkdir -p "$RUNNER_TEMP/out"
-          pass=0; fail=0
-          for i in $(seq "$mine"); do
-            start=$(date +%s)
-            if cargo test -q -p supercov --test "${TEST%%/*}" -- --exact "${TEST#*/}" > "$RUNNER_TEMP/out/$i.log" 2>&1; then
-              pass=$((pass + 1)); echo "run $i: pass ($(( $(date +%s) - start )) s)"
+          binary=$(cargo test -q -p supercov --test "${TEST%%/*}" --no-run --message-format json | jq -r 'select(.executable != null) | .executable' | tail -1)
+          one() {
+            local start=$(date +%s)
+            if (cd crates/supercov-cli && "$binary" --include-ignored --exact "${TEST#*/}") > "$RUNNER_TEMP/out/$1.log" 2>&1 \
+              && grep -q "test result: ok. 1 passed" "$RUNNER_TEMP/out/$1.log"; then
+              echo "run $1: pass ($(( $(date +%s) - start )) s)"
             else
-              fail=$((fail + 1)); echo "run $i: FAIL ($(( $(date +%s) - start )) s)"
-              grep -A12 "panicked" "$RUNNER_TEMP/out/$i.log" | cut -c1-3000
+              echo "run $1: FAIL ($(( $(date +%s) - start )) s)"
+              grep -A12 "panicked" "$RUNNER_TEMP/out/$1.log" | cut -c1-6000
             fi
+          }
+          i=0
+          while [ "$i" -lt "$mine" ]; do
+            batch=()
+            for j in $(seq "$parallel"); do
+              i=$((i + 1)); [ "$i" -le "$mine" ] || break
+              one "$i" > "$RUNNER_TEMP/out/$i.verdict" & batch+=($!)
+            done
+            wait "${batch[@]}"
           done
+          cat "$RUNNER_TEMP"/out/*.verdict
+          pass=$(cat "$RUNNER_TEMP"/out/*.verdict | grep -c ': pass' || true)
+          fail=$(cat "$RUNNER_TEMP"/out/*.verdict | grep -c ': FAIL' || true)
           echo "$TEST shard ${{ matrix.shard }}: $pass passed, $fail failed" | tee -a "$GITHUB_STEP_SUMMARY"
           printf '%s\t%s\t%s\t%s\n' "$TEST" "${{ matrix.shard }}" "$pass" "$fail" > "$RUNNER_TEMP/out/tally.tsv"
           kill $(jobs -p) 2>/dev/null || true

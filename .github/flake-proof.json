@@ -1,7 +1,8 @@
 {
-  "runs": 50,
-  "shards": 5,
+  "runs": 52,
+  "shards": 4,
   "hogs": 15,
+  "parallel": 4,
   "tests": [
     "cli/rust_compiled_to_wasm_under_node_tests_runs_its_mutants",
     "cli/a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one",
