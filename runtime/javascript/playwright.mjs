@@ -1400,8 +1400,33 @@ function readSnapshot(target) {
             return undefined;
         // Phase timing counts the bytes each read carried, as its "ms".
         timingCount("transfer.snapshotBytes", text.length);
-        return expandSnapshot(JSON.parse(text));
+        const parsed = JSON.parse(text);
+        const snapshot = expandSnapshot(parsed);
+        // The page wrote it with JSON.stringify, as the record will: kept,
+        // the record takes the text as it came instead of writing it again.
+        if (snapshot === parsed && snapshot && typeof snapshot === "object")
+            snapshotTexts.set(snapshot, text);
+        return snapshot;
     });
+}
+/**
+ * The text each snapshot was read as, where it is the snapshot's own
+ * JSON.stringify: a page's runtime writes it so (runtime.mjs,
+ * `__SUPERCOV_COLUMNS_SNAPSHOT__`), and parsing JSON that JSON.stringify
+ * wrote and writing it again gives the same text. A test's record holds its
+ * pages' snapshots, hundreds of kilobytes on a large frontend, and writing
+ * them again was most of what writing the record cost.
+ */
+const snapshotTexts = new WeakMap();
+const RECORD_SNAPSHOTS = "\u0000supercov-snapshots\u0000";
+/** `JSON.stringify(record)`, with its `browser` snapshots' kept texts. */
+function recordLine(record) {
+    const snapshots = record.browser;
+    const text = JSON.stringify({ ...record, browser: RECORD_SNAPSHOTS });
+    const placeholder = `"browser":${JSON.stringify(RECORD_SNAPSHOTS)}`;
+    const at = text.indexOf(placeholder);
+    const written = `[${snapshots.map((snapshot) => snapshotTexts.get(snapshot) ?? JSON.stringify(snapshot) ?? "null").join(",")}]`;
+    return `${text.slice(0, at)}"browser":${written}${text.slice(at + placeholder.length)}`;
 }
 let activeController;
 let bridgedAssertionDepth = 0;
@@ -2126,7 +2151,7 @@ const instrumentedFixtures = {
                         browser: browser.map(columnarEvents),
                         span: [startedAtMs, endedAtMs],
                     };
-                    appendEvidenceLine(`${JSON.stringify(payload)}\n`);
+                    appendEvidenceLine(`${recordLine(payload)}\n`);
                 }
                 finally {
                     strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true, ...stallDetails(stall) });
