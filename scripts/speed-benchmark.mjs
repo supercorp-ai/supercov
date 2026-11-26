@@ -45,7 +45,7 @@ function run(cwd, command, args, label, extra = {}, mayFail = false) {
   const started = process.hrtime.bigint();
   const result = spawnSync(command, args, {
     cwd,
-    env: { ...process.env, CI: 'true', ...extra },
+    env: { ...process.env, CI: 'true', PW_CALLS_DIR: join(output, 'calls', label), ...extra },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 256 * 1024 * 1024,

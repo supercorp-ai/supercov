@@ -1,0 +1,103 @@
+name: Worker CPU profile
+
+# DIAGNOSTIC ONLY (never merged): plain, base and new on parts of the
+# generated large app, every Node process CPU-profiled, the browser's pages
+# traced (their JavaScript and the renderer's own tasks), and every
+# Playwright call counted.
+
+on:
+  push:
+    branches: [diag/worker-cpu-profile]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-cpu-profile-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_REF: 8b9fafd0a953f31ec284647cd149c9ab2c2299cf
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        variant: [base, new]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.variant == 'base' && env.BASE_REF || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-${{ matrix.variant }}
+      - run: cargo build --profile measure -p supercov
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  profile:
+    needs: build
+    name: profile ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/16', '9/16']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      - run: npx -y playwright@1.49.1 install-deps chromium
+      - name: Measure
+        timeout-minutes: 8
+        env:
+          SUPERCOV_BINARIES: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
+          SPEED_APP: large
+          SPEED_ROUNDS: 0
+          SPEED_OUTPUT: ${{ runner.temp }}/speed
+          SPEED_DIAGNOSE: 1
+          SPEED_SHARD: ${{ matrix.shard }}
+          NODE_OPTIONS: --require=${{ github.workspace }}/scripts/speed/pw-calls.cjs
+        run: node scripts/speed-benchmark.mjs
+      - if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/keep"
+          for dir in "$RUNNER_TEMP"/speed/profiles/*/; do
+            name=$(basename "$dir")
+            for file in "$dir"*.cpuprofile; do
+              [ -f "$file" ] || continue
+              if grep -q 'playwright/lib' "$file" && ! grep -q 'next/dist/build/index' "$file"; then
+                mkdir -p "$RUNNER_TEMP/keep/$name"
+                gzip -c "$file" > "$RUNNER_TEMP/keep/$name/$(basename "$file").gz"
+              fi
+            done
+          done
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/keep/
+            ${{ runner.temp }}/speed/calls/
+            ${{ runner.temp }}/speed/browser-profile-*
+            ${{ runner.temp }}/speed/profile.md
+            ${{ runner.temp }}/speed/profile-*.txt
+            ${{ runner.temp }}/speed/logs/
+          retention-days: 7
