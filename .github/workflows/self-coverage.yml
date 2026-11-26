@@ -293,7 +293,10 @@ jobs:
             ~/Library/Caches/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
       # The build job's Supercov, once it has kept it: this slice started
-      # beside the build. A build that failed fails the slice.
+      # beside the build. A build that failed fails the slice. An artifact
+      # is listed a few seconds before it can be fetched (a slice found it
+      # 3 s after it was made and could not fetch it), so the fetch is the
+      # test, tried until it comes whole.
       - name: Wait for the build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -301,8 +304,12 @@ jobs:
           BUILD: Build on ${{ matrix.os }}
         run: |
           for attempt in $(seq 1 120); do
-            found=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=$ARTIFACT" --jq '.total_count' 2>/dev/null || echo 0)
-            [ "$found" -gt 0 ] && exit 0
+            rm -rf "$RUNNER_TEMP/self"
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D "$RUNNER_TEMP/self" 2>/dev/null \
+              && [ -s "$RUNNER_TEMP/self/supercov" ]; then
+              echo "Fetched $ARTIFACT after $attempt attempt(s)."
+              exit 0
+            fi
             # A job of a called workflow is named after its caller's job too.
             build=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
               --jq ".jobs[] | select(.name == \"$BUILD\" or (.name | endswith(\"/ $BUILD\"))) | .conclusion // \"\"" 2>/dev/null | head -1)
@@ -313,10 +320,6 @@ jobs:
           done
           echo "$BUILD kept no Supercov in twenty minutes."
           exit 1
-      - uses: actions/download-artifact@v5
-        with:
-          name: supercov-self-${{ matrix.os }}
-          path: ${{ runner.temp }}/self
       # The plan's selection, and the test seconds every slice deals by: the
       # same file for every slice, or a test could be dealt to none.
       - uses: actions/download-artifact@v5
