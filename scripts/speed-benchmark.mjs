@@ -38,6 +38,8 @@ const output =
 mkdirSync(output, { recursive: true });
 const logs = join(output, 'logs');
 mkdirSync(logs, { recursive: true });
+// Each run's answers (scripts/speed/answers.mjs), uploaded with the samples.
+mkdirSync(join(output, 'samples'), { recursive: true });
 
 function run(cwd, command, args, label, extra = {}, mayFail = false) {
   const started = process.hrtime.bigint();
@@ -349,6 +351,17 @@ function suiteRun(round, variant, suite, binary) {
   // The newest binary's first unit run, kept as it was published: its
   // evidence, published again by `publish_profile`, profiles Supercov's
   // post-run work on a real suite away from CI.
+  // Every answer the run gives, in its first two rounds: two runs of one
+  // binary say how far the suite itself varies, and a binary against
+  // another, whether either measures differently (scripts/speed/answers.mjs).
+  if (round <= 2) {
+    run(
+      project,
+      process.execPath,
+      [new URL('./speed/answers.mjs', import.meta.url).pathname, binary, project, id, join(output, 'samples', `answers-${round}-${variant}-${suite.name}.json`), '--quick'],
+      `${round}-${variant}-${suite.name}-answers`,
+    );
+  }
   if (round === 1 && suite.name === 'unit' && variant === binaries.at(-1).name) {
     const kept = join(output, 'evidence-unit');
     mkdirSync(kept, { recursive: true });
@@ -750,9 +763,39 @@ const cpuTable = Object.keys(cpu).length === 0 ? '' : [
   `|---|${Object.keys(cpu).map(() => '---').join('|')}|`,
   ...cpuKinds.map((kind) => `| ${kind} | ${Object.values(cpu).map((totals) => (totals[kind] ?? 0).toFixed(1)).join(' | ')} |`),
 ].join('\n');
+// Whether the binaries measured alike: each suite's answers, round against
+// round for one binary and binary against binary in a round, as the number
+// of lines that differ. A speed change meant to change nothing has the same
+// count between binaries as between one binary's two rounds: none, where the
+// suite runs alike each time.
+const answerLines = (round, variant, suite) => {
+  const file = join(output, 'samples', `answers-${round}-${variant}-${suite}.json`);
+  return existsSync(file) ? readFileSync(file, 'utf8').split('\n') : undefined;
+};
+const differing = (left, right) => {
+  if (!left || !right) return 'missing';
+  const counts = new Map();
+  for (const line of left) counts.set(line, (counts.get(line) ?? 0) + 1);
+  let unmatched = 0;
+  for (const line of right) {
+    const count = counts.get(line) ?? 0;
+    if (count > 0) counts.set(line, count - 1);
+    else unmatched += 1;
+  }
+  return unmatched + [...counts.values()].reduce((sum, count) => sum + count, 0);
+};
+const answerRows = [];
+for (const suite of suites.filter((entry) => !entry.build)) {
+  for (const { name } of binaries)
+    answerRows.push(`| ${suite.name} | ${name} round 1 | ${name} round 2 | ${differing(answerLines(1, name, suite.name), answerLines(2, name, suite.name))} |`);
+  for (const { name } of binaries.slice(1))
+    for (const round of [1, 2])
+      answerRows.push(`| ${suite.name} | ${binaries[0].name} round ${round} | ${name} round ${round} | ${differing(answerLines(round, binaries[0].name, suite.name), answerLines(round, name, suite.name))} |`);
+}
+const answersTable = answerRows.length === 0 ? '' : ['', '| Answers | Run | Against | Lines that differ |', '|---|---|---|---|', ...answerRows].join('\n');
 const machineFile = join(process.env.RUNNER_TEMP ?? output, 'machine.txt');
 const machine = existsSync(machineFile) ? readFileSync(machineFile, 'utf8').trim().replace(/\s+/g, ' ') : 'unknown machine';
-const table = `${application}: medians of ${rounds} rounds, ${description}; ${machine}.\n\n${rows.join('\n')}\n${cpuTable}\n`;
+const table = `${application}: medians of ${rounds} rounds, ${description}; ${machine}.\n\n${rows.join('\n')}\n${cpuTable}\n${answersTable}\n`;
 writeFileSync(join(output, 'summary.md'), table);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, table);
 console.log(table);
