@@ -966,14 +966,8 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         factor,
         first_tier,
         &killers,
+        &same_code.duplicates,
     )?;
-    // Each duplicate takes the verdict of the mutant that ran for it.
-    let shared =
-        supercov_engine::js_compiled_equivalence::shared_verdicts(&same_code.duplicates, &saved);
-    if !shared.is_empty() {
-        saved.extend(shared);
-        save(run, &plan.mutant_set, &saved, &progress)?;
-    }
     let verdicts = read_saved(run);
     let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
     data["summary"]["durationMs"] = json!(started.elapsed().as_millis() as u64);
@@ -2438,6 +2432,7 @@ fn execute(
     factor: f64,
     first_tier: supercov_engine::strong_tiers::Sizing,
     killers: &supercov_engine::strong_tiers::Killers,
+    duplicates: &std::collections::BTreeMap<String, String>,
 ) -> Result<Executed, Stop> {
     // Decided without running.
     for mutant in &plan.mutants {
@@ -2681,6 +2676,10 @@ fn execute(
             });
         }
     }
+    // Each mutant that compiles to the same code as one that ran takes its
+    // verdict.
+    let shared = supercov_engine::js_compiled_equivalence::shared_verdicts(duplicates, saved);
+    saved.extend(shared);
     save(run, &plan.mutant_set, saved, progress)?;
     Ok(executed)
 }

@@ -91,11 +91,12 @@ pub fn decide_for_run(
         .map(|stored| stored.manifest.files)
         .unwrap_or_default();
     decide_by_compiled_code(plan, settled, |file| {
-        let source = std::fs::read_to_string(root.join(file)).ok()?;
         let measured = files.get(file)?;
-        crate::source_manifest::FileFingerprint::of(&source)
-            .same_bytes(measured)
-            .then_some(source)
+        std::fs::read_to_string(root.join(file))
+            .ok()
+            .filter(|source| {
+                crate::source_manifest::FileFingerprint::of(source).same_bytes(measured)
+            })
     })
 }
 
@@ -293,7 +294,8 @@ fn listed_by_id(file: &str, source: &str) -> Option<BTreeMap<String, LedgerMutan
     let allocator = Allocator::default();
     let source_type = crate::js_instrumenter::project_source_type(Path::new(file)).ok()?;
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    // A parser that gave up early has said why.
+    if !parsed.errors.is_empty() {
         return None;
     }
     Some(
@@ -342,11 +344,15 @@ fn minifier_options() -> MinifierOptions {
 /// `None` where it does not parse, the mutant's node is not found, the
 /// program has an early error, or the transform reports one.
 pub(crate) fn compile(file: &str, source: &str, mutant: Option<&LedgerMutant>) -> Option<String> {
+    if crate::fault::injected("compiled-equivalence.compile") {
+        return None;
+    }
     let allocator = Allocator::default();
     let path = Path::new(file);
     let source_type = crate::js_instrumenter::project_source_type(path).ok()?;
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    // A parser that gave up early has said why.
+    if !parsed.errors.is_empty() {
         return None;
     }
     let mut program = parsed.program;
@@ -592,6 +598,56 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn an_original_or_a_mutant_that_does_not_compile_decides_nothing() {
+        // It parses, and its mutants are listed, but `a` is declared twice:
+        // an early error, so the file is not compared.
+        let source = "export function f(x) {\n  return x > 1;\n}\nlet a; let a;\n";
+        assert!(listed_by_id("src/a.js", source).is_some());
+        assert_eq!(compile("src/a.js", source, None), None);
+        let mut plan = plan_of("src/a.js", source);
+        let before = plan.clone();
+        let same =
+            decide_by_compiled_code(&mut plan, &BTreeMap::new(), |_| Some(source.to_owned()));
+        assert_eq!(same.not_compiled, ["src/a.js"]);
+        assert_eq!(plan, before);
+        // A mutant whose compile fails (the second compile, after the
+        // original's) is left to run, and the others are compared.
+        let source = "export function f(a) {\n  if (false) { g(); }\n}\n";
+        let mut plan = plan_of("src/a.js", source);
+        let all = decide_by_compiled_code(&mut plan.clone(), &BTreeMap::new(), |_| {
+            Some(source.to_owned())
+        });
+        let same = crate::fault::during("compiled-equivalence.compile@2", || {
+            decide_by_compiled_code(&mut plan, &BTreeMap::new(), |_| Some(source.to_owned()))
+        });
+        assert_eq!(
+            same.equivalent + same.duplicates.len() + 1,
+            all.equivalent + all.duplicates.len()
+        );
+    }
+
+    #[test]
+    fn a_mutant_with_a_verdict_keeps_it_even_where_it_compiles_to_the_original() {
+        let source = "export function f(x) {\n  if (false) { return 1; }\n  return x;\n}\n";
+        let id = "src/a.js:2:14-2:27:BlockStatement:{}".to_owned();
+        let settled = BTreeMap::from([(
+            id.clone(),
+            Verdict {
+                status: "survived".into(),
+                killed_by: None,
+                tests: 2,
+                duration_ms: 3,
+                reason: None,
+            },
+        )]);
+        let mut plan = plan_of("src/a.js", source);
+        let same = decide_by_compiled_code(&mut plan, &settled, |_| Some(source.to_owned()));
+        assert_eq!(same.equivalent, 1);
+        let kept = plan.mutants.iter().find(|mutant| mutant.id == id).unwrap();
+        assert_eq!(kept.decided, None);
     }
 
     #[test]
