@@ -35,10 +35,21 @@ var COVERAGE_SCOPE_SITE_COOKIE = "__supercov_scope_site";
 var COVERAGE_PHASE_SITE_COOKIE = "__supercov_phase_site";
 var COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 var DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
+// Supercov gives a process its evidence root when it starts it, so the root
+// is read once per environment object, as SUPERCOV_CONTEXT is: a read of
+// process.env is an interceptor's call, and a server made one for every
+// record it wrote. A suite that swaps process.env for another object is read
+// again.
+var configuredRoot = { env: void 0, root: DEFAULT_SERVER_EVIDENCE_ROOT };
 function configuredServerEvidenceRoot() {
-  var _a8;
-  const configured = typeof process !== "undefined" ? (_a8 = process.env) == null ? void 0 : _a8["SUPERCOV_SERVER_EVIDENCE_ROOT"] : void 0;
-  return configured ? configured : DEFAULT_SERVER_EVIDENCE_ROOT;
+  const env = typeof process !== "undefined" ? process.env : void 0;
+  if (env === void 0 || env === null)
+    return DEFAULT_SERVER_EVIDENCE_ROOT;
+  if (env === configuredRoot.env)
+    return configuredRoot.root;
+  const configured = env["SUPERCOV_SERVER_EVIDENCE_ROOT"];
+  configuredRoot = { env, root: configured ? configured : DEFAULT_SERVER_EVIDENCE_ROOT };
+  return configuredRoot.root;
 }
 function nonEmpty(value) {
   return typeof value === "string" && value.length > 0;
@@ -254,7 +265,10 @@ function createState() {
     eventKeys: /* @__PURE__ */ new Map(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
-    persistedServerRecords: /* @__PURE__ */ new Set(),
+    // The records written for each attempt, by attempt (attemptKey): a hit's
+    // by its phase and then its id, any other by its serverRecordKey. One key
+    // joining them all was built and hashed for every record.
+    persistedServerRecords: /* @__PURE__ */ new Map(),
     backgroundBuffers: /* @__PURE__ */ new Map(),
     backgroundWriters: /* @__PURE__ */ new Map(),
     backgroundShardSizes: /* @__PURE__ */ new Map(),
@@ -1415,13 +1429,69 @@ function flushServerAppends() {
         makeEvidenceDirectory(fs, entry.directory);
         state.createdEvidenceDirectories.add(entry.directory);
       }
-      fs.appendFileSync(path, entry.lines.join(""));
+      appendAttemptLines(fs, path, entry.lines.join(""));
     } catch (cause) {
       const failure = serverTransportError(entry.runId, cause);
       state.serverTransportFailure = failure;
       throw failure;
     }
   }
+}
+// An attempt's file, appended to through a descriptor kept open: opening
+// and closing it for every turn's lines was most of what a server's first
+// hits cost (a Next server renders a page over hundreds of turns). The bytes
+// and their order are the same. A file removed since it was opened -- a
+// test's fixture clears its attempt's file before the test starts -- is
+// opened again, so nothing is written where no one reads it; a descriptor
+// that fails is opened again once. Windows cannot remove a file a process
+// holds open, so there each turn's lines are appended as before.
+var ATTEMPT_DESCRIPTORS_KEPT = 32;
+function appendAttemptLines(fs, path, text) {
+  if (process.platform === "win32" || typeof fs.openSync !== "function") {
+    fs.appendFileSync(path, text);
+    return;
+  }
+  const descriptors = state.attemptDescriptors || (state.attemptDescriptors = /* @__PURE__ */ new Map());
+  let descriptor = descriptors.get(path);
+  if (descriptor !== void 0 && !descriptorLinked(fs, descriptor)) {
+    closeAttemptDescriptor(fs, path);
+    descriptor = void 0;
+  }
+  const bytes = capturedBuffer.from(text);
+  if (descriptor !== void 0) {
+    try {
+      writeAllSync(fs, descriptor, bytes);
+      return;
+    } catch (e) {
+      closeAttemptDescriptor(fs, path);
+    }
+  }
+  descriptor = fs.openSync(path, "a");
+  // The oldest attempt's file is closed once a server holds more than a few:
+  // its test has ended, and what comes later for it opens it again.
+  if (descriptors.size >= ATTEMPT_DESCRIPTORS_KEPT)
+    closeAttemptDescriptor(fs, descriptors.keys().next().value);
+  descriptors.set(path, descriptor);
+  writeAllSync(fs, descriptor, bytes);
+}
+function descriptorLinked(fs, descriptor) {
+  try {
+    return fs.fstatSync(descriptor).nlink > 0;
+  } catch (e) {
+    return false;
+  }
+}
+function closeAttemptDescriptor(fs, path) {
+  const descriptor = state.attemptDescriptors.get(path);
+  state.attemptDescriptors.delete(path);
+  try {
+    fs.closeSync(descriptor);
+  } catch (e) {
+  }
+}
+function writeAllSync(fs, descriptor, bytes) {
+  for (let written = 0; written < bytes.length; )
+    written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
 }
 function enqueueServerAppend(directory, path, line, runId) {
   // Fail closed with the original context: after one transport failure the
@@ -1456,6 +1526,74 @@ function scheduleServerFlush() {
       flushServerAppends();
     });
   }
+}
+// An attempt's key, made once per scope object: a request's scope is one
+// object for all of the request's records.
+var attemptKeys = /* @__PURE__ */ new WeakMap();
+function cachedAttemptKey(scope) {
+  let key = attemptKeys.get(scope);
+  if (key === void 0) {
+    key = attemptKey(scope);
+    attemptKeys.set(scope, key);
+  }
+  return key;
+}
+// The set a record of a scope with a phase is kept in, and its key there
+// (persistedKey): what serverRecordKey tells apart, told apart.
+function persistedRecordsOf(scope, record) {
+  const key = cachedAttemptKey(scope);
+  let persisted = builtinMapGet.call(state.persistedServerRecords, key);
+  if (persisted === void 0) {
+    persisted = { hits: /* @__PURE__ */ new Map(), other: /* @__PURE__ */ new Set() };
+    builtinMapSet.call(state.persistedServerRecords, key, persisted);
+  }
+  return plainHit(record) ? persistedHitsOf(persisted, record.phaseId) : persisted.other;
+}
+function persistedHitsOf(persisted, phaseId) {
+  let ids = builtinMapGet.call(persisted.hits, phaseId);
+  if (ids === void 0) {
+    ids = /* @__PURE__ */ new Set();
+    builtinMapSet.call(persisted.hits, phaseId, ids);
+  }
+  return ids;
+}
+function plainHit(record) {
+  return record.type === "hit" && record.outcome === void 0 && !record.request;
+}
+function persistedKey(record) {
+  return plainHit(record) ? record.id : serverRecordKey(record);
+}
+// A first hit of a request naming its test and phase, written as appendServer
+// writes `{ type: "hit", id, timestampMs, phaseId }` -- the same line, byte for
+// byte -- without the objects it builds to get there: a server writes one for
+// every point each phase of each test runs, a Next server's page thousands. A
+// hit any other way (no test, no phase, a buffered attempt, a snapshot-kept
+// run, an attempt file's first line) goes through appendServer.
+function appendServerHit(id, timestampMs, phaseId) {
+  const context = phaseId && !state.runtimeSnapshots ? currentRequestContext() : void 0;
+  const scope = context !== void 0 ? context.scope : void 0;
+  const fs = scope !== void 0 && scope.runId ? getFs() : void 0;
+  const key = fs ? cachedAttemptKey(scope) : void 0;
+  if (key === void 0 || state.bufferedAttempts.size !== 0 && state.bufferedAttempts.has(key)) {
+    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
+    return;
+  }
+  const { directory, path } = scopedEvidenceLocation(scope);
+  if (!scopedPathsWritten.has(path)) {
+    appendServer({ type: "hit", id, timestampMs, phaseId });
+    return;
+  }
+  const persisted = persistedRecordsOf(scope, { type: "hit", id, phaseId });
+  if (builtinSetHas.call(persisted, id))
+    return;
+  try {
+    enqueueServerAppend(directory, path, `{"type":"hit","id":${JSON.stringify(id)},"timestampMs":${JSON.stringify(timestampMs)},"phaseId":${JSON.stringify(phaseId)}}\n`, scope.runId);
+  } catch (cause) {
+    if (cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED")
+      throw cause;
+    throw serverTransportError(scope.runId, cause);
+  }
+  builtinSetAdd.call(persisted, id);
 }
 function appendServer(record) {
   var _a8, _b, _c, _d;
@@ -1499,16 +1637,17 @@ function appendServer(record) {
       state.serverBuffers.set(key, buffered);
       return;
     }
-    const deduplicationKey = scope && serialized.phaseId ? `${attemptKey(scope)}:${serverRecordKey(serialized)}` : void 0;
-    if (deduplicationKey && state.persistedServerRecords.has(deduplicationKey))
+    const persisted = scope && serialized.phaseId ? persistedRecordsOf(scope, serialized) : void 0;
+    const recordKey = persisted !== void 0 ? persistedKey(serialized) : void 0;
+    if (persisted !== void 0 && builtinSetHas.call(persisted, recordKey))
       return;
     if (!path) {
       appendDurableBackgroundRecord(fs, runId, serialized);
       return;
     }
     enqueueServerAppend(directory, path, serverLine(serialized, path) + "\n", runId);
-    if (deduplicationKey)
-      state.persistedServerRecords.add(deduplicationKey);
+    if (persisted !== void 0)
+      builtinSetAdd.call(persisted, recordKey);
   } catch (cause) {
     if (cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED")
       throw cause;
@@ -2337,7 +2476,7 @@ function recordCoverageHit(id) {
     // record: an object built per first hit only to be read once.
     recordBrowserEvent("hit", id, void 0, timestampMs, phaseId, "server");
   } else {
-    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
+    appendServerHit(id, timestampMs, phaseId);
   }
 }
 // A first hit's event, built as one literal in the order the spread helpers
