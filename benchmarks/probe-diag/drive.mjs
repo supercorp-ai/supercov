@@ -144,9 +144,11 @@ if (mode === 'profile' || mode === 'ablate') {
     const context = await browser.newContext(); const page = await context.newPage();
     if (mode === 'ablate') {
       await context.route('**/_next/static/chunks/*.js', async (route) => {
-        const response = await route.fetch(); let body = await response.text();
+        const response = await route.fetch().catch(() => undefined);
+        if (!response) return route.abort().catch(() => {});
+        let body = await response.text();
         if (v === 'B' && body.includes('__SUPERCOV_ACTIVATE_PROBE_CONTEXT__')) for (const [from, to] of noop) if (body.includes(from)) { body = body.replace(from, to); patched += 1; }
-        await route.fulfill({ response, body });
+        await route.fulfill({ response, body }).catch(() => {});
       });
     }
     const cdp = await context.newCDPSession(page);
@@ -156,6 +158,7 @@ if (mode === 'profile' || mode === 'ablate') {
     const { metrics } = await cdp.send('Performance.getMetrics');
     const m = Object.fromEntries(metrics.map((x) => [x.name, x.value]));
     if (i >= 2) results[v].push({ script: m.ScriptDuration * 1000, task: m.TaskDuration * 1000 });
+    if (mode === 'ablate') await context.unrouteAll({ behavior: 'ignoreErrors' });
     if (mode === 'profile') {
       const { profile } = await cdp.send('Profiler.stop');
       if (i >= 2) {
@@ -172,14 +175,15 @@ if (mode === 'profile' || mode === 'ablate') {
     await context.close();
   }
   await browser.close();
-  const summary = Object.fromEntries(['script', 'task'].map((k) => [k, { A: +mean(results.A.map((r) => r[k])).toFixed(1), B: +mean(results.B.map((r) => r[k])).toFixed(1) }]));
+  const se = (xs) => { const m = mean(xs); return Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / (xs.length - 1) / xs.length); };
+  const summary = Object.fromEntries(['script', 'task'].map((k) => [k, { A: +mean(results.A.map((r) => r[k])).toFixed(1), B: +mean(results.B.map((r) => r[k])).toFixed(1), seA: +se(results.A.map((r) => r[k])).toFixed(1), seB: +se(results.B.map((r) => r[k])).toFixed(1) }]));
   console.log(JSON.stringify({ mode, flows: n, patchedChunks: patched, ...summary }));
   if (mode === 'profile') {
     for (const kind of ['url', 'fn']) {
       const keys = new Set([...Object.keys(agg.A[kind]), ...Object.keys(agg.B[kind])]);
       const rows = [...keys].map((k) => [k, agg.A[kind][k] ?? 0, agg.B[kind][k] ?? 0]).sort((x, y) => Math.max(y[1], y[2]) - Math.max(x[1], x[2]));
       console.log(`== sampled self ms per flow by ${kind}: A, B (largest first)`);
-      for (const [k, a, b] of rows.slice(0, kind === 'url' ? 25 : 40)) console.log(`${a.toFixed(2).padStart(8)} ${b.toFixed(2).padStart(8)}  ${k}`);
+      for (const [k, a, b] of rows.slice(0, kind === 'url' ? 25 : 60)) console.log(`${a.toFixed(2).padStart(8)} ${b.toFixed(2).padStart(8)}  ${k}`);
       const tot = (o) => Object.values(o).reduce((x, y) => x + y, 0);
       console.log(`total ${tot(agg.A[kind]).toFixed(1)} ${tot(agg.B[kind]).toFixed(1)}`);
     }
