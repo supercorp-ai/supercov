@@ -369,8 +369,14 @@ function suiteRun(round, variant, suite, binary) {
   // one the run before it left and built warm.
   for (const built of outputs) rmSync(join(project, built), { recursive: true, force: true });
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
+  // Playwright's transform cache starts empty too, as on a fresh CI machine:
+  // kept in the machine's temporary directory, a plain run found the specs
+  // the round before it had compiled, and a binary the instrumented specs
+  // the binary before it had, while the first of each compiled them.
+  const transformCache = join(output, 'transform-cache');
+  rmSync(transformCache, { recursive: true, force: true });
   // Supercov's copy is kept, for the traces of the tests that failed in it.
-  const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1' };
+  const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1', PWTEST_CACHE_DIR: transformCache };
   const [plainCommand, ...plainArgs] = binary
     ? [binary, '--', ...suite.command]
     : suite.command;
