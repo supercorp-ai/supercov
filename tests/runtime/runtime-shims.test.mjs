@@ -863,6 +863,108 @@ test("work a request leaves running after its answer is no test's, and runs the 
   }
 });
 
+// A framework that loads a route's module while serving the first request to
+// it, and calls the route's handler with a request object of its own (a web
+// `Request`, as Next.js does): the handler wrapped then is no attempt's, and
+// a later request naming no test (a webhook a mock sends) runs the process's
+// mutant, not that first attempt's. The handler's work after its answer is no
+// request's either. Each attempt's switch notes, once, that its mutant ran.
+test("a route loaded while a request is served has no owner, and its work after the answer is the server's own", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-route-loaded-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import http from "node:http";
+          const runtime = await import(${JSON.stringify(runtime)});
+          const scope = (attempt) => ({
+            version: 1,
+            runId: "run-route-loaded",
+            workerId: "worker-1",
+            testId: "test-" + attempt,
+            testKey: "test-" + attempt,
+            retry: 0,
+            attemptId: "attempt-" + attempt,
+            mutant: "src/a.js#3",
+          });
+          const slot = runtime.strongSlot("src/a.js");
+          const seen = [];
+          const evaluate = (where, name) => {
+            // The switch: its mutant's branch calls h().
+            if (slot.a === 3) slot.h();
+            seen.push([name, where, slot.a]);
+          };
+          let route;
+          const server = http.createServer(async (request, response) => {
+            // The route's module loads on its first request, and is wrapped there.
+            route ??= runtime.withRequestPhase(async (web, name) => {
+              evaluate("in-request", name);
+              setTimeout(() => evaluate("after-answer", name), 30);
+              return "ok";
+            });
+            const web = { headers: new Headers(Object.entries(request.headers).map(([key, value]) => [key, String(value)])) };
+            response.end(await route(web, request.url.slice(1)));
+          });
+          await new Promise((done) => server.listen(0, "127.0.0.1", done));
+          const port = server.address().port;
+          const send = (name, attempt) => new Promise((done, fail) => {
+            const headers = attempt ? runtime.withCoverageCarrier({ version: 1, scope: scope(attempt) }, () => runtime.coverageContextHeaders()) : {};
+            http.get({ host: "127.0.0.1", port, path: "/" + name, headers }, (result) => {
+              result.resume();
+              result.on("end", done);
+            }).on("error", fail);
+          });
+          await send("first", "one");
+          await new Promise((done) => setTimeout(done, 60));
+          await send("webhook");
+          await new Promise((done) => setTimeout(done, 60));
+          await send("again", "one");
+          await send("other", "two");
+          await new Promise((done) => setTimeout(done, 60));
+          await new Promise((done) => server.close(done));
+          console.log(JSON.stringify(seen));
+        `,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-route-loaded",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: root,
+          SUPERCOV_STRONG_RESULTS: resolve(root, "results.jsonl"),
+          // The server a strong pass starts with a mutant switched on.
+          SUPERCOV_ACTIVE_MUTANT: "src/a.js#7",
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const seen = JSON.parse(child.stdout.trim());
+    const of = (name) => seen.filter(([named]) => named === name).map(([, where, mutant]) => [where, mutant]);
+    // The first attempt's own request runs its mutant, and so does the
+    // request of each later attempt; the webhook naming no test, and what
+    // any request left running after its answer, the process's.
+    assert.deepEqual(of("first"), [["in-request", 3], ["after-answer", 7]]);
+    assert.deepEqual(of("webhook"), [["in-request", 7], ["after-answer", 7]]);
+    assert.deepEqual(of("again"), [["in-request", 3], ["after-answer", 7]]);
+    assert.deepEqual(of("other"), [["in-request", 3], ["after-answer", 7]]);
+    const reached = readFileSync(resolve(root, "results.jsonl.reached.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(reached, [
+      { attemptId: "attempt-one", mutant: "src/a.js#3" },
+      { attemptId: "attempt-two", mutant: "src/a.js#3" },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("instrumentation stack cleanup keeps the user's first frame", async () => {
   const runtime = await import("../../runtime/javascript/runtime.mjs");
   const error = new Error("assertion failed");

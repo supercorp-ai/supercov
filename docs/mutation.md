@@ -485,7 +485,11 @@ no mutants shows none of this.
   (`docs/design/strong-mutation.md`, Module-level values). A mutant whose
   code ran only for requests that named no test (a webhook a mock server
   sends while tests run) runs against the tests that were running then, not
-  every test. A test runs without a mutant only after a failure, to confirm
+  every test. A survivor whose code its candidates' servers ran, but which no
+  test's request ran with its mutant in the pass (work in a route's
+  `after()`, a worker process the first request started), is not trusted: it
+  runs again alone, with the server started with it switched on, and the pass
+  warns about it. A test runs without a mutant only after a failure, to confirm
   it; a failure before any such run passed on its server (a cold server)
   runs the mutant again once one has. StrykerJS has no
   Playwright runner, so Playwright's verdicts are checked by hand (see below).

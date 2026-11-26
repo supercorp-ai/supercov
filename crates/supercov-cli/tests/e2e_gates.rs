@@ -113,6 +113,7 @@ gates! {
     workspaces_attribution => "scripts/workspaces-attribution-integration.mjs",
     agent_query_eval => "scripts/agent-query-eval.mjs",
     background_by_time => "scripts/background-by-time.mjs",
+    next_after_webhook => "scripts/next-after-webhook.mjs",
     cross_origin_requests => "scripts/cross-origin-requests.mjs",
     leaving_page => "scripts/leaving-page.mjs",
     js_syntax_zoo => "scripts/js-syntax-zoo.mjs",

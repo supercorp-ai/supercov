@@ -12,7 +12,7 @@
 import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, queuedWork, readJson, reasonOf, serialFile, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
+import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, queuedWork, ranByRequests, readJson, reasonOf, serialFile, settleAttempt, strongPass, unreached, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
 
 // How often, at most, the status file is written.
 const STATUS_MS = 1_000;
@@ -40,6 +40,11 @@ function readJsonOr(path) {
     }
 }
 
+/** Ids for a message: the first few, and how many more. */
+function listed(ids) {
+    const shown = ids.slice(0, 5).join(", ");
+    return ids.length > 5 ? `${shown} and ${ids.length - 5} more` : shown;
+}
 function readLines(path) {
     if (!existsSync(path))
         return [];
@@ -323,7 +328,7 @@ export default class SupercovPlaywrightStrongReporter {
                 write({ id: entry.id, status: "error", reason: "its candidate tests fail without any mutant", tests: 0, durationMs: 0 });
                 return;
             }
-            const job = { id: entry.id, mutant: entry.mutant, tests: runnable, reason };
+            const job = { id: entry.id, mutant: entry.mutant, tests: runnable, reason, ...(entry.serverRan ? { serverRan: true } : {}) };
             // What an alone round left runs alone again, as it was.
             if (kind === "alone")
                 aloneEach.push({ ...job, reason: entry.reason });
@@ -351,6 +356,9 @@ export default class SupercovPlaywrightStrongReporter {
                 claimedBy.set(taken.id, name.replace(/\.json$/, ""));
         }
         const ranInServer = new Set(readLines(`${pass.resultsPath}.everywhere.jsonl`).map((line) => `${line.invocation}\0${line.mutant}`));
+        const ranByRequest = ranByRequests(pass);
+        // Survivors no attempt ran: they run again alone.
+        const notRan = [];
         for (const [id, entry] of Object.entries(work.entries)) {
             if (existsSync(`${pass.shared}/verdicts/${key(id)}`)) {
                 decided += 1;
@@ -424,12 +432,28 @@ export default class SupercovPlaywrightStrongReporter {
                 next(entry, "unfinished", left);
                 continue;
             }
+            if (unreached(kind, entry, ranByRequest)) {
+                notRan.push(id);
+                next(entry, "unreached", runnable);
+                continue;
+            }
             verdict(entry.unrun
                 ? { status: "error", reason: `no Playwright test killed it, and ${entry.unrun}` }
                 : { status: "survived", ...(after ? { reason: after } : {}) });
         }
         for (const job of work.restarts)
             next(job, job.reason, job.tests);
+        // Said where the pass's output is read: a verdict a server's switch
+        // missed is a Supercov fault, and other survivors may share it.
+        if (notRan.length)
+            console.error(`[supercov] warning: ${notRan.length} mutant(s) lived through every candidate test on the shared server, though no attempt ran them there: the requests that reached their code did not carry their test's mutant. Each runs again alone, with the server started with it switched on: ${listed(notRan)}`);
+        if (kind === "alone") {
+            const killedAlone = readLines(pass.resultsPath)
+                .filter((record) => work.entries[record.id]?.reason === "unreached" && (record.status === "killed" || record.status === "timeout"))
+                .map((record) => record.id);
+            if (killedAlone.length)
+                console.error(`[supercov] warning: ${killedAlone.length} mutant(s) the shared server let live were killed alone, with the server started with them switched on; their verdicts are the kills: ${listed(killedAlone)}`);
+        }
         // What each mutant left open passed: its candidates that ran with it
         // and passed (before any error outside a test), by the plan's ids. A
         // later pass, or a later round, resumes there. A round of mutants a
