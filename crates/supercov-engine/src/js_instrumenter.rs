@@ -1929,6 +1929,10 @@ const ASSERTION_RUNTIME: &str = "globalThis.__SUPERCOV_DIRECT_RUNTIME__";
 /// Where each recognised assertion is wrapped or bound, as text edits.
 struct AssertionEdits<'s> {
     source: &'s str,
+    /// The file's own accessor of the runtime, `name()`: a function declared
+    /// at its end, which reads `globalThis.__SUPERCOV_DIRECT_RUNTIME__` when
+    /// it is called, as the global's name in full at every assertion did.
+    runtime: String,
     sites: HashMap<SpanKey, (String, String, bool)>,
     edits: Vec<TextEdit>,
     /// In TypeScript the call runs in place, under these two names, instead
@@ -1942,17 +1946,19 @@ struct AssertionEdits<'s> {
 }
 
 impl AssertionEdits<'_> {
-    fn opening(helper: &str, operation: &str, source: &str) -> String {
+    fn opening(&self, helper: &str, operation: &str, source: &str) -> String {
         format!(
-            "{ASSERTION_RUNTIME}.{helper}({}, {}, ",
+            "{}.{helper}({}, {}, ",
+            self.runtime,
             serde_json::to_string(operation).expect("a string serializes"),
             serde_json::to_string(source).expect("a string serializes")
         )
     }
 
-    fn open(operation: &str, source: &str) -> String {
+    fn open(&self, operation: &str, source: &str) -> String {
         format!(
-            "{ASSERTION_RUNTIME}.openNodeAssertionPhase({}, {})",
+            "{}.openNodeAssertionPhase({}, {})",
+            self.runtime,
             serde_json::to_string(operation).expect("a string serializes"),
             serde_json::to_string(source).expect("a string serializes")
         )
@@ -1970,13 +1976,13 @@ impl AssertionEdits<'_> {
                 format!("(({phase}) => {{ try {{ return {phase}.close("),
                 format!(
                     "); }} catch ({error}) {{ throw {phase}.fail({error}); }} }})({})",
-                    Self::open(operation, source)
+                    self.open(operation, source)
                 ),
             ),
             None => (
                 format!(
                     "{}() => (",
-                    Self::opening("withNodeAssertionPhase", operation, source)
+                    self.opening("withNodeAssertionPhase", operation, source)
                 ),
                 "))".into(),
             ),
@@ -2000,7 +2006,7 @@ impl AssertionEdits<'_> {
         let width = (end - start) as i64;
         let opening = format!(
             "{{ const {phase} = {}; try {{ ",
-            Self::open(operation, source)
+            self.open(operation, source)
         );
         let closing = format!(
             " }} catch ({error}) {{ throw {phase}.fail({error}); }} finally {{ {phase}.close(); }} }}"
@@ -2045,7 +2051,7 @@ impl AssertionEdits<'_> {
     fn bind(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
         let callee = call.callee.span();
         let width = (callee.end - callee.start) as i64;
-        let opening = Self::opening("bindNodeAssertionPhase", operation, source);
+        let opening = self.opening("bindNodeAssertionPhase", operation, source);
         self.edits
             .push(TextEdit::insert(callee.start as usize, -width, opening));
         match &call.callee {
@@ -2942,6 +2948,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         ));
     }
     let mut assertions = 0;
+    let mut runtime_accessor: Option<String> = None;
     let mut edits = Vec::new();
 
     if assertion_candidate {
@@ -2958,15 +2965,19 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
         if assertions > 0 {
-            let in_place = source_type.is_typescript().then(|| {
-                let mut names = CandidateNames::new(source);
-                (
-                    names.allocate("__supercovAssertionPhase"),
-                    names.allocate("__supercovAssertionError"),
-                )
-            });
+            // Short names: they stand at every assertion of every test file,
+            // which the runner's transform reads and maps.
+            let mut names = CandidateNames::new(source);
+            // `__cov…`: a name babel-plugin-jest-hoist lets a `jest.mock`
+            // factory read, as it lets istanbul's counters be read there.
+            let accessor = names.allocate("__covSupercov");
+            let in_place = source_type
+                .is_typescript()
+                .then(|| (names.allocate("__supercovP"), names.allocate("__supercovE")));
+            runtime_accessor = Some(accessor.clone());
             let mut located = AssertionEdits {
                 source,
+                runtime: format!("{accessor}()"),
                 sites: collector.sites,
                 edits: Vec::new(),
                 in_place,
@@ -3045,6 +3056,16 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
                 "\ndeclare var __SUPERCOV_DIRECT_RUNTIME__: {ASSERTION_RUNTIME_TYPE};\n"
             ));
         }
+    }
+    // The accessor every assertion reads the runtime through. A function
+    // declaration is hoisted, initialised before any of the file's code runs
+    // (an import cycle that calls into the file early included), and it
+    // returns before the helper is called, so the helper is still called from
+    // the assertion's own frame and no stack trace gains a frame.
+    if let Some(accessor) = runtime_accessor {
+        code.push_str(&format!(
+            "\nfunction {accessor}() {{ return {ASSERTION_RUNTIME}; }}\n"
+        ));
     }
     let map = map.to_json_string();
     code.push_str("\n//# sourceMappingURL=data:application/json;base64,");
@@ -14625,18 +14646,17 @@ export function shapes(n: number): unknown {
         let lines: Vec<&str> = code.lines().collect();
         assert!(
             lines[2].starts_with(
-                "  { const __supercovAssertionPhase: typeof assert.ok = globalThis.__SUPERCOV_DIRECT_RUNTIME__.bindNodeAssertionPhase("
+                "  { const __supercovP1: typeof assert.ok = __covSupercov().bindNodeAssertionPhase("
             ),
             "{code}"
         );
         assert!(
-            lines[2]
-                .ends_with(", assert, \"ok\"); __supercovAssertionPhase(user, await value()); }"),
+            lines[2].ends_with(", assert, \"ok\"); __supercovP1(user, await value()); }"),
             "{code}"
         );
         assert!(lines[3].contains(": typeof assert.equal = "), "{code}");
         assert_eq!(
-            lines[4], "     \"equal\"); __supercovAssertionPhase(await value(), 1) }",
+            lines[4], "     \"equal\"); __supercovP1(await value(), 1) }",
             "{code}"
         );
         assert_eq!(lines[5], "}", "{code}");
