@@ -63,8 +63,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: npm ci
         working-directory: tests/fixtures/next-playwright
-      # The system's own libraries, by a Playwright that knows this system.
-      - run: env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y playwright@1.62.1 install-deps chromium
+      # The system's own libraries, by a Playwright that knows this system,
+      # from Ubuntu's sources alone and kept between runs.
+      - uses: ./.github/actions/system-packages
+        with:
+          command: env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y playwright@1.62.1 install-deps chromium
+          key: apt-chromium-next-${{ runner.os }}-${{ runner.arch }}-1.62.1
+          prefix: apt-chromium-next-${{ runner.os }}-${{ runner.arch }}-
       - run: npx playwright install chromium
         working-directory: tests/fixtures/next-playwright
       - run: cargo build -p supercov

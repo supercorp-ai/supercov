@@ -195,11 +195,24 @@ if (failures.length > 0) {
     internalSample(reference.binary);
     const ours = [];
     const theirs = [];
-    for (let index = 0; index < 7; index += 1) {
-      theirs.push(internalSample(reference.binary));
-      ours.push(internalSample());
+    const pairs = (count) => {
+      for (let index = 0; index < count; index += 1) {
+        theirs.push(internalSample(reference.binary));
+        ours.push(internalSample());
+      }
+      return median(ours) / median(theirs);
+    };
+    let ratio = pairs(7);
+    // Seven pairs on a busy shared runner read the same engine 1.01x on one
+    // run and 1.14x on the next (2026-11-27, no Rust change between them).
+    // A ratio over the limit is measured further before it fails: three
+    // times the pairs, the verdict on all of them.
+    if (ratio > budget.againstReleaseMax) {
+      console.error(
+        `[rust-transform] ${ratio.toFixed(2)}x over seven pairs; measuring fourteen more`,
+      );
+      ratio = pairs(14);
     }
-    const ratio = median(ours) / median(theirs);
     console.error(
       `[rust-transform] beside ${reference.version} on this machine now: ${median(ours).toFixed(2)}ms against ${median(theirs).toFixed(2)}ms (${ratio.toFixed(2)}x)`,
     );

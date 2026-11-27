@@ -125,7 +125,12 @@ jobs:
       - run: chmod +x binaries/*/supercov
       # Which machine this was: the ratio moves with it.
       - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
-      - run: npx -y playwright@1.49.1 install-deps chromium
+      # From Ubuntu's sources alone, and kept between runs.
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx -y playwright@1.49.1 install-deps chromium
+          key: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-1.49.1
+          prefix: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-
       # perf, to count the instructions each run retires (scripts/speed-benchmark.mjs).
       # The package built for the runner's own kernel is missing on some images:
       # any linux-tools perf counts a user's instructions, so the first found is

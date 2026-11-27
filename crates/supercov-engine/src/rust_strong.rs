@@ -4309,11 +4309,7 @@ mod tests {
         // The doctest kills `*` to `+`: 3 + 2 is not 6.
         assert_eq!(
             found["src/lib.rs:5:7-5:8:BinaryOperator:+"]["killedBy"],
-            if cfg!(windows) {
-                "src\\lib.rs - double (line 1)"
-            } else {
-                "src/lib.rs - double (line 1)"
-            }
+            "src/lib.rs - double (line 1)"
         );
         let said = String::from_utf8(said).unwrap();
         assert!(said.contains("to build on their own"), "{said}");
