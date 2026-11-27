@@ -1,11 +1,18 @@
 # Changelog
 
-## Unreleased
+## 4.29.19
 
 **Fixed**
 
 - `supercov runs latest mutants test` on a merged run now runs under its parts' test command. A merged run's own command is `supercov merge …`, so a Rust pass refused it ("does not expose a stable Cargo invocation") and a JavaScript pass ran `supercov merge` as its tests, every mutant an `error`. Parts that ran one command give it; Cargo parts that differ only in the test names after `--` give it without those names; parts of different commands are refused, naming them, with `-- <test command>` to give one.
 - A test the measured run skipped (`#[ignore]`, `test.skip`) is no longer counted among those that did not pass. Named after `cargo test -- --exact`, an ignored test was recorded as `passed: false` and nothing else, and when the command failed for another reason the strong pass said it "did not pass" ("12 of its 1558 test(s) did not pass … cannot gate", 10 of them ignored). Its record now says `skipped`, and the pass counts only tests that failed.
+- A strong job that ran past its limit beside others and runs again alone has a grace of its own, rather than the pass's, before it is a `timeout`.
+
+**Changed**
+
+- A server under measurement rescans Node's module cache only after a load that can add to it. Every built-in load (a Next server requires `node:path` on nearly every request) made it list and check every key of the cache again.
+- `docs/mutation.md` says how a merged run's mutants take their parts' command and that a skipped test is recorded `skipped`, and that Rust has no equivalent-mutant detection yet (accept such mutants in `supercov.accepted.json`). The Rust benchmark's base64 and fastrand rows are those of 2026-11-27, joined as far as each job's time allowed (base64 305 of 619, fastrand 211; no soundness violation), and cargo-mutants runs under a 10 GiB address-space cap there.
+
 
 ## 4.29.18
 
