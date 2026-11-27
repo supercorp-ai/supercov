@@ -80,7 +80,7 @@
     "targets": "com.github.difflib.*",
     "junit5": true,
     "jdk": "17",
-    "shards": 3
+    "shards": 6
   },
   "aedile": {
     "repository": "https://github.com/sksamuel/aedile.git",

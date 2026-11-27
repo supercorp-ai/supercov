@@ -60,6 +60,8 @@ fi
 # project's `sources` (a directory) narrows the files to its own, the shard
 # or not.
 shard_files=()
+# One shard of one is the whole project: PIT takes its target patterns.
+[ "${SHARD:-}" = 1/1 ] && SHARD=""
 if [ -n "${SHARD:-}" ] || [ -n "$sources" ]; then
   shard="${SHARD:-1/1}"
   k="${shard%/*}"
@@ -87,7 +89,12 @@ PY
   targets="$(for f in "${shard_files[@]}"; do
     rel="${f#*/src/main/java/}"; rel="${rel#*/src/main/kotlin/}"; rel="${rel#src/main/java/}"; rel="${rel#src/main/kotlin/}"; rel="${rel#src/main/}"
     class="$(echo "${rel%.*}" | tr / .)"
-    echo "$class,$class\$*,${class}Kt,${class}Kt\$*"
+    # A Kotlin file's top-level code is in the class kotlinc names after
+    # the file, its first letter capitalized: textBorder.kt's TextBorderKt.
+    simple="${class##*.}"
+    package="${class%"$simple"}"
+    file_class="$package$(echo "${simple:0:1}" | tr '[:lower:]' '[:upper:]')${simple:1}Kt"
+    echo "$class,$class\$*,$file_class,$file_class\$*"
   done | paste -sd, -)"
 fi
 
