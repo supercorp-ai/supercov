@@ -3475,8 +3475,12 @@ impl Enumerator<'_> {
             "identifier" => self.lookup(text(node, self.source))?.constant,
             "field_access" => {
                 // `Outer.CONSTANT` or `this.CONSTANT` of this file's classes.
-                let field = node.child_by_field_name("field")?;
-                let object = node.child_by_field_name("object")?;
+                let field = node
+                    .child_by_field_name("field")
+                    .expect("the grammar gives a field access its field");
+                let object = node
+                    .child_by_field_name("object")
+                    .expect("the grammar gives a field access its object");
                 let owner = text(object, self.source);
                 let known = owner == "this" || self.classes.iter().any(|class| class.name == owner);
                 if !known {
@@ -3485,8 +3489,14 @@ impl Enumerator<'_> {
                 self.lookup(text(field, self.source))?.constant
             }
             "unary_expression" => {
-                let operator = text(node.child_by_field_name("operator")?, self.source);
-                let operand = self.java_constant_value(node.child_by_field_name("operand")?)?;
+                let operator = node
+                    .child_by_field_name("operator")
+                    .expect("the grammar gives a unary expression its operator");
+                let operator = text(operator, self.source);
+                let operand = node
+                    .child_by_field_name("operand")
+                    .expect("the grammar gives a unary expression its operand");
+                let operand = self.java_constant_value(operand)?;
                 match (operator, operand) {
                     ("-", Constant::Number(value)) => Some(Constant::Number(-value)),
                     ("+", number @ Constant::Number(_)) => Some(number),
@@ -3499,8 +3509,14 @@ impl Enumerator<'_> {
             }
             "binary_expression" => {
                 let operator = binary_operator(node, self.source);
-                let left = self.java_constant_value(node.child_by_field_name("left")?)?;
-                let right = self.java_constant_value(node.child_by_field_name("right")?)?;
+                let left = node
+                    .child_by_field_name("left")
+                    .expect("the grammar gives a binary expression its left operand");
+                let right = node
+                    .child_by_field_name("right")
+                    .expect("the grammar gives a binary expression its right operand");
+                let left = self.java_constant_value(left)?;
+                let right = self.java_constant_value(right)?;
                 Some(match (left, right) {
                     (Constant::Number(a), Constant::Number(b)) => match operator.as_str() {
                         "+" => Constant::Number(a + b),
@@ -3535,11 +3551,13 @@ impl Enumerator<'_> {
                 })
             }
             "ternary_expression" => {
-                let condition = self.java_constant_value(node.child_by_field_name("condition")?)?;
-                let consequence =
-                    self.java_constant_value(node.child_by_field_name("consequence")?)?;
-                let alternative =
-                    self.java_constant_value(node.child_by_field_name("alternative")?)?;
+                let part = |field: &str| {
+                    node.child_by_field_name(field)
+                        .expect("the grammar gives a conditional its condition and both values")
+                };
+                let condition = self.java_constant_value(part("condition"))?;
+                let consequence = self.java_constant_value(part("consequence"))?;
+                let alternative = self.java_constant_value(part("alternative"))?;
                 Some(if condition == Constant::Bool(true) {
                     consequence
                 } else {
@@ -3547,11 +3565,17 @@ impl Enumerator<'_> {
                 })
             }
             "cast_expression" => {
-                let ty = java_type(text(node.child_by_field_name("type")?, self.source));
+                let ty = node
+                    .child_by_field_name("type")
+                    .expect("the grammar gives a cast its type");
+                let ty = java_type(text(ty, self.source));
                 if !matches!(ty, Ty::Prim(_) | Ty::Str) {
                     return None;
                 }
-                let value = self.java_constant_value(node.child_by_field_name("value")?)?;
+                let value = node
+                    .child_by_field_name("value")
+                    .expect("the grammar gives a cast its value");
+                let value = self.java_constant_value(value)?;
                 Some(match (ty, value) {
                     (Ty::Prim(prim), Constant::Number(value))
                         if prim != Prim::Float && prim != Prim::Double =>
@@ -3875,8 +3899,6 @@ impl Enumerator<'_> {
                     .map(|name| text(name, self.source).to_owned())
                     .unwrap_or_else(|| "Companion".to_owned());
                 let object = node.kind() != "class_declaration";
-                let enumeration = text(node, self.source).trim_start().starts_with("enum")
-                    || modifiers_text(node, self.source).contains("enum");
                 let outer_methods = std::mem::take(&mut self.methods);
                 self.classes.push(Class {
                     name,
@@ -3894,14 +3916,16 @@ impl Enumerator<'_> {
                     {
                         let name = named_children(parameter)
                             .find(|child| child.kind() == "identifier")
-                            .map(|name| text(name, self.source).to_owned());
+                            .map(|name| text(name, self.source).to_owned())
+                            .expect("the grammar gives a class parameter its name");
                         let ty = named_children(parameter)
                             .find(|child| child.kind().ends_with("type"))
                             .map_or(Ty::Unknown, |ty| kotlin_type(text(ty, self.source)));
-                        if let Some(name) = name
-                            && let Some(class) = self.classes.last_mut()
-                        {
-                            class.fields.insert(
+                        self.classes
+                            .last_mut()
+                            .expect("the class was just pushed")
+                            .fields
+                            .insert(
                                 name,
                                 Var {
                                     ty,
@@ -3909,14 +3933,16 @@ impl Enumerator<'_> {
                                     constant: None,
                                 },
                             );
-                        }
                     }
                     self.scopes.pop();
                 }
+                // A class's own initialisation is its constructor's, even
+                // nested in an object: only an object's or a companion's is
+                // a static initializer.
                 for body in named_children(node)
                     .filter(|child| matches!(child.kind(), "class_body" | "enum_class_body"))
                 {
-                    self.kotlin_class_body(body, object || static_context, enumeration);
+                    self.kotlin_class_body(body, object);
                 }
                 self.classes.pop();
                 self.methods = outer_methods;
@@ -3959,8 +3985,9 @@ impl Enumerator<'_> {
                     }
                 }
                 // An initializer runs in the constructor, or in the static
-                // initializer for an object's or the file's properties.
-                let is_static = static_context || self.classes.is_empty() || is_const;
+                // initializer for an object's or the file's properties (where
+                // a `const` is: kotlinc allows one nowhere else).
+                let is_static = static_context || self.classes.is_empty();
                 self.methods.push(Method {
                     name: if is_static { "<clinit>" } else { "<init>" }.to_owned(),
                     returns: None,
@@ -3970,30 +3997,29 @@ impl Enumerator<'_> {
                     written_returns: None,
                 });
                 self.scopes.push(HashMap::new());
-                for child in named_children(node) {
-                    match child.kind() {
-                        "modifiers" | "variable_declaration" | "type_constraints" => {}
-                        "getter" | "setter" => {
-                            self.methods.pop();
-                            self.kotlin_accessor(
-                                child,
-                                name.as_deref().unwrap_or_default(),
-                                &ty,
-                                nullable_property(node, self.source),
-                            );
-                            self.methods.push(Method {
-                                name: "<init>".to_owned(),
-                                returns: None,
-                                not_null: false,
-                                static_init: is_static,
-                                functional_field: false,
-                                written_returns: None,
-                            });
-                        }
-                        "property_delegate" => {}
-                        _ => self.kotlin_node(child, Context::Value),
+                // A property always has its variable: never no children.
+                named_children(node).for_each(|child| match child.kind() {
+                    "modifiers" | "variable_declaration" | "type_constraints" => {}
+                    "getter" | "setter" => {
+                        self.methods.pop();
+                        self.kotlin_accessor(
+                            child,
+                            name.as_deref().unwrap_or_default(),
+                            &ty,
+                            nullable_property(node, self.source),
+                        );
+                        self.methods.push(Method {
+                            name: "<init>".to_owned(),
+                            returns: None,
+                            not_null: false,
+                            static_init: is_static,
+                            functional_field: false,
+                            written_returns: None,
+                        });
                     }
-                }
+                    "property_delegate" => {}
+                    _ => self.kotlin_node(child, Context::Value),
+                });
                 self.scopes.pop();
                 self.methods.pop();
             }
@@ -4019,16 +4045,13 @@ impl Enumerator<'_> {
                     written_returns: None,
                 });
                 self.scopes.push(HashMap::new());
-                for child in named_children(node) {
-                    match child.kind() {
-                        "function_value_parameters" => self.kotlin_parameters(child),
-                        "block" => self.kotlin_node(child, Context::Statement),
-                        "constructor_delegation_call" => {
-                            self.kotlin_children(child, Context::Value)
-                        }
-                        _ => {}
-                    }
-                }
+                // A constructor always has its parameter list.
+                named_children(node).for_each(|child| match child.kind() {
+                    "function_value_parameters" => self.kotlin_parameters(child),
+                    "block" => self.kotlin_node(child, Context::Statement),
+                    "constructor_delegation_call" => self.kotlin_children(child, Context::Value),
+                    _ => {}
+                });
                 self.scopes.pop();
                 self.methods.pop();
             }
@@ -4036,7 +4059,7 @@ impl Enumerator<'_> {
         }
     }
 
-    fn kotlin_class_body(&mut self, body: Node, static_context: bool, enumeration: bool) {
+    fn kotlin_class_body(&mut self, body: Node, static_context: bool) {
         let members = named_children(body).collect::<Vec<_>>();
         // Fields first, so that a function above a property knows its type.
         for member in &members {
@@ -4047,8 +4070,11 @@ impl Enumerator<'_> {
                     .and_then(|variable| named_children(variable).next())
                 {
                     let name = text(name, self.source).to_owned();
-                    if let Some(class) = self.classes.last_mut() {
-                        class.fields.insert(
+                    self.classes
+                        .last_mut()
+                        .expect("a class body is walked inside its class")
+                        .fields
+                        .insert(
                             name,
                             Var {
                                 ty,
@@ -4056,7 +4082,6 @@ impl Enumerator<'_> {
                                 constant: None,
                             },
                         );
-                    }
                 }
             }
         }
@@ -4069,21 +4094,20 @@ impl Enumerator<'_> {
                     member.kind() == "function_declaration"
                         && modifiers_text(**member, self.source).contains("private")
                 })
-                .filter_map(|member| {
-                    let name =
-                        named_children(*member).find(|child| child.kind() == "identifier")?;
+                .map(|member| {
+                    let name = named_children(*member)
+                        .find(|child| child.kind() == "identifier")
+                        .expect("the grammar gives a function its name");
                     let parameters = named_children(*member)
-                        .find(|child| child.kind() == "function_value_parameters");
-                    let arity = match parameters {
-                        Some(parameters) if text(parameters, self.source).contains('=') => None,
-                        Some(parameters) => Some(
-                            named_children(parameters)
-                                .filter(|child| child.kind() == "parameter")
-                                .count(),
-                        ),
-                        None => Some(0),
-                    };
-                    Some((declaration_key(text(name, self.source), arity), *member))
+                        .find(|child| child.kind() == "function_value_parameters")
+                        .expect("the grammar gives a function its parameter list");
+                    // A parameter with a default may be left out.
+                    let arity = (!text(parameters, self.source).contains('=')).then(|| {
+                        named_children(parameters)
+                            .filter(|child| child.kind() == "parameter")
+                            .count()
+                    });
+                    (declaration_key(text(name, self.source), arity), *member)
                 })
                 .collect::<Vec<_>>();
             let mut pending = Vec::new();
@@ -4106,11 +4130,11 @@ impl Enumerator<'_> {
                     collect_calls(*body, self.source, &mut pending);
                 }
             }
-            if let Some(class) = self.classes.last_mut() {
-                class.initializing = initializing;
-            }
+            self.classes
+                .last_mut()
+                .expect("a class body is walked inside its class")
+                .initializing = initializing;
         }
-        let _ = enumeration;
         for member in members {
             match member.kind() {
                 "enum_entry" => {
@@ -4121,7 +4145,7 @@ impl Enumerator<'_> {
                             name: position.to_string(),
                             ..Class::default()
                         });
-                        self.kotlin_class_body(body, false, false);
+                        self.kotlin_class_body(body, false);
                         self.classes.pop();
                     }
                 }
@@ -4160,7 +4184,12 @@ impl Enumerator<'_> {
     fn kotlin_accessor(&mut self, accessor: Node, property: &str, ty: &Ty, nullable: bool) {
         let getter = accessor.kind() == "getter";
         // The JVM name kotlinc gives it: `getName`, `setName`, and `isOpen`
-        // for a property named `isOpen`.
+        // and `setOpen` for a property named `isOpen`, where what follows
+        // `is` is not a lowercase letter (`island` is `getIsland`).
+        let is_prefixed = property
+            .strip_prefix("is")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|next| !next.is_ascii_lowercase());
         let capitalized = property
             .chars()
             .next()
@@ -4171,11 +4200,11 @@ impl Enumerator<'_> {
                     .collect::<String>()
             })
             .unwrap_or_default();
-        let jvm_name = if getter && property.starts_with("is") && property.len() > 2 {
+        let jvm_name = if getter && is_prefixed {
             property.to_owned()
         } else if getter {
             format!("get{capitalized}")
-        } else if property.starts_with("is") && property.len() > 2 {
+        } else if is_prefixed {
             format!("set{}", &property[2..])
         } else {
             format!("set{capitalized}")
@@ -4201,8 +4230,10 @@ impl Enumerator<'_> {
             && let Some(body) =
                 named_children(accessor).find(|child| child.kind() == "function_body")
             && text(body, self.source).trim_start().starts_with('=')
-            && let Some(value) = named_children(body).next()
         {
+            let value = named_children(body)
+                .next()
+                .expect("the grammar gives `= ` a value");
             self.kotlin_return(value, value);
         }
         self.kotlin_children(accessor, Context::Statement);
@@ -4267,11 +4298,10 @@ impl Enumerator<'_> {
             written_returns: kotlin_written_return(node, self.source),
         });
         self.scopes.push(HashMap::new());
-        if let Some(parameters) =
-            named_children(node).find(|child| child.kind() == "function_value_parameters")
-        {
-            self.kotlin_parameters(parameters);
-        }
+        let parameters = named_children(node)
+            .find(|child| child.kind() == "function_value_parameters")
+            .expect("the grammar gives a function its parameter list");
+        self.kotlin_parameters(parameters);
         // An expression body's type is the expression's where none is
         // written; known once the parameters are in scope.
         let returns = match (&declared, expression_body, any_member) {
@@ -4302,20 +4332,20 @@ impl Enumerator<'_> {
 
     fn kotlin_parameters(&mut self, parameters: Node) {
         for parameter in named_children(parameters).filter(|child| child.kind() == "parameter") {
-            let name = named_children(parameter).find(|child| child.kind() == "identifier");
+            let name = named_children(parameter)
+                .find(|child| child.kind() == "identifier")
+                .expect("the grammar gives a parameter its name");
             let ty = named_children(parameter)
                 .find(|child| child.kind().ends_with("type"))
                 .map_or(Ty::Unknown, |ty| kotlin_type(text(ty, self.source)));
-            if let Some(name) = name {
-                self.declare(
-                    text(name, self.source),
-                    Var {
-                        ty,
-                        local: true,
-                        constant: None,
-                    },
-                );
-            }
+            self.declare(
+                text(name, self.source),
+                Var {
+                    ty,
+                    local: true,
+                    constant: None,
+                },
+            );
         }
     }
 
@@ -4348,22 +4378,22 @@ impl Enumerator<'_> {
     }
 
     fn kotlin_call_statement(&mut self, call: Node) {
-        let Some(callee) = named_children(call).next() else {
-            return;
-        };
+        let callee = named_children(call)
+            .next()
+            .expect("the grammar gives a call its callee");
         let (name, safe) = match callee.kind() {
             "identifier" => (text(callee, self.source).to_owned(), false),
             "navigation_expression" => {
                 let name = named_children(callee)
                     .last()
                     .map(|name| text(name, self.source).to_owned())
-                    .unwrap_or_default();
+                    .expect("the grammar ends a navigation with a name");
                 let safe = children(callee).any(|child| child.kind() == "?.");
                 (name, safe)
             }
             _ => return,
         };
-        if name.is_empty() || KOTLIN_INLINE.contains(&name.as_str()) || self.index.inline(&name) {
+        if KOTLIN_INLINE.contains(&name.as_str()) || self.index.inline(&name) {
             return;
         }
         // A constructor call is not a method call.
@@ -4426,23 +4456,24 @@ impl Enumerator<'_> {
                     name: position.to_string(),
                     ..Class::default()
                 });
-                for body in named_children(node).filter(|child| child.kind() == "class_body") {
-                    self.kotlin_class_body(body, static_init, false);
-                }
+                let body = named_children(node)
+                    .find(|child| child.kind() == "class_body")
+                    .expect("the grammar gives an object expression its body");
+                self.kotlin_class_body(body, static_init);
                 self.classes.pop();
                 self.methods = outer_methods;
             }
             "property_declaration" => {
                 // A local.
                 let ty = self.kotlin_property_type(node);
-                for child in named_children(node) {
-                    if !matches!(
-                        child.kind(),
-                        "modifiers" | "variable_declaration" | "multi_variable_declaration"
-                    ) {
-                        self.kotlin_node(child, Context::Value);
-                    }
-                }
+                named_children(node)
+                    .filter(|child| {
+                        !matches!(
+                            child.kind(),
+                            "modifiers" | "variable_declaration" | "multi_variable_declaration"
+                        )
+                    })
+                    .for_each(|child| self.kotlin_node(child, Context::Value));
                 if let Some(name) = named_children(node)
                     .find(|child| child.kind() == "variable_declaration")
                     .and_then(|variable| named_children(variable).next())
@@ -4474,7 +4505,11 @@ impl Enumerator<'_> {
                 // their code is the enclosing method's. A lambda's last
                 // expression is its value.
                 self.scopes.push(HashMap::new());
-                let enclosing = self.methods.last().cloned();
+                let enclosing = self
+                    .methods
+                    .last()
+                    .cloned()
+                    .expect("a lambda is walked inside the method it is written in");
                 let inline = node
                     .parent()
                     .and_then(|parent| parent.parent())
@@ -4490,72 +4525,66 @@ impl Enumerator<'_> {
                 if deferred {
                     self.deferred.push((node.start_byte(), node.end_byte()));
                 }
-                if let Some(enclosing) = enclosing {
-                    self.methods.push(Method {
-                        name: if inline {
-                            enclosing.name.clone()
-                        } else {
-                            format!("{}$lambda", enclosing.name)
-                        },
-                        returns: None,
-                        not_null: true,
-                        static_init: enclosing.static_init,
-                        functional_field: false,
-                        written_returns: None,
-                    });
-                }
+                self.methods.push(Method {
+                    name: if inline {
+                        enclosing.name.clone()
+                    } else {
+                        format!("{}$lambda", enclosing.name)
+                    },
+                    returns: None,
+                    not_null: true,
+                    static_init: enclosing.static_init,
+                    functional_field: false,
+                    written_returns: None,
+                });
                 if let Some(parameters) =
                     named_children(node).find(|child| child.kind() == "lambda_parameters")
                 {
-                    for parameter in named_children(parameters) {
+                    // The grammar gives a parameter list one parameter or more.
+                    named_children(parameters).for_each(|parameter| {
                         let name = if parameter.kind() == "variable_declaration" {
-                            named_children(parameter).next()
+                            named_children(parameter)
+                                .next()
+                                .expect("the grammar gives a lambda parameter its name")
                         } else {
-                            Some(parameter)
+                            parameter
                         };
-                        if let Some(name) = name {
-                            self.declare(
-                                text(name, self.source),
-                                Var {
-                                    ty: Ty::Unknown,
-                                    local: true,
-                                    constant: None,
-                                },
-                            );
-                        }
-                    }
+                        self.declare(
+                            text(name, self.source),
+                            Var {
+                                ty: Ty::Unknown,
+                                local: true,
+                                constant: None,
+                            },
+                        );
+                    });
                 }
                 let statements = named_children(node)
                     .filter(|child| child.kind() != "lambda_parameters")
                     .collect::<Vec<_>>();
                 let count = statements.len();
                 for (position, statement) in statements.into_iter().enumerate() {
-                    if statement.kind() == "statements" {
-                        let inner = named_children(statement).collect::<Vec<_>>();
-                        let last = inner.len().saturating_sub(1);
-                        for (index, child) in inner.into_iter().enumerate() {
-                            if index == last {
-                                self.kotlin_node(child, Context::Value);
-                            } else {
-                                self.kotlin_statement(child);
-                            }
+                    if position + 1 == count {
+                        // The value, which a call of a method that returns
+                        // nothing still is a call of.
+                        if statement.kind() == "call_expression" {
+                            self.kotlin_call_statement(statement);
                         }
-                    } else if position + 1 == count {
                         self.kotlin_node(statement, Context::Value);
                     } else {
                         self.kotlin_statement(statement);
                     }
                 }
-                if !self.methods.is_empty() && node.parent().is_some() {
-                    self.methods.pop();
-                }
+                self.methods.pop();
                 self.scopes.pop();
                 if deferred {
                     self.deferred.pop();
                 }
             }
             "return_expression" => {
-                if let Some(value) = named_children(node).find(|child| child.kind() != "label") {
+                // `return@label value`: the label is an identifier too.
+                let label = node.child_by_field_name("label");
+                if let Some(value) = named_children(node).find(|child| Some(*child) != label) {
                     let labelled = text(node, self.source).starts_with("return@");
                     if !labelled {
                         self.kotlin_return(node, value);
@@ -4564,15 +4593,14 @@ impl Enumerator<'_> {
                 }
             }
             "if_expression" => {
-                let condition = node.child_by_field_name("condition");
-                let constant =
-                    condition.and_then(|condition| self.kotlin_constant_value(condition));
+                let condition = node
+                    .child_by_field_name("condition")
+                    .expect("the grammar gives an if its condition");
+                let constant = self.kotlin_constant_value(condition);
                 let branches = named_children(node)
-                    .filter(|child| Some(*child) != condition)
+                    .filter(|child| *child != condition)
                     .collect::<Vec<_>>();
-                if let Some(condition) = condition {
-                    self.kotlin_node(condition, Context::Condition);
-                }
+                self.kotlin_node(condition, Context::Condition);
                 for (position, branch) in branches.into_iter().enumerate() {
                     let dead = match constant {
                         Some(Constant::Bool(false)) => position == 0,
@@ -4591,13 +4619,14 @@ impl Enumerator<'_> {
             }
             "while_statement" | "do_while_statement" => {
                 let condition = node.child_by_field_name("condition");
-                for child in named_children(node) {
+                // The grammar gives a loop its condition: never no children.
+                named_children(node).for_each(|child| {
                     if Some(child) == condition {
                         self.kotlin_node(child, Context::Condition);
                     } else {
                         self.kotlin_statement(child);
                     }
-                }
+                });
                 if node.kind() == "while_statement" {
                     self.kotlin_loop_counter(node);
                 }
@@ -4606,25 +4635,31 @@ impl Enumerator<'_> {
                 // The compiler's own loop over a range or an iterator: its
                 // counter and its condition have no source to negate.
                 self.scopes.push(HashMap::new());
-                for child in named_children(node) {
+                // The grammar gives a loop its variable and what it is over.
+                named_children(node).for_each(|child| {
                     match child.kind() {
                         "variable_declaration" | "multi_variable_declaration" => {
                             // A loop over an `Int` range (`0 until n`, `a..b`,
-                            // `n downTo 0`) counts in `Int`s.
+                            // `n downTo 0`, `a..b step 2`) counts in `Int`s.
                             let over_range = named_children(node).any(|part| {
                                 part.kind() == "range_expression"
                                     || (part.kind() == "infix_expression"
                                         && named_children(part).any(|word| {
-                                            matches!(text(word, self.source), "until" | "downTo")
+                                            matches!(
+                                                text(word, self.source),
+                                                "until" | "downTo" | "step"
+                                            )
                                         }))
                             });
+                            // A destructuring's names are in its own
+                            // declarations, not here: only a plain variable's
+                            // is declared.
                             for name in named_children(child).filter(|n| n.kind() == "identifier") {
                                 let name = text(name, self.source).to_owned();
                                 self.declare(
                                     &name,
                                     Var {
-                                        ty: if over_range && child.kind() == "variable_declaration"
-                                        {
+                                        ty: if over_range {
                                             Ty::Prim(Prim::Int)
                                         } else {
                                             Ty::Unknown
@@ -4636,26 +4671,23 @@ impl Enumerator<'_> {
                             }
                         }
                         "block" => self.kotlin_node(child, Context::Statement),
-                        "range_expression" => {
-                            for bound in named_children(child) {
-                                self.kotlin_node(bound, Context::Value);
-                            }
-                        }
+                        "range_expression" => named_children(child)
+                            .for_each(|bound| self.kotlin_node(bound, Context::Value)),
                         "infix_expression" => {
                             // `0 until n`, `n downTo 0 step 2`
-                            for part in named_children(child).filter(|part| {
-                                part.kind() != "identifier"
-                                    || !matches!(
-                                        text(*part, self.source),
-                                        "until" | "downTo" | "step"
-                                    )
-                            }) {
-                                self.kotlin_node(part, Context::Value);
-                            }
+                            named_children(child)
+                                .filter(|part| {
+                                    part.kind() != "identifier"
+                                        || !matches!(
+                                            text(*part, self.source),
+                                            "until" | "downTo" | "step"
+                                        )
+                                })
+                                .for_each(|part| self.kotlin_node(part, Context::Value));
                         }
                         _ => self.kotlin_statement(child),
                     }
-                }
+                });
                 self.scopes.pop();
             }
             "when_expression" => {
@@ -4664,7 +4696,8 @@ impl Enumerator<'_> {
                     self.kotlin_children(subject, Context::Value);
                 }
                 for entry in named_children(node).filter(|child| child.kind() == "when_entry") {
-                    for part in named_children(entry) {
+                    // The grammar gives an entry its body: never no parts.
+                    named_children(entry).for_each(|part| {
                         let is_condition = entry
                             .children_by_field_name("condition", &mut entry.walk())
                             .any(|condition| condition == part);
@@ -4685,13 +4718,14 @@ impl Enumerator<'_> {
                         } else {
                             self.kotlin_node(part, context);
                         }
-                    }
+                    });
                 }
             }
             "parenthesized_expression" => {
-                if let Some(inner) = named_children(node).next() {
-                    self.kotlin_node(inner, context);
-                }
+                let inner = named_children(node)
+                    .next()
+                    .expect("the grammar puts an expression in parentheses");
+                self.kotlin_node(inner, context);
             }
             "binary_expression" => self.kotlin_binary(node, context),
             "infix_expression" => self.kotlin_infix(node, context),
@@ -4709,12 +4743,6 @@ impl Enumerator<'_> {
                 if context == Context::Condition
                     && named_children(node).last().is_some_and(|range| {
                         range.kind() != "range_expression"
-                            && !matches!(
-                                range
-                                    .child_by_field_name("operator")
-                                    .map(|operator| text(operator, self.source)),
-                                Some("until" | "downTo" | "..<")
-                            )
                             && !text(range, self.source).contains(" until ")
                             && !text(range, self.source).contains(" downTo ")
                     }) =>
@@ -4730,9 +4758,7 @@ impl Enumerator<'_> {
                 if let Some(condition) = self.kotlin_checked_compound(node) {
                     self.negate(condition);
                 }
-                for child in named_children(node) {
-                    self.kotlin_node(child, Context::Value);
-                }
+                named_children(node).for_each(|child| self.kotlin_node(child, Context::Value));
             }
             "identifier" => {
                 let name = text(node, self.source);
@@ -4748,9 +4774,10 @@ impl Enumerator<'_> {
                 if (context == Context::Condition && !safe) || self.kotlin_negated_chain(node) {
                     self.negate(node);
                 }
-                if let Some(receiver) = named_children(node).next() {
-                    self.kotlin_node(receiver, Context::Value);
-                }
+                let receiver = named_children(node)
+                    .next()
+                    .expect("the grammar gives a navigation its receiver");
+                self.kotlin_node(receiver, Context::Value);
             }
             "index_expression" | "as_expression" | "this_expression" => {
                 if context == Context::Condition || self.kotlin_negated_chain(node) {
@@ -4797,24 +4824,22 @@ impl Enumerator<'_> {
     fn kotlin_children_values(&mut self, node: Node) {
         match node.kind() {
             "range_test" | "type_test" => {
-                for child in named_children(node) {
-                    self.kotlin_node(child, Context::Value);
-                }
+                named_children(node).for_each(|child| self.kotlin_node(child, Context::Value))
             }
             _ => self.kotlin_node(node, Context::Value),
         }
     }
 
     fn note_kotlin_logging(&mut self, call: Node) {
-        let Some(callee) = named_children(call).next() else {
-            return;
-        };
+        let callee = named_children(call)
+            .next()
+            .expect("the grammar gives a call its callee");
         if callee.kind() != "navigation_expression" {
             return;
         }
-        let Some(receiver) = named_children(callee).next() else {
-            return;
-        };
+        let receiver = named_children(callee)
+            .next()
+            .expect("the grammar gives a navigation its receiver");
         let receiver = text(receiver, self.source);
         if self.loggers.contains(receiver)
             || matches!(receiver, "LoggerFactory" | "LogManager" | "LogFactory")
@@ -4828,21 +4853,23 @@ impl Enumerator<'_> {
         }
     }
 
-    /// `require(a && b)`, `check(a || b)`: the inlined `if (!value) throw`
-    /// is a jump of its own on the whole condition, besides its operands'.
-    /// A single comparison's is the same mutant as the comparison's own.
+    /// `require(a && b)`, `check(a || b, { message })`: the inlined `if
+    /// (!value) throw` is a jump of its own on the whole condition, besides
+    /// its operands'. A single comparison's is the same mutant as the
+    /// comparison's own.
     fn kotlin_checked_compound<'t>(&self, call: Node<'t>) -> Option<Node<'t>> {
-        let callee = named_children(call).next()?;
+        let callee = named_children(call)
+            .next()
+            .expect("the grammar gives a call its callee");
         if !matches!(text(callee, self.source), "require" | "check") {
             return None;
         }
         let arguments = named_children(call).find(|child| child.kind() == "value_arguments")?;
-        let mut values = named_children(arguments);
-        let argument = values.next()?;
-        if values.next().is_some() {
-            return None;
-        }
-        let value = strip_parens(named_children(argument).last()?);
+        let argument = named_children(arguments).next()?;
+        let value = named_children(argument)
+            .last()
+            .expect("the grammar gives an argument its value");
+        let value = strip_parens(value);
         (value.kind() == "binary_expression"
             && matches!(binary_operator(value, self.source).as_str(), "&&" | "||"))
         .then_some(value)
@@ -4850,13 +4877,12 @@ impl Enumerator<'_> {
 
     fn kotlin_binary(&mut self, node: Node, context: Context) {
         let operator = binary_operator(node, self.source);
-        let (Some(left), Some(right)) = (
-            node.child_by_field_name("left"),
-            node.child_by_field_name("right"),
-        ) else {
-            self.kotlin_children(node, Context::Value);
-            return;
-        };
+        let left = node
+            .child_by_field_name("left")
+            .expect("the grammar gives a binary expression its left operand");
+        let right = node
+            .child_by_field_name("right")
+            .expect("the grammar gives a binary expression its right operand");
         match operator.as_str() {
             "&&" | "||" => {
                 self.kotlin_node(left, Context::Condition);
@@ -4894,8 +4920,9 @@ impl Enumerator<'_> {
                 self.kotlin_node(right, context);
             }
             _ => {
-                if let Some((to, helper)) = math_of(&operator)
-                    && self.kotlin_constant_value(node).is_none()
+                let (to, helper) = math_of(&operator)
+                    .expect("the grammar's other binary operators are + - * / %, all arithmetic");
+                if self.kotlin_constant_value(node).is_none()
                     && !self.kotlin_not_arithmetic(node, left, right, &operator)
                 {
                     self.arith(node, left, right, &operator, to, helper);
@@ -4915,7 +4942,7 @@ impl Enumerator<'_> {
         let left_ty = self.kotlin_type_of(left);
         let right_ty = self.kotlin_type_of(right);
         let _ = node;
-        if operator == "+" && (left_ty == Ty::Str || matches!(left.kind(), "string_literal")) {
+        if operator == "+" && left_ty == Ty::Str {
             return true;
         }
         // A side known to be a reference: Kotlin's operators are functions
@@ -4943,31 +4970,27 @@ impl Enumerator<'_> {
     }
 
     fn kotlin_infix(&mut self, node: Node, context: Context) {
-        let parts = named_children(node).collect::<Vec<_>>();
-        if parts.len() == 3 && parts[1].kind() == "identifier" {
-            let operator = text(parts[1], self.source).to_owned();
-            if matches!(
-                operator.as_str(),
-                "and" | "or" | "xor" | "shl" | "shr" | "ushr"
-            ) && let Some((to, helper)) = math_of(&operator)
-                && self.kotlin_constant_value(node).is_none()
-            {
-                let left_ty = self.kotlin_type_of(parts[0]);
-                if !matches!(left_ty, Ty::Object(_) | Ty::Str) {
-                    self.arith(node, parts[0], parts[2], &operator, to, helper);
-                }
+        // The grammar's infix call is an expression, the function's name and
+        // an expression, with any comment among them.
+        let parts = named_children(node)
+            .filter(|part| !part.kind().ends_with("comment"))
+            .collect::<Vec<_>>();
+        let (left, name, right) = (parts[0], parts[1], parts[2]);
+        let operator = text(name, self.source).to_owned();
+        // `and`, `or`, `xor`, `shl`, `shr` and `ushr` are the operators.
+        // The constants read here never include an infix call, so even
+        // `1 shl 3` (which kotlinc folds) is listed.
+        if let Some((to, helper)) = math_of(&operator) {
+            let left_ty = self.kotlin_type_of(left);
+            if !matches!(left_ty, Ty::Object(_) | Ty::Str) {
+                self.arith(node, left, right, &operator, to, helper);
             }
-            if context == Context::Condition {
-                self.negate(node);
-            }
-            self.kotlin_node(parts[0], Context::Value);
-            self.kotlin_node(parts[2], Context::Value);
-            return;
         }
         if context == Context::Condition {
             self.negate(node);
         }
-        self.kotlin_children(node, Context::Value);
+        self.kotlin_node(left, Context::Value);
+        self.kotlin_node(right, Context::Value);
     }
 
     /// A call, navigation or index chain the grammar leads with a `!`
@@ -4982,10 +5005,9 @@ impl Enumerator<'_> {
             lead.kind(),
             "call_expression" | "navigation_expression" | "index_expression"
         ) {
-            match named_children(lead).next() {
-                Some(first) => lead = first,
-                None => return false,
-            }
+            lead = named_children(lead)
+                .next()
+                .expect("the grammar leads a call, navigation or index with an expression");
         }
         lead.id() != node.id()
             && lead.kind() == "unary_expression"
@@ -5887,6 +5909,767 @@ class K(var count: Int) {
         assert!(on_line(&listed, file, 3).is_empty(), "{listed:?}");
         assert!(on_line(&listed, file, 5).is_empty(), "{listed:?}");
         assert!(!on_line(&listed, file, 6).is_empty(), "{listed:?}");
+    }
+
+    // Coverage of package B1: Java's constants and types, the JDK methods'
+    // types, Kotlin's lambda reads and the Kotlin forms its walk meets.
+    mod inference_and_kotlin_forms {
+        use super::*;
+
+        /// What `read` says of `expression`, the initializer of a field of
+        /// Java class `M`, as the walk sees it in one of `M`'s methods: `M`'s
+        /// field `count` (an `int`) and constant `K` (3) and these locals in
+        /// scope: `int i`, `long l`, `byte b`, `boolean flag`, `String s`,
+        /// `Foo o`, `int[] ints` and `List list`.
+        fn java_reading<R>(expression: &str, read: impl FnOnce(&Enumerator, Node) -> R) -> R {
+            let source = format!("class M {{\n    Object v = {expression};\n}}\n");
+            let tree = crate::jvm_instrumenter::parse(&source, JvmLanguage::Java).expect("parses");
+            let index = ProjectIndex::of([("a/M.java", source.as_str())]);
+            let mut enumerator = Enumerator {
+                source: &source,
+                language: JvmLanguage::Java,
+                index: &index,
+                mutants: Vec::new(),
+                scopes: Vec::new(),
+                classes: Vec::new(),
+                methods: Vec::new(),
+                loggers: BTreeSet::new(),
+                logging_lines: BTreeSet::new(),
+                package: String::new(),
+                deferred: Vec::new(),
+                root: Some(tree.root_node()),
+            };
+            let var = |ty: Ty, constant: Option<Constant>| Var {
+                ty,
+                local: false,
+                constant,
+            };
+            enumerator.classes.push(Class {
+                name: "M".into(),
+                fields: HashMap::from([
+                    ("count".to_owned(), var(Ty::Prim(Prim::Int), None)),
+                    (
+                        "K".to_owned(),
+                        var(Ty::Prim(Prim::Int), Some(Constant::Number(3.0))),
+                    ),
+                ]),
+                ..Class::default()
+            });
+            enumerator.scopes.push(HashMap::from([
+                ("i".to_owned(), var(Ty::Prim(Prim::Int), None)),
+                ("l".to_owned(), var(Ty::Prim(Prim::Long), None)),
+                ("b".to_owned(), var(Ty::Prim(Prim::Byte), None)),
+                ("flag".to_owned(), var(Ty::Prim(Prim::Boolean), None)),
+                ("s".to_owned(), var(Ty::Str, None)),
+                ("o".to_owned(), var(Ty::Object("Foo".into()), None)),
+                ("ints".to_owned(), var(Ty::Object("int[]".into()), None)),
+                ("list".to_owned(), var(Ty::Object("List".into()), None)),
+            ]));
+            let start = source.find(" = ").expect("an initializer") + 3;
+            let node = tree
+                .root_node()
+                .descendant_for_byte_range(start, start + expression.len())
+                .expect("the expression");
+            assert_eq!(text(node, &source), expression);
+            read(&enumerator, node)
+        }
+
+        fn constant(expression: &str) -> Option<Constant> {
+            java_reading(expression, |enumerator, node| {
+                enumerator.java_constant_value(node)
+            })
+        }
+
+        fn java_type_of(expression: &str) -> Ty {
+            java_reading(expression, |enumerator, node| enumerator.java_type_of(node))
+        }
+
+        /// The value javac folds a constant expression to (JLS 15.29), where
+        /// the file shows every operand is a constant: literals, `char`s,
+        /// this class's constants, unary and binary operators, conditionals
+        /// and casts to a primitive type or `String`. Anything else is no
+        /// constant, among them an operand the file does not know, a division
+        /// by zero (javac refuses to fold it) and operator and operand pairs
+        /// javac refuses to compile at all.
+        #[test]
+        fn java_constants_fold_as_javac_folds_them() {
+            use Constant::{Bool, Number, Text};
+            let folded = [
+                (r"'\0'", Some(Number(0.0))),
+                ("'a'", Some(Number(97.0))),
+                ("K", Some(Number(3.0))),
+                ("M.K", Some(Number(3.0))),
+                ("+5", Some(Number(5.0))),
+                ("6 / 3", Some(Number(2.0))),
+                ("7 % 4", Some(Number(3.0))),
+                ("1 < 2", Some(Bool(true))),
+                ("2 <= 1", Some(Bool(false))),
+                ("2 > 1", Some(Bool(true))),
+                ("1 >= 2", Some(Bool(false))),
+                ("1 == 1", Some(Bool(true))),
+                ("1 != 1", Some(Bool(false))),
+                ("6 & 3", Some(Number(2.0))),
+                ("6 | 3", Some(Number(7.0))),
+                ("6 ^ 3", Some(Number(5.0))),
+                ("1 << 4", Some(Number(16.0))),
+                ("-16 >> 2", Some(Number(-4.0))),
+                ("16 >>> 2", Some(Number(4.0))),
+                ("true & true", Some(Bool(true))),
+                ("true && false", Some(Bool(false))),
+                ("false && true", Some(Bool(false))),
+                ("true || false", Some(Bool(true))),
+                ("false || true", Some(Bool(true))),
+                ("false | false", Some(Bool(false))),
+                ("true ^ true", Some(Bool(false))),
+                ("true != false", Some(Bool(true))),
+                ("true == false", Some(Bool(false))),
+                ("\"a\" + 1", Some(Text)),
+                ("1 + \"a\"", Some(Text)),
+                ("true ? 1 : 2", Some(Number(1.0))),
+                ("false ? 1 : 2", Some(Number(2.0))),
+                ("(String) \"a\"", Some(Text)),
+                ("(int) 2.7", Some(Number(2.0))),
+                ("(long) -2.7", Some(Number(-2.0))),
+                ("(float) 2.5", Some(Number(2.5))),
+                ("(double) 2.5", Some(Number(2.5))),
+            ];
+            for (expression, value) in folded {
+                assert_eq!(constant(expression), value, "{expression}");
+            }
+            let not_constant = [
+                "y",
+                "this.zz",
+                "Other.K",
+                "-y",
+                "y + 1",
+                "1 + y",
+                "1 / 0",
+                "7 % 0",
+                "\"a\" == \"b\"",
+                "y ? 1 : 2",
+                "true ? y : 2",
+                "true ? 1 : y",
+                "(Object) 1",
+                "(int) y",
+                // javac refuses these: no value to give them.
+                "-true",
+                "true < false",
+                "1 + true",
+            ];
+            for expression in not_constant {
+                assert_eq!(constant(expression), None, "{expression}");
+            }
+        }
+
+        /// The type of an expression as far as the file shows it, as javac
+        /// types it: literals, names and `this.` fields, an array's `length`
+        /// and elements, creations, conditionals (numeric promotion, `null`
+        /// taking the other side's type), assignments, unary and binary
+        /// operators (comparisons are `boolean`, `+` with a reference is a
+        /// `String`, a shift is its left side's promoted type), calls of the
+        /// JDK's known methods, lambdas and method references, and `this`.
+        #[test]
+        fn java_expressions_have_the_types_javac_gives_them() {
+            let int = Ty::Prim(Prim::Int);
+            let long = Ty::Prim(Prim::Long);
+            let boolean = Ty::Prim(Prim::Boolean);
+            let function = Ty::Object("Function".into());
+            let typed = [
+                ("true", boolean.clone()),
+                ("null", Ty::Null),
+                ("this.count", int.clone()),
+                ("this.zz", Ty::Unknown),
+                ("o.zz", Ty::Unknown),
+                ("ints.length", int.clone()),
+                ("s.length", Ty::Unknown),
+                ("list.length", Ty::Unknown),
+                ("ints[0]", int.clone()),
+                ("list[0]", Ty::Unknown),
+                ("y[0]", Ty::Unknown),
+                ("new int[3]", Ty::Object("[]".into())),
+                ("o instanceof String", boolean.clone()),
+                ("flag ? 1 : 2L", long.clone()),
+                ("flag ? true : false", boolean.clone()),
+                ("flag ? 1 : true", Ty::Unknown),
+                ("flag ? null : \"x\"", Ty::Str),
+                ("flag ? \"x\" : null", Ty::Str),
+                ("flag ? y : \"x\"", Ty::Str),
+                ("i = 2", int.clone()),
+                ("!flag", boolean.clone()),
+                ("-b", int.clone()),
+                ("-l", long.clone()),
+                ("~i", int.clone()),
+                ("-y", Ty::Unknown),
+                ("i < 2", boolean.clone()),
+                ("flag && flag", boolean.clone()),
+                ("1 + \"a\"", Ty::Str),
+                ("o + 1", Ty::Str),
+                ("1 + o", Ty::Str),
+                ("i << 2L", int.clone()),
+                ("l >> 1", long.clone()),
+                ("y >>> 1", Ty::Unknown),
+                ("flag & true", boolean.clone()),
+                ("i * 2L", long.clone()),
+                ("i * y", Ty::Unknown),
+                ("Integer.parseInt(s)", int.clone()),
+                ("s.trim()", Ty::Str),
+                ("make()", Ty::Unknown),
+                ("() -> 1", function.clone()),
+                ("String::valueOf", function.clone()),
+                ("this", Ty::Object("M".into())),
+                ("String.class", Ty::Unknown),
+            ];
+            for (expression, ty) in typed {
+                assert_eq!(java_type_of(expression), ty, "{expression}");
+            }
+        }
+
+        /// The JDK methods whose results' types the source does not name, by
+        /// class and name: `Integer.parseInt` is an `int`, `Math`'s are
+        /// `double`s but for those whose type follows their arguments', a
+        /// map entry's `getKey` is whatever the map holds.
+        #[test]
+        fn the_jdk_s_methods_have_their_declared_types() {
+            let known = [
+                (Some("String"), "valueOf", Some(Ty::Str)),
+                (Some("Integer"), "parseInt", Some(Ty::Prim(Prim::Int))),
+                (Some("Long"), "parseLong", Some(Ty::Prim(Prim::Long))),
+                (Some("Double"), "parseDouble", Some(Ty::Prim(Prim::Double))),
+                (Some("Math"), "abs", None),
+                (Some("Math"), "floorDiv", None),
+                (Some("Math"), "sqrt", Some(Ty::Prim(Prim::Double))),
+                (Some("entry"), "getKey", None),
+                (None, "trim", Some(Ty::Str)),
+                (Some("xs"), "size", Some(Ty::Prim(Prim::Int))),
+                (Some("n"), "longValue", Some(Ty::Prim(Prim::Long))),
+                (Some("n"), "doubleValue", Some(Ty::Prim(Prim::Double))),
+                (Some("n"), "floatValue", Some(Ty::Prim(Prim::Float))),
+                (Some("s"), "charAt", Some(Ty::Prim(Prim::Char))),
+                (Some("s"), "equals", Some(Ty::Prim(Prim::Boolean))),
+                (Some("s"), "frobnicate", None),
+            ];
+            for (object, name, ty) in known {
+                assert_eq!(known_method_type(object, name), ty, "{object:?}.{name}");
+            }
+        }
+
+        /// Whether `n`, a local declared first in a Kotlin function, is read
+        /// in a lambda among the statements after it (`body`).
+        fn read_later_in_a_lambda(body: &str) -> bool {
+            let source = format!("fun f(xs: List<Int>) {{\n    var n = 0\n{body}}}\n");
+            let tree =
+                crate::jvm_instrumenter::parse(&source, JvmLanguage::Kotlin).expect("parses");
+            let start = source.find("var n").expect("the declaration");
+            let declaration = tree
+                .root_node()
+                .descendant_for_byte_range(start, start + "var n = 0".len())
+                .expect("the declaration");
+            assert_eq!(declaration.kind(), "property_declaration");
+            kotlin_read_in_a_later_lambda(declaration, "n", &source)
+        }
+
+        /// A local is read in a later lambda by name or by a string's bare
+        /// `$n` template; `$n_` and `$nx` name other variables, and a read
+        /// outside a lambda, or no statement after the declaration, is no
+        /// such read.
+        #[test]
+        fn a_kotlin_local_is_read_in_a_later_lambda_by_name_or_template() {
+            assert!(read_later_in_a_lambda(
+                "    xs.forEach { println(\"$n\") }\n"
+            ));
+            assert!(read_later_in_a_lambda("    xs.forEach { println(n) }\n"));
+            assert!(!read_later_in_a_lambda(
+                "    xs.forEach { println(\"$n_\") }\n"
+            ));
+            assert!(!read_later_in_a_lambda(
+                "    xs.forEach { println(\"$nx\") }\n"
+            ));
+            assert!(!read_later_in_a_lambda("    println(n)\n"));
+            assert!(!read_later_in_a_lambda(""));
+        }
+
+        /// A Kotlin file's mutants, as `enumerate` lists them.
+        fn kotlin_mutants(file: &str, source: &str) -> Vec<JvmMutant> {
+            let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Kotlin).expect("parses");
+            let index = ProjectIndex::of([(file, source)]);
+            enumerate(source, &tree, JvmLanguage::Kotlin, &index)
+        }
+
+        /// The 1-based line of the first line of `source` holding `marker`.
+        fn line_of(source: &str, marker: &str) -> u32 {
+            let at = source.find(marker).expect("the marker");
+            source[..at].matches('\n').count() as u32 + 1
+        }
+
+        /// Every mutant as (line, `Mutator:descriptor`), sorted.
+        fn by_line(file: &str, source: &str) -> Vec<(u32, String)> {
+            let mut listed = kotlin_mutants(file, source)
+                .iter()
+                .map(|mutant| {
+                    (
+                        mutant.start.0,
+                        format!("{}:{}", mutant.mutator.name(), mutant.descriptor),
+                    )
+                })
+                .collect::<Vec<_>>();
+            listed.sort();
+            listed
+        }
+
+        /// The `Mutator:descriptor`s of the line holding `marker`, sorted.
+        fn on(listed: &[(u32, String)], source: &str, marker: &str) -> Vec<String> {
+            let line = line_of(source, marker);
+            listed
+                .iter()
+                .filter(|(at, _)| *at == line)
+                .map(|(_, mutant)| mutant.clone())
+                .collect()
+        }
+
+        /// Kotlin's declarations: a class with no body, with an empty
+        /// constructor and body, an empty object, an enum's entries, an
+        /// object's `init` and properties (its static initializer, which PIT
+        /// leaves alone), a class nested in an object (its own constructor,
+        /// which PIT mutates), secondary constructors with modifiers and with
+        /// no body, and a companion's private functions only its
+        /// initialization calls, one with a default argument and one called
+        /// twice.
+        #[test]
+        fn kotlin_declarations_list_the_mutants_pit_makes_of_them() {
+            let file = "a/Decl.kt";
+            let source = r#"package /* the package */ a
+
+class Plain
+
+class Empty() {}
+
+object Blank {}
+
+enum class Kind { ON, OFF }
+
+object Registry {
+    var count = 0
+    init {
+        count = count + 1
+    }
+    class Entry(val a: Int) {
+        val b = a + 1
+    }
+}
+
+class Built {
+    var total = 0
+    private constructor(x: Int) : this() {
+        total = x * 2
+    }
+    constructor()
+}
+
+class Shared {
+    companion object {
+        val limit = 2
+        private fun twice(n: Int) = n * 2
+        val doubled = twice(limit) + twice(limit)
+        private fun pad(n: Int = 1) = n + 1
+        val padded = pad()
+    }
+}
+"#;
+            let listed = by_line(file, source);
+            assert_eq!(
+                listed,
+                [
+                    (line_of(source, "val b = a + 1"), "Math:-".to_owned()),
+                    (line_of(source, "total = x * 2"), "Math:/".to_owned()),
+                ]
+            );
+            let mutants = kotlin_mutants(file, source);
+            assert_eq!(mutants[0].class, "a.Registry$Entry");
+            assert_eq!(mutants[0].method, "<init>");
+        }
+
+        /// A property's accessors are named as kotlinc names them: `isShut`
+        /// and `setOpen` for properties named `isShut` and `isOpen`,
+        /// `getIsland` for `island`. A getter returns the property's type
+        /// (none where the source does not show it), a getter with no body
+        /// is the compiler's, `@NotNull` keeps `null` from a nullable
+        /// return, and a `Unit` function's expression body is a statement.
+        #[test]
+        fn kotlin_accessors_and_expression_bodies_list_the_mutants_pit_makes() {
+            let file = "a/Door.kt";
+            let source = r#"package a
+
+import org.jetbrains.annotations.NotNull
+
+class Door(private val helper: Helper) {
+    var changes = 0
+    var isOpen = false
+        set(value) {
+            changes++
+            field = value
+        }
+    val isShut: Boolean
+        get() = !isOpen
+    val island: Boolean
+        get() = isOpen
+    val size
+        get() = helper.compute()
+    val width: Int = 3
+        get
+    @NotNull
+    fun label(): Helper? = helper.self()
+    fun touch(): Unit = ring()
+    fun ring() {}
+}
+"#;
+            let listed = by_line(file, source);
+            assert_eq!(
+                on(&listed, source, "get() = !isOpen"),
+                ["BooleanTrueReturnVals:true", "NegateConditionals:negated"]
+            );
+            assert_eq!(
+                on(&listed, source, "get() = isOpen"),
+                ["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"]
+            );
+            for marker in [
+                "get() = helper.compute()",
+                "val width",
+                "        get\n",
+                "fun label",
+                "fun ring",
+            ] {
+                assert!(
+                    on(&listed, source, marker).is_empty(),
+                    "{marker}: {listed:?}"
+                );
+            }
+            assert_eq!(on(&listed, source, "fun touch"), ["VoidMethodCall:removed"]);
+            let mutants = kotlin_mutants(file, source);
+            let methods_on = |marker: &str| {
+                let line = line_of(source, marker);
+                mutants
+                    .iter()
+                    .filter(|mutant| mutant.start.0 == line)
+                    .map(|mutant| mutant.method.as_str())
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(methods_on("changes++"), BTreeSet::from(["setOpen"]));
+            assert_eq!(methods_on("get() = !isOpen"), BTreeSet::from(["isShut"]));
+            assert_eq!(methods_on("get() = isOpen"), BTreeSet::from(["getIsland"]));
+        }
+
+        /// Call statements: a `String`'s own method is the JDK's, whatever
+        /// the project declares of that name; a project `inline` function's
+        /// call and a constructor's are no calls to remove; `require` and
+        /// `check` are inlined, their whole `&&` condition a jump of its own
+        /// with the message passed in parentheses too, a project's `check`
+        /// with no condition argument nothing more; a lambda's last
+        /// statement is a call to remove like any other; and a collection
+        /// function's lambda is the method's own code.
+        #[test]
+        fn kotlin_calls_list_the_mutants_pit_makes_of_them() {
+            let file = "a/Calls.kt";
+            let source = r#"package a
+
+class Calls {
+    fun trim() {}
+    inline fun twice(block: () -> Unit) {
+        block()
+        block()
+    }
+    fun log() {}
+    fun act(s: String, done: Boolean, n: Int, xs: List<Int>) {
+        s.trim()
+        twice { }
+        Calls()
+        check(done && s.isEmpty(), { "not done" })
+        require(!done)
+        require(n > 0)
+        xs.forEach { log(); log() }
+        xs.forEach { log() }
+        val counted = xs.any { it > n }
+        val doubled = xs.map { x -> x * 2 }
+    }
+}
+
+class Gate {
+    fun check(): Boolean = true
+    fun check(block: () -> Boolean): Boolean = block()
+    fun use(done: Boolean) {
+        check()
+        check { done }
+    }
+}
+"#;
+            let listed = by_line(file, source);
+            for marker in [
+                "s.trim()",
+                "twice { }",
+                "Calls()",
+                "        check()",
+                "check { done }",
+                "        block()",
+            ] {
+                assert!(
+                    on(&listed, source, marker).is_empty(),
+                    "{marker}: {listed:?}"
+                );
+            }
+            assert_eq!(
+                on(&listed, source, "check(done"),
+                [
+                    "NegateConditionals:negated",
+                    "NegateConditionals:negated",
+                    "NegateConditionals:negated"
+                ]
+            );
+            assert_eq!(
+                on(&listed, source, "require(!done)"),
+                ["NegateConditionals:negated"]
+            );
+            assert_eq!(
+                on(&listed, source, "require(n > 0)"),
+                ["ConditionalsBoundary:>=", "NegateConditionals:negated"]
+            );
+            assert_eq!(
+                on(&listed, source, "{ log(); log() }"),
+                ["VoidMethodCall:removed", "VoidMethodCall:removed"]
+            );
+            assert_eq!(on(&listed, source, "{ log() }"), ["VoidMethodCall:removed"]);
+            assert_eq!(
+                on(&listed, source, "xs.any"),
+                ["ConditionalsBoundary:>=", "NegateConditionals:negated"]
+            );
+            assert_eq!(on(&listed, source, "xs.map"), ["Math:/"]);
+            let mutants = kotlin_mutants(file, source);
+            let any = line_of(source, "xs.any");
+            assert!(
+                mutants
+                    .iter()
+                    .filter(|mutant| mutant.start.0 == any)
+                    .all(|mutant| mutant.method == "act" && mutant.deferred.is_none()),
+                "{mutants:?}"
+            );
+        }
+
+        /// Kotlin's control flow and conditions: branches a constant leaves
+        /// out (a second file-level constant included), an `if` with no
+        /// branch, loops destructuring their element and over a stepped
+        /// range (`Int`s), a `when` with a guard, with no entries and as a
+        /// statement, a `try` as statements, a labelled return's value,
+        /// chains led by `!` (one jump each), conditions that are an index,
+        /// a `this.` property, a call of an operator function or a Boolean
+        /// `and`, constant comparisons and arithmetic (folded), operators of
+        /// other types (functions), equality with a literal (a jump), and an
+        /// infix shift with a comment in it.
+        #[test]
+        fn kotlin_control_flow_lists_the_mutants_pit_makes_of_it() {
+            let file = "a/Flow.kt";
+            let source = r#"package a
+
+const val LIMIT = 3
+const val DEBUG = false
+
+class Flow(private val bools: BooleanArray, private val vote: Vote) {
+    var flag = false
+    fun walk(n: Int, xs: List<Int>, pairs: Map<String, Int>, o: Any, other: Boolean) {
+        if (DEBUG) {
+            log() // left out
+        } else {
+            log() // kept
+        }
+        if (true) log() else log()
+        if (n > LIMIT) ;
+        for ((key, value) in pairs) { log() }
+        for (i in 0..10 step 2) {
+            val same = i == n
+        }
+        for ((a, b) in xs zip xs) { }
+        when (o) { is String if o.length > 2 -> log() else -> {} }
+        when (n) {}
+        when (n) {
+            1 -> log()
+            else -> {}
+        }
+        try {
+            log() // tried
+        } catch (e: Exception) {
+            log() // caught
+        } finally {
+            log() // finally
+        }
+        val parts = xs.map { return@map it + 1 }
+        val v = xs[n.inc()]
+        val empty = !xs.isEmpty()
+        val off = !this.flag
+        val first = !bools[0]
+        if (bools[1]) log()
+        if (this.flag) log()
+        val cast = o as String
+        val small = 1 < 2
+        val hour = 60 * 60
+        if (vote + vote) log()
+        val scaled = 2 * vote
+        val yes = flag == true
+        val one = 1 == n
+        val shifted = n shl /* by */ 2
+        val both = vote and vote
+        if (flag and other) log()
+        return
+    }
+    fun log() {}
+}
+
+class Vote(val n: Int) {
+    operator fun plus(other: Vote): Boolean = n > other.n
+    infix fun and(other: Vote): Vote = this
+}
+
+operator fun Int.times(vote: Vote): Vote = vote
+"#;
+            let listed = by_line(file, source);
+            let removed = || vec!["VoidMethodCall:removed".to_owned()];
+            let negated = || vec!["NegateConditionals:negated".to_owned()];
+            let negated_and_removed = || {
+                vec![
+                    "NegateConditionals:negated".to_owned(),
+                    "VoidMethodCall:removed".to_owned(),
+                ]
+            };
+            let compared = || {
+                vec![
+                    "ConditionalsBoundary:>=".to_owned(),
+                    "NegateConditionals:negated".to_owned(),
+                ]
+            };
+            let expected = [
+                ("if (DEBUG)", vec![]),
+                ("// left out", vec![]),
+                ("// kept", removed()),
+                ("if (true)", removed()),
+                ("if (n > LIMIT)", compared()),
+                ("for ((key, value)", removed()),
+                ("for (i in", vec![]),
+                ("val same", negated()),
+                ("for ((a, b)", vec![]),
+                (
+                    "when (o)",
+                    vec![
+                        "ConditionalsBoundary:>=".to_owned(),
+                        "NegateConditionals:negated".to_owned(),
+                        "VoidMethodCall:removed".to_owned(),
+                    ],
+                ),
+                ("when (n) {}", vec![]),
+                ("1 -> log()", removed()),
+                ("// tried", removed()),
+                ("// caught", removed()),
+                ("// finally", removed()),
+                ("return@map", vec!["Math:-".to_owned()]),
+                ("val v =", vec![]),
+                ("val empty", negated()),
+                ("val off", negated()),
+                ("val first", negated()),
+                ("if (bools[1])", negated_and_removed()),
+                ("if (this.flag)", negated_and_removed()),
+                ("val cast", vec![]),
+                ("val small", vec![]),
+                ("val hour", vec![]),
+                ("if (vote + vote)", negated_and_removed()),
+                ("val scaled", vec![]),
+                ("val yes", negated()),
+                ("val one", negated()),
+                ("val shifted", vec!["Math:shr".to_owned()]),
+                ("val both", vec![]),
+                (
+                    "if (flag and other)",
+                    vec![
+                        "Math:or".to_owned(),
+                        "NegateConditionals:negated".to_owned(),
+                        "VoidMethodCall:removed".to_owned(),
+                    ],
+                ),
+                ("        return\n", vec![]),
+            ];
+            for (marker, mutants) in expected {
+                assert_eq!(on(&listed, source, marker), mutants, "{marker}: {listed:?}");
+            }
+        }
+
+        /// Forms kotlinc refuses but the grammar reads, walked all the same:
+        /// a class's property that destructures has no name to record, and
+        /// its initializer is still the constructor's code.
+        #[test]
+        fn a_kotlin_class_property_that_destructures_is_still_walked() {
+            let file = "a/Split.kt";
+            let source = "package a\n\nclass Split(p: Pair<Int, Int>, n: Int) {\n    val (a, b) = make(n + 1)\n}\n";
+            assert_eq!(by_line(file, source), [(4, "Math:-".to_owned())]);
+        }
+
+        /// Kotlin forms inside a function and a class: a local class and a
+        /// local function (methods of their own, which PIT mutates), a local
+        /// that destructures, a delegated property (no code of the class's
+        /// own here), `x in` a range, `until` or `downTo` branched on (two
+        /// comparisons the source does not write) and `x in` a list (a
+        /// `contains` call's jump), and an empty file.
+        #[test]
+        fn kotlin_local_declarations_and_in_conditions_list_the_mutants_pit_makes() {
+            let file = "a/Local.kt";
+            let source = r#"package a
+
+class Local(private val helper: Helper) {
+    val name by lazy { helper.name() }
+    fun work(n: Int, p: Pair<Int, Int>, xs: List<Int>, gauge: Gauge?) {
+        class Counter {
+            fun next(k: Int) = k + 1
+        }
+        fun twice(k: Int) = k * 2
+        val (a, b) = p
+        if (n in 1..5) log()
+        if (n in 0 until 5) log()
+        if (n in 5 downTo 0) log()
+        if (n in xs) log()
+        if (gauge?.ready!!) log()
+    }
+    fun log() {}
+}
+"#;
+            let listed = by_line(file, source);
+            let removed = vec!["VoidMethodCall:removed".to_owned()];
+            let expected = [
+                ("val name by", vec![]),
+                (
+                    "fun next",
+                    vec!["Math:-".to_owned(), "PrimitiveReturns:0".to_owned()],
+                ),
+                (
+                    "fun twice",
+                    vec!["Math:/".to_owned(), "PrimitiveReturns:0".to_owned()],
+                ),
+                ("val (a, b)", vec![]),
+                ("in 1..5", removed.clone()),
+                ("in 0 until 5", removed.clone()),
+                ("in 5 downTo 0", removed.clone()),
+                (
+                    "in xs",
+                    vec![
+                        "NegateConditionals:negated".to_owned(),
+                        "VoidMethodCall:removed".to_owned(),
+                    ],
+                ),
+            ];
+            for (marker, mutants) in expected {
+                assert_eq!(on(&listed, source, marker), mutants, "{marker}: {listed:?}");
+            }
+            // A safe call branched on (through `!!`) lists no negation of
+            // its own today: the `?.` is the compiler's null check. PIT may
+            // still negate the `ifeq` on the value `!!` unboxes.
+            assert_eq!(
+                on(&listed, source, "gauge?.ready"),
+                ["VoidMethodCall:removed"]
+            );
+            assert!(kotlin_mutants("a/Empty.kt", "").is_empty());
+        }
     }
 
     /// Every compound assignment's operator, arithmetic in each numeric
