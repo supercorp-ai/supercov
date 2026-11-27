@@ -14,7 +14,7 @@ counts and verdicts can be compared with that tool's:
 | --- | --- | --- |
 | JavaScript, TypeScript | StrykerJS 10.1.1 | Full, under nine runners |
 | Python | mutmut 3.8.1 | Preview |
-| Rust | cargo-mutants 27.1.0 | Preview |
+| Rust | cargo-mutants 27.1.0 | Full, under `cargo test` (libtest and doctests) and cargo-nextest |
 | Go | Gremlins 0.6.0, every mutator | Preview |
 | Ruby | mutant 0.17.1, light operators | Preview |
 
@@ -541,7 +541,7 @@ no mutants shows none of this.
 | --- | --- |
 | JavaScript, TypeScript | Vitest, Vitest Browser Mode, Playwright, Jest, `node:test`, Mocha, AVA, node-tap, `bun:test` |
 | Python (preview) | pytest, `python -m unittest` |
-| Rust (preview) | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
+| Rust | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
 | Go (preview) | `go test` |
 | Ruby (preview) | RSpec, Minitest, test-unit, Cucumber |
 
@@ -621,7 +621,7 @@ no mutants shows none of this.
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.
-- Rust compiled to wasm and loaded by these tests is mutated too (preview):
+- Rust compiled to wasm and loaded by these tests is mutated too:
   the command builds the wasm with the mutants switched in, and each wasm
   instance, in Node or in a Playwright page, runs the test's mutant.
 - Limits: wasm loaded in Vitest Browser Mode's pages is not measured, so its
@@ -641,7 +641,7 @@ own script (`TextTestRunner().run`) rather than `unittest.main` has its
 mutants recorded `error`. mutmut's `do_not_mutate_patterns` and
 `mutate_only_covered_lines` are not read.
 
-### Rust (preview)
+### Rust
 
 Every mutant of a pass is built in one switched copy, and each test runs by
 its exact name in a process of its own; doctests run through `cargo test

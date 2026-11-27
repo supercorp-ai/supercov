@@ -133,8 +133,8 @@ get a history entry, so the browser's back button retraces the path.
 
 ## Mutation testing
 
-For a run whose mutants are listed (JavaScript and TypeScript, and in
-preview Python, Rust, Go and Ruby; see [Mutation testing](mutation.md)), the
+For a run whose mutants are listed (JavaScript, TypeScript and Rust, and in
+preview Python, Go and Ruby; see [Mutation testing](mutation.md)), the
 Overview's first card gains a **Mutants** figure: the mutation score once
 `mutants test` gave verdicts, the weak mutation score before, and how many
 mutants the tests leave alive. Below it, a **Mutation testing** card holds the

@@ -414,6 +414,25 @@ fn pass(
             )),
         );
     }
+    // A decided mutant is checked only in a package whose tests the pass
+    // runs: the command builds those, and a workspace's other members may
+    // hold thousands of mutants it never compiles.
+    let mut packages = BTreeMap::<String, Option<String>>::new();
+    let mut package = |file: &str| {
+        packages
+            .entry(file.to_owned())
+            .or_insert_with(|| package_of(&root, file))
+            .clone()
+    };
+    let tested = jobs
+        .iter()
+        .filter(|job| !job.check_only)
+        .map(|job| package(&job.file))
+        .collect::<BTreeSet<_>>();
+    let jobs = jobs
+        .into_iter()
+        .filter(|job| !job.check_only || tested.contains(&package(&job.file)))
+        .collect::<Vec<_>>();
     let to_run = jobs.iter().filter(|job| !job.check_only).count();
     let _ = writeln!(
         diagnostics,
@@ -1039,7 +1058,20 @@ fn cargo_build(
 fn compile_error(message: &Value, workspace: &Path) -> CompileError {
     let mut spans = Vec::new();
     let mut collect = |message: &Value| {
-        for span in message["spans"].as_array().into_iter().flatten() {
+        // An error inside a macro's expansion (`vec![Default::default()]`)
+        // points into the macro too: its call site, up the chain, is where
+        // the code is.
+        let spans_and_call_sites = message["spans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|span| {
+                std::iter::successors(Some(span), |span| {
+                    Some(&span["expansion"]["span"]).filter(|site| site.is_object())
+                })
+            })
+            .collect::<Vec<_>>();
+        for span in spans_and_call_sites {
             let (Some(file), Some(start), Some(end)) = (
                 span["file_name"].as_str(),
                 span["byte_start"].as_u64(),
@@ -2493,6 +2525,21 @@ mod tests {
         let (own, around) = attribute(&error(44..46), &switched);
         assert!(own.is_empty());
         assert_eq!(around.len(), 2);
+        // An error in a macro's expansion is also at the macro's call site.
+        let expanded = compile_error(
+            &json!({
+                "code": {"code": "E0277"},
+                "message": "the trait bound `T: Default` is not satisfied",
+                "spans": [{
+                    "file_name": "/rustc/library/alloc/src/macros.rs",
+                    "byte_start": 1, "byte_end": 2,
+                    "expansion": {"span": {"file_name": "src/a.rs", "byte_start": 12, "byte_end": 15}}
+                }],
+                "children": []
+            }),
+            Path::new("/workspace"),
+        );
+        assert_eq!(expanded.spans, [("src/a.rs".to_owned(), 12..15)]);
         assert!(libtest_ran_nothing("running 0 tests\n"));
         assert!(!libtest_ran_nothing("running 1 test\n"));
         assert!(!libtest_ran_nothing("running 0 tests\nrunning 1 test\n"));
@@ -3464,6 +3511,27 @@ mod tests {
         // `h`'s arms deleted leave its `match` without an arm that makes it
         // exhaustive, an error at no switch: rather than halve over them,
         // the decided mutants leave the build, keeping the plan's verdicts.
+        // One in a package whose tests the pass does not run is not built:
+        // it keeps the plan's verdict, compiling or not.
+        let other = "pub struct NoDefault(u8);\npub fn make(v: u8) -> NoDefault {\n    NoDefault(v + 1)\n}\n";
+        std::fs::create_dir_all(root.join("other/src")).unwrap();
+        std::fs::write(
+            root.join("other/Cargo.toml"),
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("other/src/lib.rs"), other).unwrap();
+        // The crate depends on it, so the build compiles it.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nother = { path = \"other\" }\n\n[workspace]\n",
+        )
+        .unwrap();
+        let elsewhere = crate::rust_mutants::enumerate(other).unwrap();
+        decided.push(json!({
+            "id": mutant_id("other/src/lib.rs", &elsewhere[0]), "file": "other/src/lib.rs",
+            "index": 0, "decided": "no-coverage", "candidates": []
+        }));
         // One whose file changed since the run keeps the plan's verdict.
         let mut moved = decided[0].clone();
         moved["id"] = json!("src/lib.rs:9:5-9:21:FnValue:Default::default()");
@@ -3489,6 +3557,10 @@ mod tests {
         );
         assert!(
             !found.contains_key("src/lib.rs:10:9-10:18:MatchArm:removed"),
+            "{found:?}"
+        );
+        assert!(
+            !found.contains_key("other/src/lib.rs:3:5-3:21:FnValue:Default::default()"),
             "{found:?}"
         );
         let _ = std::fs::remove_dir_all(root);

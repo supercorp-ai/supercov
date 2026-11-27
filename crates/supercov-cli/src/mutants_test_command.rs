@@ -271,7 +271,7 @@ Usage: supercov mutants [options] [-- <test command>]
 
 Mutation-tests the project: lists the mutants of every source the tests ran,
 as each language's established tool makes them (StrykerJS for JavaScript and
-TypeScript; in preview, mutmut for Python, cargo-mutants for Rust, Gremlins
+TypeScript, cargo-mutants for Rust; in preview, mutmut for Python, Gremlins
 for Go and mutant for Ruby), runs each against only the tests that run its
 code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test

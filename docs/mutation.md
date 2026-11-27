@@ -14,7 +14,7 @@ counts and verdicts can be compared with that tool's:
 | --- | --- | --- |
 | JavaScript, TypeScript | StrykerJS 10.1.1 | Full, under nine runners |
 | Python | mutmut 3.8.1 | Preview |
-| Rust | cargo-mutants 27.1.0 | Preview |
+| Rust | cargo-mutants 27.1.0 | Full, under `cargo test` (libtest and doctests) and cargo-nextest |
 | Go | Gremlins 0.6.0, every mutator | Preview |
 | Ruby | mutant 0.17.1, light operators | Preview |
 
@@ -541,7 +541,7 @@ no mutants shows none of this.
 | --- | --- |
 | JavaScript, TypeScript | Vitest, Vitest Browser Mode, Playwright, Jest, `node:test`, Mocha, AVA, node-tap, `bun:test` |
 | Python (preview) | pytest, `python -m unittest` |
-| Rust (preview) | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
+| Rust | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
 | Go (preview) | `go test` |
 | Ruby (preview) | RSpec, Minitest, test-unit, Cucumber |
 
@@ -621,7 +621,7 @@ no mutants shows none of this.
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.
-- Rust compiled to wasm and loaded by these tests is mutated too (preview):
+- Rust compiled to wasm and loaded by these tests is mutated too:
   the command builds the wasm with the mutants switched in, and each wasm
   instance, in Node or in a Playwright page, runs the test's mutant.
 - Limits: wasm loaded in Vitest Browser Mode's pages is not measured, so its
@@ -641,14 +641,28 @@ own script (`TextTestRunner().run`) rather than `unittest.main` has its
 mutants recorded `error`. mutmut's `do_not_mutate_patterns` and
 `mutate_only_covered_lines` are not read.
 
-### Rust (preview)
+### Rust
 
 Every mutant of a pass is built in one switched copy, and each test runs by
 its exact name in a process of its own; doctests run through `cargo test
 --doc`. Under cargo-nextest each test runs through nextest with the project's
-configuration. A mutant the compiler refuses is `unviable`, as cargo-mutants
-reports it; a mutant in code the compiler evaluates (`const`, `static`,
-`const fn`) is built on its own.
+configuration. Each mutant is the program cargo-mutants' replacement text
+makes, regrouping included (`a - b * c` with `*` made `+` is `(a - b) + c`).
+A mutant the compiler refuses is `unviable`, as cargo-mutants reports it,
+those no test reaches included; a mutant in code the compiler evaluates
+(`const`, `static`, `const fn`) is built on its own.
+
+- **Time limits** are cargo-mutants': a test's baseline × 5, at least 20 s.
+  A test past its limit beside other tests runs again alone, after a run of
+  it without the mutant sets its limit, so a busier machine makes no
+  timeout.
+- **Stopping**: `--budget` and a signal stop the pass at once, its test
+  processes with it; nothing a stop cut short is judged, and each candidate a
+  mutant already passed is kept for the next pass.
+- **After an edit**, a Rust test keeps a verdict where nothing its own
+  function can name changed, a trait implementation's methods counting
+  where its type or trait is named; a doctest keeps one only where no code
+  changed (`docs/design/rust-mutation.md`, After an edit).
 
 Limits: tests built for wasm run against mutants in Node, under WASI and in
 Chrome; tests run in Firefox, Safari or Edge have their mutants recorded
