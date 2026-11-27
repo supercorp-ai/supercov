@@ -122,9 +122,18 @@ function runtimePrelude(transformed) {
   const importMatch = transformed.match(
     /import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
   );
+  // The first helper is read off the global; the others from one binding of
+  // the global itself, `<runtime> = globalThis.__supercovRuntime`.
+  const shared = transformed.match(
+    /([\w$]+)\s*=\s*globalThis\.__supercovRuntime(?![\w$.])/,
+  );
+  const escape = (name) => name.replace(/\$/g, "\\$");
   const globalMatches = [
     ...transformed.matchAll(
-      /([\w$]+)\s*=\s*globalThis\.__supercovRuntime\.([\w$]+)/g,
+      new RegExp(
+        `([\\w$]+)\\s*=\\s*(?:globalThis\\.__supercovRuntime${shared ? `|${escape(shared[1])}` : ""})\\.([\\w$]+)`,
+        "g",
+      ),
     ),
   ];
   if (!importMatch && globalMatches.length === 0)
