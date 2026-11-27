@@ -1415,6 +1415,20 @@ running to the limit`; `timeLimit.confirmedAtLimit`). A page that keeps a
 timer going for good (a clock, an analytics heartbeat) or a socket open never
 stalls, and its timeouts cost their whole limit, as they did before 4.29.15.
 
+**An attempt whose waits end by themselves runs to their end.** Where every
+call the test is waiting on started before the limit and ends by a timeout of
+its own after it, with a second to spare before the test's own timeout (an
+`expect` given 5 s or 12 s, a sleep), the attempt is not stopped at the limit
+or as a stall: it runs until those calls end, and the test's own outcome
+decides, a kill where the assertion fails. Where they all end before the
+limit, it holds again. An assertion that started late on a loaded machine ran
+past the limit there and was stopped as a `timeout`, where on an idle machine
+it failed inside the limit and killed the mutant: on CI, a mutant whose
+route's page `expect` started late was a `timeout` on one run and a kill on
+another. A call with no timeout of its own (a click, a navigation, a
+`waitForResponse` under Playwright's defaults), or one that would outlast the
+test's own timeout, still ends at the limit or at a stall, as before.
+
 The verdict of a stall says so: `stopped at 2.6 s of its 6.5 s time limit,
 past every run of the test that passed (1.5 × its 1.0 s baseline + 1 s), its
 pages quiet with nothing due before the limit, waiting on Locator.click

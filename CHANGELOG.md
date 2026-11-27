@@ -9,6 +9,10 @@
 - Supercov's Docker relay waits for a connection instead of looking for one every 10 ms. Most runs never use it, and its hundred wake-ups a second were about 60 ms of Supercov's own CPU on a half-minute run (6% of it on a part of the generated app).
 - A test's record takes each page's evidence as the text the page wrote, rather than parsing it and writing it again; `tests/runtime/snapshots.test.mjs` pins the record to its `JSON.stringify`.
 
+**Fixed**
+
+- A Playwright strong pass no longer calls a mutant a `timeout` or a kill by how busy the machine was. An attempt is stopped at its limit (1.5 × its test's baseline + 5 s). An assertion that started late on a loaded machine, and would fail by its own timeout (an `expect` given 5 s or 12 s), ran past that limit there and was stopped as a `timeout`; on an idle machine the same assertion failed inside the limit and killed the mutant. Now, where every call the test is waiting on started before the limit and ends by a timeout of its own before the test's own timeout, the attempt runs until those calls end, and the test's outcome decides. A call with no timeout of its own, a real hang, still ends at the limit. The mutation score was already unaffected, since a `timeout` counts as detected; the label is now the same on every machine. On a fixture whose route answers three seconds late under the mutant, each of the four mutants that take that route is killed by its assertion past the limit, where all four were `timeout`s.
+
 ## 4.29.17
 
 **Fixed**

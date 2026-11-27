@@ -24460,21 +24460,21 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     let route = strong("server/app.js", 9, ":EqualityOperator:!==");
     assert_eq!(route["status"], "killed", "{context}");
     assert_eq!(route["tests"], 1, "{context}");
-    // A page-side mutant the page shows: its assertion would wait 12 s, its
-    // own timeout, longer than the attempt's limit (1.5 x its baseline +
-    // 5 s): once past every passing run of the test, with its page quiet,
-    // the attempt has stalled and ends there, a timeout.
+    // A page-side mutant the page shows: its assertion waits 12 s, its own
+    // timeout, longer than the attempt's limit (1.5 x its baseline + 5 s)
+    // on an idle machine and shorter on a loaded one. The attempt runs to
+    // the assertion's own end either way, and the assertion kills it: it
+    // was a timeout where the limit came first, and a kill where it did not.
     let lower = strong("public/page.js", 2, ":MethodExpression:toLowerCase");
-    assert_eq!(lower["status"], "timeout", "{context}");
+    assert_eq!(lower["status"], "killed", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
     assert!(
-        lower["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.starts_with("stopped at ")
-                && reason.contains("waiting on expect(#out) to.have.text")),
+        lower["reason"].as_str().is_some_and(
+            |reason| reason.contains("toHaveText") && reason.contains("Timeout: 12000ms")
+        ),
         "{context}"
     );
-    assert!(lower["durationMs"].as_u64() < Some(12_000), "{context}");
+    assert!(lower["durationMs"].as_u64() >= Some(12_000), "{context}");
     // Run, and no test tells: the log line. Its tests share the server's
     // fault switch with the @fault test, which the measured run never ran
     // beside them; neither does the strong pass, so nothing kills it.
@@ -24955,6 +24955,143 @@ fn mutants_test_kills_server_mutants_tests_reach_without_a_page() {
             "(only changes a log line)",
         ],
     );
+}
+
+/// `mutants test` over a Playwright test whose `expect` starts late under a
+/// mutant and fails by its own timeout after the attempt's limit: the
+/// mutant sends the page's request through a route the test delays, so the
+/// assertion begins seconds after it does without the mutant, and its five
+/// seconds end past the limit its baseline gives. Stopped there, the mutant
+/// was a timeout on a loaded machine and a kill on an idle one; it is let run
+/// to the assertion's own end, and the assertion kills it, on any machine.
+#[cfg(unix)]
+#[test]
+fn mutants_test_lets_an_expect_that_starts_late_fail_by_its_own_timeout() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-late-expect");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-late-expect", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "server.mjs",
+        "import { createServer } from \"node:http\";\nimport { readFileSync } from \"node:fs\";\ncreateServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  try {\n    const body = readFileSync(new URL(`./public/${file}`, import.meta.url));\n    response.writeHead(200, { \"content-type\": file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\" });\n    response.end(body);\n  } catch {\n    response.writeHead(404);\n    response.end();\n  }\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><p id=\"out\">loading</p><script type=\"module\" src=\"/app.js\"></script>\n",
+    );
+    // The page asks for its mode's data; every mutant of the condition but
+    // one asks for the other mode's.
+    project.write(
+        "public/app.js",
+        "export function mode(count) {\n  return count > 2 ? \"good\" : \"bad\";\n}\nfetch(`/data?mode=${mode(5)}`).then((response) => response.text()).then((text) => {\n  document.getElementById(\"out\").textContent = text;\n});\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node server.mjs\", url: \"http://127.0.0.1:{port}/\", reuseExistingServer: false, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // The route answers the other mode three seconds late: the assertion
+    // starts then, and its five seconds end well past the limit a
+    // half-second baseline gives (1.5 × baseline + 5 s).
+    project.write(
+        "tests/late.spec.js",
+        concat!(
+            "import { test, expect } from \"@playwright/test\";\n",
+            "test(\"shows its mode's data\", async ({ page }) => {\n",
+            "  await page.route(\"**/data*\", async (route) => {\n",
+            "    const good = route.request().url().endsWith(\"mode=good\");\n",
+            "    if (!good) await new Promise((done) => setTimeout(done, 3000));\n",
+            "    await route.fulfill({ body: good ? \"good\" : \"other\", contentType: \"text/plain\" });\n",
+            "  });\n",
+            "  const answered = page.waitForResponse(\"**/data*\");\n",
+            "  await page.goto(\"/\");\n",
+            "  await answered;\n",
+            "  await expect(page.locator(\"#out\")).toHaveText(\"good\");\n",
+            "});\n",
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("an expect that starts late");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "public")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    let verdict = |prefix: &str, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(prefix) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{prefix} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    // Each mutant that sends the page to the other mode is killed by the
+    // assertion, which started three seconds late and failed by its own
+    // timeout past the limit: none of them is a timeout.
+    for (prefix, ending) in [
+        ("public/app.js:2:10-", ":ConditionalExpression:false"),
+        ("public/app.js:2:10-", ":EqualityOperator:<="),
+        ("public/app.js:2:22-", ":StringLiteral:empty"),
+    ] {
+        let late = verdict(prefix, ending);
+        assert_eq!(late["status"], "killed", "{ending}\n{context}");
+        assert!(
+            late["reason"].as_str().is_some_and(
+                |reason| reason.contains("toHaveText") && reason.contains("Timeout: 5000ms")
+            ),
+            "{ending}\n{context}"
+        );
+        assert!(
+            late["durationMs"].as_u64().unwrap() > 6_500,
+            "{ending}: it ran past its limit\n{context}"
+        );
+    }
+    // The address emptied: the page asks for nothing the test waits for,
+    // and a wait with no timeout of its own still ends at the limit.
+    let hang = verdict("public/app.js:4:7-", ":StringLiteral:empty");
+    assert_eq!(hang["status"], "timeout", "{context}");
+    assert_eq!(reply["summary"]["timeout"], 1, "{context}");
 }
 
 /// `mutants test` over Playwright tests that drive a pipeline through a cron

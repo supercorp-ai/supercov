@@ -76,6 +76,8 @@ const STALL_CONSTANT_MS = 1_000;
 const QUIET_MS = 1_000;
 // How often a stalled attempt is looked for.
 const STALL_POLL_MS = 100;
+// How long after a wait's own timeout its failure takes to end the test.
+const OWN_END_GRACE_MS = 1_000;
 // How long a page has to say what it has yet to do; one that cannot answer is
 // busy.
 export const PAGE_ANSWER_MS = 1_000;
@@ -294,6 +296,32 @@ export function stalledOn({ waits, newest, limitAt, quietSince, now }) {
 }
 
 /**
+ * When a mutant attempt may run to, past its limit, for the test's own waits
+ * to end by their own timeouts: the latest of them, where every call the
+ * test is waiting on started before `limitAt` and ends by a timeout of its
+ * own after it, before `testTimeoutAt` (the test's own timeout, where it has
+ * one) with time to fail. `undefined` where any of them could wait for ever,
+ * or all end before the limit anyway. An `expect` that started late on a
+ * loaded machine then fails by itself, as it does on an idle one, rather
+ * than being stopped at the limit as a timeout.
+ */
+export function ownEndPast({ waits, limitAt, testTimeoutAt }) {
+    if (waits.size === 0)
+        return undefined;
+    let end = -Infinity;
+    for (const wait of waits) {
+        if (!Number.isFinite(wait.deadline) || !(wait.startedAt < limitAt))
+            return undefined;
+        end = Math.max(end, wait.deadline);
+    }
+    if (end <= limitAt)
+        return undefined;
+    if (testTimeoutAt !== undefined && end + OWN_END_GRACE_MS > testTimeoutAt)
+        return undefined;
+    return end;
+}
+
+/**
  * What a page could still do that may end a wait before `limitAt`, as one
  * phrase, and when to ask again (`retryAt`); `undefined` where nothing can.
  * `frames` is each frame's answer to `watchPageWork`'s query: its earliest
@@ -464,14 +492,15 @@ export function stallWindowOf(baselineMs, factor) {
  * wait and why (`doubted`), and, where it went on to its limit, what it last
  * waited on (`waiting`). `stop()` ends the watch.
  */
-export function watchStall(testInfo, claimed, look, doubt) {
+export function watchStall(testInfo, claimed, look, doubt, extend) {
     if (claimed?.kind !== "mutant")
         return undefined;
     const from = claimed.startedAt + stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
     if (from >= claimed.limitAt)
         return undefined;
     const windowMs = stallWindowOf(claimed.baselineMs, claimed.timeoutFactor);
-    const watch = { stalled: undefined, doubted: undefined, waiting: undefined, timer: undefined, stopped: false };
+    const watch = { stalled: undefined, doubted: undefined, waiting: undefined, extended: undefined, timer: undefined, stopped: false };
+    const testTimeoutAt = claimed.testTimeoutMs > 0 ? claimed.claimedAt + claimed.testTimeoutMs : undefined;
     // A test whose body has ended (it failed, ran out of time, or its
     // fixtures are being torn down: Playwright sets its duration then) waits
     // on nothing of its own: what its teardown closes is not what it waited
@@ -483,8 +512,25 @@ export function watchStall(testInfo, claimed, look, doubt) {
     const check = () => {
         if (ended())
             return;
-        const { stalled, waiting, since } = look(claimed.limitAt);
+        const { stalled, waiting, since, ownEnd } = look(claimed.limitAt, testTimeoutAt);
         watch.waiting = waiting;
+        // Every call the test waits on ends by its own timeout past the
+        // limit: the attempt runs until then, and the test's own outcome
+        // decides (`ownEndPast`). Once they end, the limit holds again.
+        // Past the hold on its timeout, where the attempt has one.
+        const raise = rawTimeouts.get(testInfo) ?? testInfo.setTimeout?.bind(testInfo);
+        if (!watch.extended && ownEnd !== undefined && raise && extend && Date.now() < claimed.limitAt) {
+            watch.extended = { untilAt: ownEnd + OWN_END_GRACE_MS };
+            raise(watch.extended.untilAt - claimed.claimedAt);
+            extend(claimed.limitAt, () => {
+                watch.extended = undefined;
+                raise(claimed.limitAt - claimed.claimedAt);
+            });
+        }
+        if (watch.extended) {
+            later(STALL_POLL_MS);
+            return;
+        }
         // The window counts from the test's first call of its own, not from
         // its claim: setting up its page in a new worker on a loaded machine
         // took seconds, which no baseline holds.
@@ -1632,6 +1678,8 @@ function startRunning(pass, testId, mutant) {
     return { running: `${running}/${mine}`, beside };
 }
 
+/** Each held attempt's own setter of its timeout, past the hold (`watchStall`). */
+const rawTimeouts = new WeakMap();
 /**
  * Holds a mutant attempt to its time limit (`timeout`, from the test's
  * start): the test's own `test.setTimeout()` and `test.slow()` may shorten
@@ -1640,6 +1688,7 @@ function startRunning(pass, testId, mutant) {
  */
 function holdTimeout(testInfo, timeout) {
     const setTimeout = testInfo.setTimeout.bind(testInfo);
+    rawTimeouts.set(testInfo, setTimeout);
     setTimeout(timeout);
     testInfo.setTimeout = (asked) => setTimeout(asked > 0 ? Math.min(asked, timeout) : timeout);
     // `test.slow()` in a test's body (Playwright's own modifier): it
@@ -1755,7 +1804,7 @@ export async function strongClaim(testInfo) {
         mutant: attempt.mutant,
         // A mutant's: when its limit ends it, and when its claim began,
         // which the test's timeout counts from (`watchStall`).
-        ...(attempt.kind === "mutant" ? { baselineMs: attempt.baselineMs, limitMs: attempt.limitMs, timeoutFactor: attempt.timeoutFactor, limitAt: startedAt + attempt.limitMs, claimedAt: started, ...(attempt.cold ? { cold: true } : {}) } : {}),
+        ...(attempt.kind === "mutant" ? { baselineMs: attempt.baselineMs, limitMs: attempt.limitMs, timeoutFactor: attempt.timeoutFactor, limitAt: startedAt + attempt.limitMs, claimedAt: started, testTimeoutMs: configured, ...(attempt.cold ? { cold: true } : {}) } : {}),
         startedAt,
         lock,
         running,
