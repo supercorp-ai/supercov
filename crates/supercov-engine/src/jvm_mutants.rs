@@ -2145,6 +2145,12 @@ impl Enumerator<'_> {
                     self.java_call_statement(body, body, true);
                     self.java_node(body, Context::Statement);
                 } else {
+                    if returns.is_none() {
+                        // Passed where its type is not known (a constructor,
+                        // a cast, a returned value): a body calling a method
+                        // known to return nothing makes it return nothing.
+                        self.java_call_statement(body, body, true);
+                    }
                     self.java_return(body, body);
                     self.java_node(body, Context::Value);
                 }
