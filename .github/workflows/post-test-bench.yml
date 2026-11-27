@@ -42,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/supercov
-          key: post-test-bin-${{ steps.ref.outputs.sha }}
+          key: post-test-bin-dbg-${{ steps.ref.outputs.sha }}
       - if: steps.cached.outputs.cache-hit != 'true'
         run: git checkout -q --detach ${{ steps.ref.outputs.sha }}
       - if: steps.cached.outputs.cache-hit != 'true'
@@ -52,6 +52,9 @@ jobs:
         with:
           key: post-test-bench
       - if: steps.cached.outputs.cache-hit != 'true'
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
         run: |
           cargo build --profile measure -p supercov
           mkdir -p out && cp target/measure/supercov out/supercov
@@ -76,6 +79,12 @@ jobs:
           key: post-test-fixtures-${{ env.FIXTURE_VERSION }}-${{ env.FIXTURE_REF }}-${{ env.EXCALIDRAW }}
           lookup-only: true
       - if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: excalidraw/excalidraw
+          ref: ${{ env.EXCALIDRAW }}
+          path: excalidraw-src
+      - if: steps.cached.outputs.cache-hit != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -93,6 +102,7 @@ jobs:
       - if: steps.cached.outputs.cache-hit != 'true'
         env:
           BENCH_MODE: fixtures
+          BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_BINARY: ${{ github.workspace }}/target/measure/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
         run: node scripts/post-test-bench.mjs
@@ -117,6 +127,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: excalidraw/excalidraw
+          ref: ${{ env.EXCALIDRAW }}
+          path: excalidraw-src
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -130,8 +145,14 @@ jobs:
           pattern: supercov-*
           path: binaries
       - run: chmod +x binaries/*/supercov && nproc && free -g
+      - continue-on-error: true
+        run: |
+          sudo apt-get update -q && (sudo apt-get install -yq linux-tools-common linux-tools-$(uname -r) || sudo apt-get install -yq linux-tools-common linux-tools-azure)
+          sudo sysctl kernel.perf_event_paranoid=-1
+          perf --version && echo "BENCH_PERF=1" >> "$GITHUB_ENV"
       - env:
           BENCH_MODE: measure
+          BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
           BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,head=${{ github.workspace }}/binaries/supercov-head/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
@@ -143,6 +164,8 @@ jobs:
           name: bench-results
           path: |
             ${{ runner.temp }}/bench/summary.md
+            ${{ runner.temp }}/bench/index-sections-*.txt
+            ${{ runner.temp }}/bench/perf-*.txt
             ${{ runner.temp }}/bench/samples.jsonl
             ${{ runner.temp }}/bench/outputs/
             ${{ runner.temp }}/bench/logs/

@@ -60,6 +60,10 @@ function runAsync(cwd, command, args, label, extra = {}) {
 }
 
 function checkout(directory) {
+  if (process.env.BENCH_PROJECT) {
+    if (!existsSync(directory)) cpSync(process.env.BENCH_PROJECT, directory, { recursive: true });
+    return;
+  }
   if (existsSync(directory)) return;
   mkdirSync(directory, { recursive: true });
   run(directory, 'git', ['init', '-q'], 'git-init');
@@ -82,6 +86,20 @@ function sizes(directory) {
 }
 
 const mb = (bytes) => (bytes / 1024 / 1024).toFixed(1);
+
+// The query index's sections, largest first: kind, record size, count, bytes.
+function indexSections(path) {
+  if (!existsSync(path)) return 'no index';
+  const header = readFileSync(path).subarray(0, 4096);
+  const count = header.readUInt32LE(36);
+  const rows = [];
+  for (let index = 0; index < count; index += 1) {
+    const at = 256 + index * 64;
+    rows.push({ kind: header.readUInt32LE(at), record: header.readUInt32LE(at + 4), length: Number(header.readBigUInt64LE(at + 16)), count: Number(header.readBigUInt64LE(at + 24)) });
+  }
+  rows.sort((a, b) => b.length - a.length);
+  return rows.map((row) => `kind ${row.kind}: ${mb(row.length)} MB (${row.count} x ${row.record})`).join('; ');
+}
 
 if (process.env.BENCH_MODE === 'fixtures') {
   const binary = resolve(process.env.BENCH_BINARY);
@@ -195,12 +213,44 @@ for (let round = 1; round <= rounds; round += 1) {
       // The merged evidence, entry for entry, as a digest.
       const evidence = gunzipSync(readFileSync(join(project, '.supercov/runs', merged, 'evidence.raw.gz')));
       keep(name, 'merged-evidence.sha256', createHash('sha256').update(evidence.toString('latin1').split(merged).join('<merged>'), 'latin1').digest('hex') + '\n');
+      writeFileSync(join(output, `index-sections-${name}.txt`), `full: ${indexSections(join(project, '.supercov/runs', full, 'query-index.v1.bin'))}\nmerged: ${indexSections(join(project, '.supercov/runs', merged, 'query-index.v1.bin'))}\n`);
       storeSizes[name] = {
         full: sizes(join(project, '.supercov/runs', full)),
         merged: sizes(join(project, '.supercov/runs', merged)),
       };
     }
     rmSync(reportDir, { recursive: true, force: true });
+  }
+}
+
+// Where the last binary's time goes: each step once more under perf.
+if (process.env.BENCH_PERF === '1') {
+  const { name, path } = binaries.at(-1);
+  rmSync(join(project, '.supercov'), { recursive: true, force: true });
+  mkdirSync(join(project, '.supercov'), { recursive: true });
+  cpSync(join(fixtures, 'runs'), join(project, '.supercov/runs'), { recursive: true });
+  const profiled = (args, step) => {
+    const data = join(output, `perf-${step}.data`);
+    const result = run(project, 'perf', ['record', '-F', '499', '-g', '--call-graph', 'dwarf,16384', '-o', data, '--', path, ...args], `perf-${name}-${step}`, {}, true);
+    for (const [suffix, extra] of [['self', ['--no-children']], ['children', ['--children']]]) {
+      const report = spawnSync('perf', ['report', '-i', data, '--stdio', '-g', 'none', '--percent-limit', '0.7', ...extra], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+      writeFileSync(join(output, `perf-${step}-${suffix}.txt`), report.stdout.replace(/_ZN[0-9A-Za-z_$.]+/g, (m) => m) + report.stderr.slice(-2000));
+    }
+    const callers = spawnSync('perf', ['report', '-i', data, '--stdio', '--children', '-G', '--percent-limit', '3'], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
+    writeFileSync(join(output, `perf-${step}-tree.txt`), callers.stdout.slice(0, 400_000));
+    rmSync(data, { force: true });
+    return result;
+  };
+  try {
+    profiled(['runs', full], 'full-index-build');
+    const merge = profiled(['merge', ...shards], 'merge');
+    const merged = /merged run (\S+)/.exec(merge.stdout)?.[1];
+    if (merged) {
+      profiled(['runs', merged], 'merged-index-build');
+      profiled(['runs', merged, 'report', '--format', 'html', '--output', join(output, 'perf.html'), '--force'], 'report-html');
+    }
+  } catch (error) {
+    console.log(`[bench] no profile: ${error.message}`);
   }
 }
 
