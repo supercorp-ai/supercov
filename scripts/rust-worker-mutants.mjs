@@ -70,9 +70,10 @@ pub fn hidden(score: u32) -> u32 {
 }
 
 // The routing is not what the gate is about: its mutants would each start
-// the Worker for every test.
+// the Worker for every test. A cfg never set: no build needs the mutants
+// crate, and the attribute still says skip.
 #[event(fetch)]
-#[cfg_attr(test, mutants::skip)]
+#[cfg_attr(gate_never_set, mutants::skip)]
 async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Response> {
     let url = request.url()?;
     let score = url
