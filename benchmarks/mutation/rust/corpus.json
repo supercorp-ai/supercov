@@ -108,6 +108,15 @@
       "cargoMutantsArgs": "-p regex-syntax",
       "truthShards": 40,
       "supercovShards": 10
+    },
+    {
+      "name": "rand",
+      "repo": "https://github.com/rust-random/rand",
+      "tag": "0.8.5",
+      "shape": "workspace of several crates (experiment)",
+      "test": "cargo test --workspace",
+      "truthShards": 1,
+      "supercovShards": 1
     }
   ]
 }
