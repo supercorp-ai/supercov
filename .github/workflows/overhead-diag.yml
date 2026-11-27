@@ -27,7 +27,7 @@ jobs:
           - variant: new
             ref: 3a8d8ec2c1bebe911f8e12abe72403e09c8b56cb
           - variant: bytes
-            ref: bdf2e90e
+            ref: bdf2e90e3ee002ac631f5eebc12a4c737927f01b
     steps:
       - uses: actions/checkout@v6
         with:
