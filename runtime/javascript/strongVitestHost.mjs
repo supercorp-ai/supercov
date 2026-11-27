@@ -37,7 +37,7 @@
 // run no further job.
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
@@ -167,7 +167,8 @@ async function runJob({ file, mutant, environment }) {
     // this job's mutant.
     if (loadedSources() > 0)
         return { fallback: "the project's code loaded in Vitest's process", tainted: true };
-    const specifications = await vitest.globTestSpecifications([file]);
+    // The file as the command names it, from the project's root.
+    const specifications = await vitest.globTestSpecifications([relative(root, file).split(sep).join("/")]);
     if (!specifications.length)
         return { fallback: "Vitest found no such test file" };
     if (specifications.some((specification) => !specification.project.config?.browser?.enabled))
