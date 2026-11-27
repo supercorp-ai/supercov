@@ -348,6 +348,7 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
         ("fs.create_dir_all#go-strong.helper.create-dir-all", true),
         ("fs.write#go-strong.helper.write-1", true),
         ("fs.write#go-strong.helper.write-2", true),
+        ("spawn#go-strong.helper.toolchain", true),
         ("spawn#go-strong.helper.launch-registered", true),
         ("spawn#go-strong.run-helper", true),
         ("fs.remove_dir_all#go-strong.run-mutants", true),
