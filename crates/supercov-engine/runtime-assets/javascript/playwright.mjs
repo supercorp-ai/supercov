@@ -20,7 +20,7 @@ import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepSnapshotText, recordLine } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
-import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
+import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, ownEndPast, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -863,7 +863,7 @@ class CoveragePhaseController {
         // a page, as Playwright's fixtures do); the first such call is where
         // the test's own time starts.
         // Where in the test it was called (`at`), for a timeout's reason.
-        const wait = { operation: at ? `${operation} at ${at}` : operation, deadline, fromTest: !LIFECYCLE.has(operation.split(" ")[0]) };
+        const wait = { operation: at ? `${operation} at ${at}` : operation, deadline, fromTest: !LIFECYCLE.has(operation.split(" ")[0]), startedAt: Date.now(), pending };
         if (wait.fromTest)
             this.testCalledAt ??= Date.now();
         this.waits.add(wait);
@@ -897,11 +897,32 @@ class CoveragePhaseController {
         const workers = pages.reduce((sum, page) => sum + page.workers().length, 0);
         return pendingBefore({ frames, requests: this.unanswered.size, workers, limitAt, now: Date.now() });
     }
-    /** What a strong attempt is stalled on before `limitAt`, if it is, and what it waits on now. */
-    stall(limitAt) {
+    /**
+     * What a strong attempt is stalled on before `limitAt`, if it is, what it
+     * waits on now, and when the calls it waits on end by their own timeouts
+     * past the limit, where they all do (`ownEndPast`).
+     */
+    stall(limitAt, testTimeoutAt) {
         const newest = this.newestWait;
         const stalled = stalledOn({ waits: this.waits, newest, limitAt, quietSince: this.quietSince, now: Date.now() });
-        return { stalled: stalled?.operation, waiting: this.waits.has(newest) ? newest.operation : undefined, since: this.testCalledAt };
+        return {
+            stalled: stalled?.operation,
+            waiting: this.waits.has(newest) ? newest.operation : undefined,
+            since: this.testCalledAt,
+            ownEnd: ownEndPast({ waits: this.waits, limitAt, testTimeoutAt }),
+        };
+    }
+    /**
+     * The calls the test waits on now run past `limitAt` to their own
+     * timeouts (`watchStall`), and the test's own outcome decides. Where
+     * they have all ended before the limit, it holds again (`restore`).
+     */
+    extendPast(limitAt, restore) {
+        const waits = [...this.waits];
+        Promise.allSettled(waits.map((wait) => wait.pending)).then(() => {
+            if (Date.now() < limitAt)
+                restore();
+        });
     }
     async dispose() {
         this.disposed = true;
@@ -2095,7 +2116,7 @@ const instrumentedFixtures = {
             // state in it: the next test gets a new worker.
             let restartWorker = false;
             // A mutant attempt that stalls ends there, a timeout.
-            const stall = watchStall(testInfo, strong, (limitAt) => controller.stall(limitAt), (limitAt) => controller.pageWork(limitAt));
+            const stall = watchStall(testInfo, strong, (limitAt, testTimeoutAt) => controller.stall(limitAt, testTimeoutAt), (limitAt) => controller.pageWork(limitAt), (limitAt, restore) => controller.extendPast(limitAt, restore));
             try {
                 await use();
             }

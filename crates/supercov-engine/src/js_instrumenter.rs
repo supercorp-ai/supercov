@@ -1929,6 +1929,10 @@ const ASSERTION_RUNTIME: &str = "globalThis.__SUPERCOV_DIRECT_RUNTIME__";
 /// Where each recognised assertion is wrapped or bound, as text edits.
 struct AssertionEdits<'s> {
     source: &'s str,
+    /// The file's own accessor of the runtime, `name()`: a function declared
+    /// at its end, which reads `globalThis.__SUPERCOV_DIRECT_RUNTIME__` when
+    /// it is called, as the global's name in full at every assertion did.
+    runtime: String,
     sites: HashMap<SpanKey, (String, String, bool)>,
     edits: Vec<TextEdit>,
     /// In TypeScript the call runs in place, under these two names, instead
@@ -1942,17 +1946,19 @@ struct AssertionEdits<'s> {
 }
 
 impl AssertionEdits<'_> {
-    fn opening(helper: &str, operation: &str, source: &str) -> String {
+    fn opening(&self, helper: &str, operation: &str, source: &str) -> String {
         format!(
-            "{ASSERTION_RUNTIME}.{helper}({}, {}, ",
+            "{}.{helper}({}, {}, ",
+            self.runtime,
             serde_json::to_string(operation).expect("a string serializes"),
             serde_json::to_string(source).expect("a string serializes")
         )
     }
 
-    fn open(operation: &str, source: &str) -> String {
+    fn open(&self, operation: &str, source: &str) -> String {
         format!(
-            "{ASSERTION_RUNTIME}.openNodeAssertionPhase({}, {})",
+            "{}.openNodeAssertionPhase({}, {})",
+            self.runtime,
             serde_json::to_string(operation).expect("a string serializes"),
             serde_json::to_string(source).expect("a string serializes")
         )
@@ -1970,13 +1976,13 @@ impl AssertionEdits<'_> {
                 format!("(({phase}) => {{ try {{ return {phase}.close("),
                 format!(
                     "); }} catch ({error}) {{ throw {phase}.fail({error}); }} }})({})",
-                    Self::open(operation, source)
+                    self.open(operation, source)
                 ),
             ),
             None => (
                 format!(
                     "{}() => (",
-                    Self::opening("withNodeAssertionPhase", operation, source)
+                    self.opening("withNodeAssertionPhase", operation, source)
                 ),
                 "))".into(),
             ),
@@ -2000,7 +2006,7 @@ impl AssertionEdits<'_> {
         let width = (end - start) as i64;
         let opening = format!(
             "{{ const {phase} = {}; try {{ ",
-            Self::open(operation, source)
+            self.open(operation, source)
         );
         let closing = format!(
             " }} catch ({error}) {{ throw {phase}.fail({error}); }} finally {{ {phase}.close(); }} }}"
@@ -2045,7 +2051,7 @@ impl AssertionEdits<'_> {
     fn bind(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
         let callee = call.callee.span();
         let width = (callee.end - callee.start) as i64;
-        let opening = Self::opening("bindNodeAssertionPhase", operation, source);
+        let opening = self.opening("bindNodeAssertionPhase", operation, source);
         self.edits
             .push(TextEdit::insert(callee.start as usize, -width, opening));
         match &call.callee {
@@ -2837,9 +2843,12 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// process, container, or VM while constructing a fresh environment. Static
 /// imports preserve ESM evaluation ordering and do not depend on runner-specific
 /// environment forwarding.
-/// The body of the function [`runtime_loader`] calls: where Node runs, it
-/// requires the bootstrap relative to the file the stack's first frame names.
-const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
+/// The body of the function [`runtime_loader`] calls, with the stack as `s`
+/// and the bootstrap's specifier as `p`: where Node runs, it requires the
+/// bootstrap relative to the file the stack's first frame names. Every
+/// instrumented module carries it as a string, which a minifier leaves as it
+/// is, so it is written short: a large app's client chunks held it 240 times.
+const RUNTIME_LOADER_BODY: &str = r#""const h=globalThis.process;if(!h||!h.getBuiltinModule)return;const f=/(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(s));if(f)h.getBuiltinModule(\"node:module\").createRequire(f[0].startsWith(\"file:\")?f[0]:f[1])(p)""#;
 
 /// Where a file's own code starts, as tools other than the engine that runs
 /// it read the file: a shebang stays on the first line, a test runner reads
@@ -2901,7 +2910,7 @@ pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT
 pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
     format!(
-        "{RUNTIME_LOADER_START} new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
+        "{RUNTIME_LOADER_START} new Function(\"s\", \"p\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
     )
 }
 
@@ -2939,6 +2948,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         ));
     }
     let mut assertions = 0;
+    let mut runtime_accessor: Option<String> = None;
     let mut edits = Vec::new();
 
     if assertion_candidate {
@@ -2955,15 +2965,19 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
         if assertions > 0 {
-            let in_place = source_type.is_typescript().then(|| {
-                let mut names = CandidateNames::new(source);
-                (
-                    names.allocate("__supercovAssertionPhase"),
-                    names.allocate("__supercovAssertionError"),
-                )
-            });
+            // Short names: they stand at every assertion of every test file,
+            // which the runner's transform reads and maps.
+            let mut names = CandidateNames::new(source);
+            // `__cov…`: a name babel-plugin-jest-hoist lets a `jest.mock`
+            // factory read, as it lets istanbul's counters be read there.
+            let accessor = names.allocate("__covSupercov");
+            let in_place = source_type
+                .is_typescript()
+                .then(|| (names.allocate("__supercovP"), names.allocate("__supercovE")));
+            runtime_accessor = Some(accessor.clone());
             let mut located = AssertionEdits {
                 source,
+                runtime: format!("{accessor}()"),
                 sites: collector.sites,
                 edits: Vec::new(),
                 in_place,
@@ -3042,6 +3056,16 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
                 "\ndeclare var __SUPERCOV_DIRECT_RUNTIME__: {ASSERTION_RUNTIME_TYPE};\n"
             ));
         }
+    }
+    // The accessor every assertion reads the runtime through. A function
+    // declaration is hoisted, initialised before any of the file's code runs
+    // (an import cycle that calls into the file early included), and it
+    // returns before the helper is called, so the helper is still called from
+    // the assertion's own frame and no stack trace gains a frame.
+    if let Some(accessor) = runtime_accessor {
+        code.push_str(&format!(
+            "\nfunction {accessor}() {{ return {ASSERTION_RUNTIME}; }}\n"
+        ));
     }
     let map = map.to_json_string();
     code.push_str("\n//# sourceMappingURL=data:application/json;base64,");
@@ -5989,6 +6013,8 @@ fn instrument_candidate_with_binding(
     let probe_hits_v2 = names.allocate("__supercovHits");
     // The file's own hit, bound to it: a statement probe calls it by place.
     let probe_hit_at_v2 = names.allocate("__supercovHitAt");
+    // The file's own decision end, bound to it like its hit.
+    let probe_end_v2 = names.allocate("__supercovEnd");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
@@ -6217,8 +6243,7 @@ fn instrument_candidate_with_binding(
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
-        mcdc_end_v2: mcdc_end_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
+        probe_end_v2: probe_end_v2.clone(),
         names,
         scope_declarations: Vec::new(),
         decision_index: 0,
@@ -6396,10 +6421,19 @@ fn instrument_candidate_with_binding(
         "key": "",
         "points": point_ids.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "defaultCount": default_count,
-        "selectionPoints": [selection_first, selection_count],
-        "selectionTrees": &logical_transformer.trees,
     });
+    // Every module registers itself, so what the runtime reads as absent --
+    // no defaults, no selections, no trees -- is left out rather than
+    // written as zero or empty.
+    if default_count > 0 {
+        registration["defaultCount"] = serde_json::json!(default_count);
+    }
+    if selection_count > 0 {
+        registration["selectionPoints"] = serde_json::json!([selection_first, selection_count]);
+    }
+    if !logical_transformer.trees.is_empty() {
+        registration["selectionTrees"] = serde_json::json!(&logical_transformer.trees);
+    }
     // Places that repeat an earlier place's id -- a selection's two short
     // outcomes are one point -- as pairs of the place and the first: the
     // runtime records them as that one point, as it did by id.
@@ -6438,27 +6472,33 @@ fn instrument_candidate_with_binding(
     };
     parsed.program.body.insert(
         0,
-        Statement::VariableDeclaration(ast.alloc_variable_declaration(
-            Span::default(),
-            runtime_declaration_kind,
-            ast.vec_from_array([
-                ast.variable_declarator(
-                    Span::default(),
-                    runtime_declaration_kind,
-                    ast.binding_pattern_binding_identifier(
-                        Span::default(),
-                        ast.ident(&probe_file_v2),
-                    ),
-                    NONE,
-                    Some(registration_call),
-                    false,
+        Statement::VariableDeclaration(
+            ast.alloc_variable_declaration(
+                Span::default(),
+                runtime_declaration_kind,
+                ast.vec_from_iter(
+                    [
+                        ast.variable_declarator(
+                            Span::default(),
+                            runtime_declaration_kind,
+                            ast.binding_pattern_binding_identifier(
+                                Span::default(),
+                                ast.ident(&probe_file_v2),
+                            ),
+                            NONE,
+                            Some(registration_call),
+                            false,
+                        ),
+                        probe_part(&probe_clock_v2, "clock"),
+                        probe_part(&probe_hits_v2, "hitEpochs"),
+                        probe_part(&probe_hit_at_v2, "hit"),
+                    ]
+                    .into_iter()
+                    .chain((!decision_ids.is_empty()).then(|| probe_part(&probe_end_v2, "end"))),
                 ),
-                probe_part(&probe_clock_v2, "clock"),
-                probe_part(&probe_hits_v2, "hitEpochs"),
-                probe_part(&probe_hit_at_v2, "hit"),
-            ]),
-            false,
-        )),
+                false,
+            ),
+        ),
     );
     // Where the probes are placed, the end of the module's top level: a
     // read of a module-level value until then is one made as modules load
@@ -6516,9 +6556,12 @@ fn instrument_candidate_with_binding(
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
+    // The runtime's global, bound once for the helpers after the first.
+    let runtime_object = name_base.fresh().allocate("__supercovRuntimeObject");
     let runtime_locals = runtime_imports
         .iter()
         .map(|(_, local)| (*local).clone())
+        .chain([runtime_object.clone()])
         .collect::<Vec<_>>();
     insert_runtime_bindings(
         &allocator,
@@ -6526,6 +6569,7 @@ fn instrument_candidate_with_binding(
         runtime_binding,
         runtime_declaration_kind,
         runtime_imports,
+        &runtime_object,
     );
 
     if let Some(wrapper) = capability_wrapper {
@@ -6773,12 +6817,14 @@ fn instrument_strong<'a>(
         )),
     );
     runtime_imports.push(("strongSlot", &strong_slot));
+    let runtime_object = names.allocate("__supercovRuntimeObject");
     insert_runtime_bindings(
         allocator,
         program,
         runtime_binding,
         runtime_declaration_kind,
         runtime_imports,
+        &runtime_object,
     );
     if let Some(wrapper) = capability_wrapper {
         transform_capability_imports(allocator, program, source, wrapper);
@@ -6838,6 +6884,7 @@ fn insert_runtime_bindings<'a>(
     runtime_binding: RuntimeBinding,
     runtime_declaration_kind: VariableDeclarationKind,
     runtime_imports: Vec<(&str, &String)>,
+    runtime_object: &str,
 ) {
     let ast = AstBuilder::new(allocator);
     let typescript = program.source_type.is_typescript();
@@ -6849,41 +6896,70 @@ fn insert_runtime_bindings<'a>(
         // the program instead collided with the declaration every rewritten
         // test file carries for its assertion helpers.
         let typed = typescript && runtime_binding == RuntimeBinding::DirectGlobal;
-        let declarators =
-            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+        let global_runtime = || {
+            Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                Span::default(),
+                ast.expression_identifier(Span::default(), ast.ident("globalThis")),
+                ast.identifier_name(
+                    Span::default(),
+                    ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
+                        "__SUPERCOV_DIRECT_RUNTIME__"
+                    } else {
+                        "__supercovRuntime"
+                    }),
+                ),
+                false,
+            ))
+        };
+        // The first helper is read off the global, where the JavaScript
+        // frontend's loaders look for it; the global itself is bound once
+        // after it, and every other helper read from that binding: the
+        // global's name is long, a minifier keeps it, and a module that
+        // named it for each helper carried it several times over.
+        let shared = runtime_imports.len() > 2;
+        // Every file binds the first helper at least: a declaration per
+        // helper, and the global's own after the first where it is shared.
+        let declarators = ast.vec_from_iter(runtime_imports.into_iter().enumerate().flat_map(
+            |(position, (imported, local))| {
                 let annotation = typed
                     .then(|| runtime_helper_type(allocator, program.source_type, imported))
                     .flatten();
-                let global_runtime =
-                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                        Span::default(),
-                        ast.expression_identifier(Span::default(), ast.ident("globalThis")),
-                        ast.identifier_name(
-                            Span::default(),
-                            ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
-                                "__SUPERCOV_DIRECT_RUNTIME__"
-                            } else {
-                                "__supercovRuntime"
-                            }),
-                        ),
-                        false,
-                    ));
+                let object = if shared && position > 0 {
+                    ast.expression_identifier(Span::default(), ast.ident(runtime_object))
+                } else {
+                    global_runtime()
+                };
                 let runtime_helper =
                     Expression::StaticMemberExpression(ast.alloc_static_member_expression(
                         Span::default(),
-                        global_runtime,
+                        object,
                         ast.identifier_name(Span::default(), ast.ident(imported)),
                         false,
                     ));
-                ast.variable_declarator(
+                let helper = ast.variable_declarator(
                     Span::default(),
                     runtime_declaration_kind,
                     ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
                     annotation,
                     Some(runtime_helper),
                     false,
-                )
-            }));
+                );
+                let global = (shared && position == 0).then(|| {
+                    ast.variable_declarator(
+                        Span::default(),
+                        runtime_declaration_kind,
+                        ast.binding_pattern_binding_identifier(
+                            Span::default(),
+                            ast.ident(runtime_object),
+                        ),
+                        NONE,
+                        Some(global_runtime()),
+                        false,
+                    )
+                });
+                std::iter::once(helper).chain(global)
+            },
+        ));
         program.body.insert(
             0,
             Statement::VariableDeclaration(ast.alloc_variable_declaration(
@@ -9764,8 +9840,9 @@ struct ControlProbeV2Transformer<'a, 's> {
     mcdc_begin: String,
     mcdc_condition: String,
     mcdc_end: String,
-    mcdc_end_v2: String,
-    probe_file_v2: String,
+    /// The file's own decision end, bound to it: `end(decision, vector)`
+    /// records the false outcome, `end(decision, vector, 1)` the true one.
+    probe_end_v2: String,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     decision_index: usize,
@@ -10114,27 +10191,9 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         steps.push(self.assign(&result, value));
         let mut names = Vec::new();
         pending.iter().for_each(|(applied, shape)| {
-            let truth = self.ast.expression_unary(
-                Span::default(),
-                UnaryOperator::LogicalNot,
-                self.ast.expression_unary(
-                    Span::default(),
-                    UnaryOperator::LogicalNot,
-                    self.shape_bits(shape, applied),
-                ),
-            );
-            steps.push(self.ast.expression_call(
-                Span::default(),
-                self.identifier(&self.mcdc_end_v2),
-                NONE,
-                self.ast.vec_from_array([
-                    Argument::from(self.identifier(&self.probe_file_v2)),
-                    Argument::from(self.number(applied.index as u64)),
-                    Argument::from(self.encoded(applied)),
-                    Argument::from(truth),
-                ]),
-                false,
-            ));
+            // The outcome as 0 or 1, which the end reads as false or true.
+            let truth = self.shape_bits(shape, applied);
+            steps.push(self.end_call(applied.index, self.encoded(applied), Some(truth)));
             if applied.inline {
                 names.push(applied.frame.clone());
                 names.extend(applied.values.iter().cloned());
@@ -10203,19 +10262,30 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             Some(vector) => self.number(vector),
             None => self.encoded(applied),
         };
+        self.end_call(applied.index, vector, outcome.then(|| self.number(1)))
+    }
+
+    /// `end(decision, vector)` for a false outcome, `end(decision, vector,
+    /// outcome)` otherwise: the file's own decision end, which records what
+    /// `mcdcEndV2(file, decision, vector, outcome)` does. A missing outcome is
+    /// false, and `1` true, as a boolean literal was: shorter in every
+    /// outcome of every decision a page parses.
+    fn end_call(
+        &self,
+        decision: usize,
+        vector: Expression<'a>,
+        outcome: Option<Expression<'a>>,
+    ) -> Expression<'a> {
+        let mut arguments = self.ast.vec_from_array([
+            Argument::from(self.number(decision as u64)),
+            Argument::from(vector),
+        ]);
+        arguments.extend(outcome.map(Argument::from));
         self.ast.expression_call(
             Span::default(),
-            self.identifier(&self.mcdc_end_v2),
+            self.identifier(&self.probe_end_v2),
             NONE,
-            self.ast.vec_from_array([
-                Argument::from(self.identifier(&self.probe_file_v2)),
-                Argument::from(self.number(applied.index as u64)),
-                Argument::from(vector),
-                Argument::from(
-                    self.ast
-                        .expression_boolean_literal(Span::default(), outcome),
-                ),
-            ]),
+            arguments,
             false,
         )
     }
@@ -13393,7 +13463,7 @@ export const r = v && w && q;
         for (source, export) in [
             (
                 "function handleRequest(r) { return r; }\nexport default handleRequest;\n",
-                "export default __supercovWithRequestPhase14(handleRequest);",
+                "export default __supercovWithRequestPhase15(handleRequest);",
             ),
             (
                 "export default class Entry {}\n",
@@ -13914,6 +13984,8 @@ export function shapes(n: number): unknown {
                 let bound = code
                     .find(&format!("{helper} as "))
                     .or_else(|| code.find(&format!("__supercovRuntime.{helper}")))
+                    // Helpers after the first read the global's one binding.
+                    .or_else(|| code.find(&format!("__supercovRuntimeObject.{helper}")))
                     .unwrap_or_else(|| panic!("{file} binds no {helper}:\n{code}"));
                 assert!(
                     bound < first_user_code,
@@ -14574,18 +14646,17 @@ export function shapes(n: number): unknown {
         let lines: Vec<&str> = code.lines().collect();
         assert!(
             lines[2].starts_with(
-                "  { const __supercovAssertionPhase: typeof assert.ok = globalThis.__SUPERCOV_DIRECT_RUNTIME__.bindNodeAssertionPhase("
+                "  { const __supercovP1: typeof assert.ok = __covSupercov().bindNodeAssertionPhase("
             ),
             "{code}"
         );
         assert!(
-            lines[2]
-                .ends_with(", assert, \"ok\"); __supercovAssertionPhase(user, await value()); }"),
+            lines[2].ends_with(", assert, \"ok\"); __supercovP1(user, await value()); }"),
             "{code}"
         );
         assert!(lines[3].contains(": typeof assert.equal = "), "{code}");
         assert_eq!(
-            lines[4], "     \"equal\"); __supercovAssertionPhase(await value(), 1) }",
+            lines[4], "     \"equal\"); __supercovP1(await value(), 1) }",
             "{code}"
         );
         assert_eq!(lines[5], "}", "{code}");
@@ -15469,13 +15540,17 @@ export function shapes(n: number): unknown {
 
     fn decision_shape(source: &str, file: &str) -> String {
         let output = without_probes(source, file);
-        let runtime = output.runtime.as_ref().expect("candidate runtime binding");
-        let call = format!("{}(", runtime.mcdc_end_v2);
-        let start = output.code.find(&call).expect("an outcome is recorded") + call.len();
-        let probe_file = &output.code[start..start + output.code[start..].find(',').unwrap()];
-        let code = output
+        // The file's own end, `__supercovEnd<n>`, bound beside its hit.
+        let bound = output
             .code
-            .replace(&format!("{call}{probe_file}, "), "END(");
+            .find("= __supercovFile")
+            .and_then(|_| output.code.find("__supercovEnd"))
+            .expect("an outcome is recorded");
+        let length = output.code[bound..]
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap();
+        let call = format!("{}(", &output.code[bound..bound + length]);
+        let code = output.code.replace(&call, "END(");
         let mut names: Vec<&str> = Vec::new();
         let mut shaped = String::new();
         let mut rest = code.as_str();
@@ -15541,17 +15616,17 @@ export function shapes(n: number): unknown {
             // condition ends in the assignment of its own value.
             // The true outcome of `&&` alone has one vector, both conditions
             // true (2 + 3 * 2), and is recorded as that number.
-            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, 8, true), t0 = 0;",
+            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, 8, 1), t0 = 0;",
             // Without an `else` there is nowhere inside the statement for the
             // false outcome, and an `else` made for it would be a branch to
             // a coverage tool the tests run: it is recorded after the `if`,
             // when the frame says it has not been.
-            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1 + 3 * +!!t2, false);\n\t}",
+            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1 + 3 * +!!t2);\n\t}",
             // A lone condition's value is the outcome: each branch records its
             // one vector, and the test is left as written.
-            "if (!list) {\n\t\tEND(1, 2, true);",
-            "} else {\n\t\tEND(1, 1, false);",
-            "return list ? (void END(2, 2, true), list[0]) : (void END(2, 1, false), undefined);",
+            "if (!list) {\n\t\tEND(1, 2, 1);",
+            "} else {\n\t\tEND(1, 1);",
+            "return list ? (void END(2, 2, 1), list[0]) : (void END(2, 1), undefined);",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
@@ -15578,14 +15653,14 @@ export function shapes(n: number): unknown {
             // The label stays on its loop, for `continue walk`.
             // A lone condition keeps only the frame, which says a test ran
             // whose outcome is not yet recorded.
-            "{\n\t\twalk: while (t0 = 1, i < limit) {\n\t\t\tEND(0, 2, true), t0 = 0;",
-            "\t\t}\n\t\tt0 && END(0, 1, false);\n\t}",
+            "{\n\t\twalk: while (t0 = 1, i < limit) {\n\t\t\tEND(0, 2, 1), t0 = 0;",
+            "\t\t}\n\t\tt0 && END(0, 1);\n\t}",
             // A `do … while` body runs before its test: the frame says whether
             // one came before this iteration, and starts cleared.
-            "{\n\t\tt2 = 0;\n\t\tdo {\n\t\t\tt2 && (END(2, 2, true), t2 = 0);",
-            "} while (t2 = 1, i > 0);\n\t\tt2 && END(2, 1, false);\n\t}",
-            "for (let j = 0; t3 = 1, j < limit; j++) {\n\t\t\tEND(3, 2, true), t3 = 0;",
-            "\t\t}\n\t\tt3 && END(3, 1, false);\n\t}",
+            "{\n\t\tt2 = 0;\n\t\tdo {\n\t\t\tt2 && (END(2, 2, 1), t2 = 0);",
+            "} while (t2 = 1, i > 0);\n\t\tt2 && END(2, 1);\n\t}",
+            "for (let j = 0; t3 = 1, j < limit; j++) {\n\t\t\tEND(3, 2, 1), t3 = 0;",
+            "\t\t}\n\t\tt3 && END(3, 1);\n\t}",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
@@ -15662,9 +15737,7 @@ export function shapes(n: number): unknown {
             "src/defaults.ts",
         );
         assert!(
-            shaped.contains(
-                "n > 5 ? (void END(0, 2, true), \"high\") : (void END(0, 1, false), \"low\")"
-            ),
+            shaped.contains("n > 5 ? (void END(0, 2, 1), \"high\") : (void END(0, 1), \"low\")"),
             "{shaped}"
         );
         assert!(!shaped.contains("=> {"), "{shaped}");
@@ -15686,11 +15759,11 @@ export function shapes(n: number): unknown {
         );
         for expected in [
             "static {\n\t\tlet t0;\n",
-            "if (t0 = 1, n > 1) {\n\t\t\t\tEND(0, 2, true), t0 = 0;",
+            "if (t0 = 1, n > 1) {\n\t\t\t\tEND(0, 2, 1), t0 = 0;",
             // A parameter default has no body to declare in: the arrow holds
             // the whole conditional expression, so its branches still see
             // what the test narrowed.
-            "(() => {\n\tlet t1, t2, t3;\n\treturn (t1 = 1, t3 = 0, t2 = n > 5) && (t1 += 3, t3 = n < 9) ? (void END(1, 8, true), \"high\") : (void END(1, t1 + +!!t2 + 3 * +!!t3, false), \"low\");\n})()",
+            "(() => {\n\tlet t1, t2, t3;\n\treturn (t1 = 1, t3 = 0, t2 = n > 5) && (t1 += 3, t3 = n < 9) ? (void END(1, 8, 1), \"high\") : (void END(1, t1 + +!!t2 + 3 * +!!t3), \"low\");\n})()",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
@@ -15738,7 +15811,12 @@ export function shapes(n: number): unknown {
         assert!(output.limitations.is_empty());
         assert_eq!(output.supported_surface, "complete-js-instrumenter-v1");
         let runtime = output.runtime.expect("candidate runtime binding");
-        assert!(output.code.contains(&runtime.mcdc_end_v2));
+        // Outcomes go through the file's own end, bound beside its hit.
+        assert!(
+            output
+                .code
+                .contains(&format!("= {}.end", runtime.probe_file_v2))
+        );
         assert!(output.code.contains("_supercovF"));
         assert!(output.code.contains("_supercovV"));
         assert_eq!(output.decisions.len(), 1);
@@ -16547,8 +16625,10 @@ export function shapes(n: number): unknown {
             // operand is a decision too: its conditions are recorded in the
             // leaves and its outcome after the tree, from their values with
             // `&`, so the tree stays one tree and narrows as written.
-            "(s1 = 0, _supercovF28 = 1, _supercovV30 = 0, _supercovV29 = total > 0) && (s1 = 1, _supercovF28 += 3, _supercovV30 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
-            "!!(+!!_supercovV29 & +!!_supercovV30)), _supercovR31;",
+            "(s1 = 0, _supercovF29 = 1, _supercovV31 = 0, _supercovV30 = total > 0) && (s1 = 1, _supercovF29 += 3, _supercovV31 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            // The outcome is passed as 0 or 1, which the file's end reads as
+            // false or true.
+            "+!!_supercovV30 & +!!_supercovV31), _supercovR32;",
             "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.

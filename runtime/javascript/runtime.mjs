@@ -2603,6 +2603,21 @@ function registerProbeV2(definition) {
     if (hitEpochs[index] !== clock.e)
       recordCoverageHitV2(file, index);
   };
+  // What a decision's outcome calls: this file's end, by decision alone, with
+  // its vector and the outcome, which a false one leaves out (`end(3, 1)`,
+  // `end(3, 2, 1)`). It records what mcdcEndV2(file, ...) does, and makes the
+  // same check first, so the call stays as small as the probe.
+  const decisionEpochs = file.decisionEpochs;
+  file.end = (decisionIndex, encoded, outcome) => {
+    if (encoded === 0)
+      return;
+    if (clock.fast) {
+      const seen = decisionEpochs[decisionIndex];
+      if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (outcome ? 1 : 0)] === clock.e)
+        return;
+    }
+    recordMcdcEndV2(file, decisionIndex, encoded, outcome);
+  };
   if (isBrowser) {
     state.probeV2Clock.fast = true;
     activateProbeV2Key(`browser\0${(_a8 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a8 : testId}\0${(_b = runtimeGlobal.__SUPERCOV_PHASE_ID__) != null ? _b : "unscoped"}`);

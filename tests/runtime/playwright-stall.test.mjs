@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
-import { CONFIRMED_AT_LIMIT, PAGE_BUSY, PAGE_GONE, describeCall, ownDeadline, pendingBefore, stallDetails, stalledOn, stallWindowOf, watchPageWork, watchStall } from "../../runtime/javascript/playwrightStrong.mjs";
+import { CONFIRMED_AT_LIMIT, PAGE_BUSY, PAGE_GONE, describeCall, ownDeadline, ownEndPast, pendingBefore, stallDetails, stalledOn, stallWindowOf, watchPageWork, watchStall } from "../../runtime/javascript/playwrightStrong.mjs";
 
 const timeouts = { action: 0, navigation: 0, expect: 5_000, toPass: 0 };
 const deadline = (method, args, extra = {}) => ownDeadline({ method, args, startedAt: 1_000, request: false, timeouts, ...extra });
@@ -356,4 +356,46 @@ test("a timeout's reason says it ran to its limit past a stall its pages could h
     verdictOf({ ...attempt, doubtedAtMs: 12_400, doubtedBy: "a timer due in 0.1 s" }).reason,
     `ran past its time limit of 16.3 s (1.5 × its 7.5 s baseline + 5 s), waiting on Page.waitForResponse at a.spec.ts:9:27; it stalled at 12.4 s, with a timer due in 0.1 s that could still end the wait, so ${CONFIRMED_AT_LIMIT}`,
   );
+});
+
+test("an attempt runs to its waits' own timeouts past the limit, where every one of them has one", () => {
+  const wait = (deadline, startedAt = 1_000) => ({ operation: "x", deadline, startedAt, fromTest: true });
+  const at = { limitAt: 10_000 };
+  // An `expect` that started late, and ends by its own timeout after the limit.
+  assert.equal(ownEndPast({ waits: new Set([wait(12_000, 7_000)]), ...at }), 12_000);
+  // The latest of several, every one of them with a timeout of its own.
+  assert.equal(ownEndPast({ waits: new Set([wait(12_000), wait(11_000)]), ...at }), 12_000);
+  // Nothing to wait for, or all of it ends before the limit: the limit holds.
+  assert.equal(ownEndPast({ waits: new Set(), ...at }), undefined);
+  assert.equal(ownEndPast({ waits: new Set([wait(9_000)]), ...at }), undefined);
+  // One call could wait for ever: the limit holds.
+  assert.equal(ownEndPast({ waits: new Set([wait(12_000), wait(Infinity)]), ...at }), undefined);
+  // A call made after the limit is none of this.
+  assert.equal(ownEndPast({ waits: new Set([wait(12_000, 10_500)]), ...at }), undefined);
+  // The test's own timeout ends it first, with no time for the wait to fail.
+  assert.equal(ownEndPast({ waits: new Set([wait(12_000)]), ...at, testTimeoutAt: 12_500 }), undefined);
+  assert.equal(ownEndPast({ waits: new Set([wait(12_000)]), ...at, testTimeoutAt: 13_000 }), 12_000);
+});
+
+test("a watch lets the waits run to their own end, and holds the limit again once they end before it", async () => {
+  const now = Date.now();
+  const claim = { kind: "mutant", startedAt: now - 3_000, claimedAt: now - 3_000, baselineMs: 1, timeoutFactor: 1, limitAt: now + 400, testTimeoutMs: 30_000 };
+  const set = [];
+  const info = { status: "passed", duration: 0, setTimeout: (ms) => set.push(ms) };
+  let extension;
+  const watch = watchStall(info, claim, (limitAt, testTimeoutAt) => {
+    assert.equal(testTimeoutAt, claim.claimedAt + 30_000);
+    return { stalled: "expect(#out) to.have.text", waiting: "expect(#out) to.have.text", since: now - 3_000, ownEnd: claim.limitAt + 2_000 };
+  }, async () => assert.fail("no stall while its waits run to their end"), (limitAt, restore) => {
+    extension = { limitAt, restore };
+  });
+  await new Promise((done) => setTimeout(done, 300));
+  // Raised to the waits' own end, and a second to fail.
+  assert.deepEqual(set, [claim.limitAt + 3_000 - claim.claimedAt]);
+  assert.equal(extension.limitAt, claim.limitAt);
+  // Ended before the limit: the limit holds again.
+  extension.restore();
+  assert.equal(set[1], claim.limitAt - claim.claimedAt);
+  assert.equal(watch.extended, undefined);
+  watch.stop();
 });

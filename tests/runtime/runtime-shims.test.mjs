@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import Module from "node:module";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1738,6 +1739,44 @@ test("a process compiles into the run's cache unless the command named its own",
       assert.ok(kept.dir.startsWith(theirs), kept.dir);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// npm's own process (npm, npx), started through its link, runs none of the
+// project's code: it writes nothing to the run's compile cache. A script of
+// the project does.
+test("npm's own process keeps no compiled code, a project's script does", { skip: process.platform === "win32" }, () => {
+  const registerUrl = new URL("../../runtime/javascript/register.mjs", import.meta.url).href;
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-npm-cache-"));
+  try {
+    mkdirSync(resolve(root, "lib/node_modules/npm/bin"), { recursive: true });
+    mkdirSync(resolve(root, "bin"));
+    const body = "require('node:zlib'); module.exports = Array.from({ length: 50 }, (_, i) => i * 2);\n";
+    writeFileSync(resolve(root, "lib/node_modules/npm/bin/npx-cli.js"), body);
+    symlinkSync(resolve(root, "lib/node_modules/npm/bin/npx-cli.js"), resolve(root, "bin/npx"));
+    writeFileSync(resolve(root, "script.cjs"), body);
+    const cached = (script) => {
+      const cache = resolve(root, `cache-${script.replaceAll("/", "-")}`);
+      const ran = spawnSync(process.execPath, [`--import=${registerUrl}`, resolve(root, script)], { encoding: "utf8", timeout: 15000, env: { ...process.env, NODE_COMPILE_CACHE: undefined, SUPERCOV_COMPILE_CACHE: cache } });
+      assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+      const files = [];
+      const walk = (directory) => {
+        for (const entry of readdirSync(directory, { withFileTypes: true }))
+          entry.isDirectory() ? walk(resolve(directory, entry.name)) : files.push(entry.name);
+      };
+      try {
+        walk(cache);
+      } catch {
+        // No cache directory: nothing was kept.
+      }
+      return files.length;
+    };
+    if (typeof Module.enableCompileCache !== "function")
+      return;
+    assert.equal(cached("bin/npx"), 0, "npx kept compiled code");
+    assert.ok(cached("script.cjs") > 0, "a project's script kept none");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

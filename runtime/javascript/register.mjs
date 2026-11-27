@@ -25,8 +25,24 @@ if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === 
     typeof Module.setSourceMapsSupport === "function")
     Module.setSourceMapsSupport(true, { nodeModules: false, generatedCode: true });
 // Before anything else loads: every module after this compiles from the
-// code the run's earlier processes left (atomic.mjs says why).
-enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
+// code the run's earlier processes left (atomic.mjs says why). Not in npm's
+// own process (`npm run`, `npx`, `npm exec`), which runs none of the
+// project's code: writing the compiled code of the hundreds of modules npm
+// loads cost each launcher more than the launchers after it saved, about
+// 3 ms per test on each of a measured Next.js suite's three. The commands it
+// launches have this preload, and the cache, of their own.
+// It is started through a link (`bin/npx`), so its script is looked at
+// where the link leads.
+const isNpmItself = (() => {
+    try {
+        return /[\\/]npm[\\/]bin[\\/]np[mx]-cli\.js$/.test(realpathSync(process.argv[1] ?? ""));
+    }
+    catch {
+        return false;
+    }
+})();
+if (!isNpmItself)
+    enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
 writePlaywrightCacheWhole();
