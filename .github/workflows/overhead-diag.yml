@@ -26,6 +26,8 @@ jobs:
             ref: d25da687b1362dc99c6ec403470ef8220d5bacba
           - variant: new
             ref: 3a8d8ec2c1bebe911f8e12abe72403e09c8b56cb
+          - variant: bytes
+            ref: bdf2e90e
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,12 +56,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { pair: 'plain base', mode: profile, count: 6 }
-          - { pair: 'base plain', mode: ablate, count: 20 }
-          - { pair: 'base new', mode: abba, count: 45 }
-          - { pair: 'base new', mode: abba, count: 45 }
-          - { pair: 'base new', mode: abba, count: 45 }
-          - { pair: 'new base', mode: abba, count: 45 }
+          - { pair: 'base bytes', mode: trace, count: 6 }
+          - { pair: 'base bytes', mode: abba, count: 45 }
+          - { pair: 'base bytes', mode: abba, count: 45 }
+          - { pair: 'bytes base', mode: abba, count: 45 }
+          - { pair: 'bytes base', mode: abba, count: 45 }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -98,22 +99,22 @@ jobs:
       # binary twice each, as sixteen machines of a CI matrix would run it.
       matrix:
         include:
-          - { kind: large, shard: 1/16, variants: 'base,new' }
-          - { kind: large, shard: 2/16, variants: 'base,new' }
-          - { kind: large, shard: 3/16, variants: 'base,new' }
-          - { kind: large, shard: 4/16, variants: 'base,new' }
-          - { kind: large, shard: 5/16, variants: 'base,new' }
-          - { kind: large, shard: 6/16, variants: 'base,new' }
-          - { kind: large, shard: 7/16, variants: 'base,new' }
-          - { kind: large, shard: 8/16, variants: 'base,new' }
-          - { kind: large, shard: 9/16, variants: 'base,new' }
-          - { kind: large, shard: 10/16, variants: 'base,new' }
-          - { kind: large, shard: 11/16, variants: 'base,new' }
-          - { kind: large, shard: 12/16, variants: 'base,new' }
-          - { kind: large, shard: 13/16, variants: 'base,new' }
-          - { kind: large, shard: 14/16, variants: 'base,new' }
-          - { kind: large, shard: 15/16, variants: 'base,new' }
-          - { kind: large, shard: 16/16, variants: 'base,new' }
+          - { kind: large, shard: 1/16, variants: 'base,bytes' }
+          - { kind: large, shard: 2/16, variants: 'base,bytes' }
+          - { kind: large, shard: 3/16, variants: 'base,bytes' }
+          - { kind: large, shard: 4/16, variants: 'base,bytes' }
+          - { kind: large, shard: 5/16, variants: 'base,bytes' }
+          - { kind: large, shard: 6/16, variants: 'base,bytes' }
+          - { kind: large, shard: 7/16, variants: 'base,bytes' }
+          - { kind: large, shard: 8/16, variants: 'base,bytes' }
+          - { kind: large, shard: 9/16, variants: 'base,bytes' }
+          - { kind: large, shard: 10/16, variants: 'base,bytes' }
+          - { kind: large, shard: 11/16, variants: 'base,bytes' }
+          - { kind: large, shard: 12/16, variants: 'base,bytes' }
+          - { kind: large, shard: 13/16, variants: 'base,bytes' }
+          - { kind: large, shard: 14/16, variants: 'base,bytes' }
+          - { kind: large, shard: 15/16, variants: 'base,bytes' }
+          - { kind: large, shard: 16/16, variants: 'base,bytes' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -132,6 +133,7 @@ jobs:
             extra=""
             case "$variant" in
               new) ;;
+              bytes) ;;
               await-action) extra="SUPERCOV_DIAG_SKIP=await-action" ;;
               collect) extra="SUPERCOV_DIAG_SKIP=collect" ;;
               base) ;;
@@ -143,7 +145,7 @@ jobs:
               skip-*) extra="SUPERCOV_DIAG_SKIP=${variant#skip-}" ;;
               *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
             esac
-            printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "${extra:-SPEED_NOTHING=1}" "$GITHUB_WORKSPACE/binaries/supercov-$([ "$variant" = base ] && echo base || echo new)/supercov" > "$RUNNER_TEMP/wrap/$variant"
+            printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "${extra:-SPEED_NOTHING=1}" "$GITHUB_WORKSPACE/binaries/supercov-$(case "$variant" in base|bytes) echo "$variant";; *) echo new;; esac)/supercov" > "$RUNNER_TEMP/wrap/$variant"
             chmod +x "$RUNNER_TEMP/wrap/$variant"
             list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
           done
