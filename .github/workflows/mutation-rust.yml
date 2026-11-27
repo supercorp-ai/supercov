@@ -72,6 +72,13 @@ jobs:
         working-directory: project
         run: |
           mkdir -p ../out
+          # A mutant that makes a test allocate without end took the runner
+          # down with it (base64, shard 10, twice on 2026-11-27) and every
+          # outcome of the shard with it. Under a 10 GiB address-space cap the
+          # allocation fails instead and the test with it, as on a machine
+          # with less memory. Supercov's jobs stop such a test at its time
+          # limit, before it holds the runner's memory.
+          ulimit -v $((10 * 1024 * 1024))
           # Stopped short of the job's limit, its outcomes so far are kept.
           /usr/bin/time -v -o ../out/time.txt timeout 360 \
             cargo mutants -j "$JOBS" --no-shuffle ${{ matrix.args }} \
