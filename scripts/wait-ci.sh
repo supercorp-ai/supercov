@@ -2,8 +2,11 @@
 # Wait for CI cheaply: one GraphQL query every three minutes, and a line only
 # when something changed.
 #
-#   scripts/wait-ci.sh <pull request number>   # every check on its head commit
-#   scripts/wait-ci.sh <run id | run URL>      # one workflow run
+#   scripts/wait-ci.sh <pull request number | URL>   # every check on its head commit
+#   scripts/wait-ci.sh <run id | run URL>            # one workflow run
+#
+# A number means the repository of the current directory; a URL names its
+# own. The first line says which repository it waits on.
 #
 # Exits 0 when everything passed, 1 when anything failed or was cancelled, 2
 # on a usage error. Prints `STALLED` when nothing finished for ten minutes,
@@ -22,24 +25,32 @@ target=${1:-}
 INTERVAL=180
 STALL_SECONDS=600
 
-repository=$(gh repo view --json nameWithOwner -q .nameWithOwner) || exit 2
+if [[ $target =~ ^https://github\.com/([^/]+/[^/]+)/ ]]; then
+  repository=${BASH_REMATCH[1]}
+else
+  repository=$(gh repo view --json nameWithOwner -q .nameWithOwner) || exit 2
+fi
 owner=${repository%/*}; name=${repository#*/}
 
 FAILED='FAILURE CANCELLED TIMED_OUT ACTION_REQUIRED STARTUP_FAILURE ERROR'
 PENDING='QUEUED IN_PROGRESS PENDING WAITING EXPECTED REQUESTED'
 
-if [[ $target =~ ^[0-9]{1,7}$ ]]; then
+if [[ $target =~ ^[0-9]{1,7}$ || $target =~ /pull/([0-9]+) ]]; then
   kind=pr
-  query='query($owner: String!, $name: String!, $number: Int!) {
+  number=${BASH_REMATCH[1]:-$target}
+  echo "waiting on $repository#$number"
+  # Checks come 100 to a page; a pull request with more is read page by page.
+  query='query($owner: String!, $name: String!, $number: Int!, $after: String) {
     rateLimit { remaining resetAt }
     repository(owner: $owner, name: $name) { pullRequest(number: $number) { state commits(last: 1) { nodes { commit {
-      oid statusCheckRollup { state contexts(first: 100) {
+      oid statusCheckRollup { state contexts(first: 100, after: $after) {
         totalCount
         checkRunCountsByState { state count }
         statusContextCountsByState { state count }
-        nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } }
+        pageInfo { hasNextPage endCursor }
+        nodes { ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) } ... on StatusContext { context state isRequired(pullRequestNumber: $number) } }
       } } } } } } } }'
-  arguments=(-F number="$target")
+  arguments=(-F number="$number")
 else
   kind=run
   [[ $target =~ ([0-9]{8,}) ]] || { echo "not a pull request number, run id or run URL: $target" >&2; exit 2; }
@@ -50,12 +61,23 @@ else
       done: checkRuns(filterBy: {status: COMPLETED}) { totalCount }
       failed: checkRuns(first: 20, filterBy: {conclusions: [FAILURE, CANCELLED, TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE]}) { nodes { name } } } } } }'
   arguments=(-f url="https://github.com/$repository/actions/runs/${BASH_REMATCH[1]}")
+  echo "waiting on $repository run ${BASH_REMATCH[1]}"
 fi
 
 last=""; changed=$(date +%s); reported=""
 while true; do
   answer=$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" "${arguments[@]}" 2>&1) || {
     echo "query failed, trying again in ${INTERVAL}s: $(head -c 200 <<<"$answer")"; sleep "$INTERVAL"; continue; }
+  if [ "$kind" = pr ]; then
+    # Read the rest of the checks and add their nodes to the first page's.
+    page=$answer
+    while [ "$(jq -r '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo.hasNextPage // false' <<<"$page")" = true ]; do
+      after=$(jq -r '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo.endCursor' <<<"$page")
+      page=$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" -f after="$after" "${arguments[@]}" 2>&1) || break
+      answer=$(jq --argjson more "$(jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes' <<<"$page")" \
+        '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes += $more' <<<"$answer")
+    done
+  fi
 
   if [ "$kind" = pr ]; then
     summary=$(jq -r --arg failed "$FAILED" --arg pending "$PENDING" '
@@ -67,20 +89,27 @@ while true; do
       [ $commit.oid[0:8],
         $c.totalCount,
         total($pending),
-        # A check counts as failed only when no check of its name passed or
-        # is still running: a run that a newer one replaced (concurrency)
-        # shows as cancelled.
-        ([$c.nodes[] | {name: (.name // .context), result: (.conclusion // .status // .state // "")}]
-          | group_by(.name)
+        # When branch protection names required checks, they decide: a
+        # job another event skipped leaves its earlier, cancelled run behind
+        # with nothing of its name to replace it. Otherwise a check counts as
+        # failed only when no check of its name passed or is still running
+        # (a run a newer one replaced shows as cancelled).
+        ([$c.nodes[] | {name: (.name // .context), result: (.conclusion // .status // .state // ""), required: (.isRequired == true)}]) as $checks
+        | (if any($checks[]; .required) then [$checks[] | select(.required)] else $checks end) as $deciding
+        | ($deciding | group_by(.name)
           | map(select(any(.[]; .result as $s | $failed | split(" ") | index($s))
                        and (any(.[]; .result as $s | "SUCCESS NEUTRAL SKIPPED \($pending)" | split(" ") | index($s)) | not)) | .[0].name)
           | join(", ")),
+        ([$deciding[] | select(.result as $s | $pending | split(" ") | index($s))] | length),
+        (any($checks[]; .required)),
         ($commit.statusCheckRollup.state // "NONE"),
         $pr.state ] | map(tostring) | join("\u001f")' <<<"$answer")
-    IFS=$'\x1f' read -r head total pending failed verdict state <<<"$summary"
+    IFS=$'\x1f' read -r head total pending failed deciding_pending required verdict state <<<"$summary"
     progress="$head: $((total - pending))/$total checks done"
     finished=""
     if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then finished=yes; fi
+    # The required checks have their answer: the rest cannot change it.
+    if [ "$required" = true ] && [ "$deciding_pending" -eq 0 ]; then finished=yes; fi
     if [ "$state" != OPEN ]; then finished=yes; fi
   else
     summary=$(jq -r '
@@ -103,6 +132,7 @@ while true; do
   fi
 
   if [ "$finished" = yes ]; then
+    [ "$kind" = pr ] && [ "$required" = true ] && verdict="required checks $([ -z "$failed" ] && echo passed || echo failed)"
     echo "finished: $verdict"
     [ -n "$failed" ] && exit 1
     # A pull request's rollup counts a replaced, cancelled run against it;

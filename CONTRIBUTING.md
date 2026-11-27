@@ -67,11 +67,14 @@ tests="<names>"` measures named tests alone, to see what they cover.
 
 ### Waiting for CI
 
-`scripts/wait-ci.sh <pull request number | run id | run URL>` waits for
-every check on a pull request's head commit, or for one run. It sends one
-GraphQL query every three minutes and prints a line only when something
-finished, failed or stalled (nothing finished for ten minutes). It exits 0
-when everything passed and 1 when anything failed. Use it instead of `gh run
+`scripts/wait-ci.sh <pull request number or URL | run id or URL>` waits for a
+pull request's checks, or for one run. A number means the repository of the
+current directory, and the first line names the repository it waits on. On a
+pull request, the required checks (`Fast tier` and `Slow tier`) decide. It
+sends one GraphQL query every three minutes (one per hundred checks) and
+prints a line only when something finished, failed or stalled (nothing
+finished for ten minutes). It exits 0 when they passed and 1 when anything
+failed. Use it instead of `gh run
 watch` or a `gh run view` loop: those use the REST API, which allows 5,000
 requests an hour shared by everyone using the token, and several agents
 polling that way used it up in minutes.
