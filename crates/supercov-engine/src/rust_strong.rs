@@ -1206,10 +1206,14 @@ fn build_switched(
         // A failed build has at least one error.
         errors.iter().for_each(|error| {
             let (own, at_switch) = attribute(error, &prepared.switched);
+            // A macro the mutant's code names that is not in scope (`vec!` in
+            // a `no_std` crate) has no error code.
             let typed = error
                 .code
                 .as_deref()
-                .is_some_and(|code| OWN_ERRORS.contains(&code));
+                .map_or(error.rendered.starts_with("cannot find macro"), |code| {
+                    OWN_ERRORS.contains(&code)
+                });
             // The switched files hold only the mutants in `switchable`.
             if own.len() == 1 && typed {
                 let at = ordinal_of[own.iter().next().expect("one")];
@@ -3482,7 +3486,7 @@ mod tests {
                 ),
                 (
                     "src/lib.rs",
-                    "pub struct NoDefault(u8);\npub fn make(v: u8) -> NoDefault {\n    NoDefault(v + 1)\n}\npub fn used(v: u8) -> u8 {\n    v * 2\n}\npub fn h(b: bool, c: bool) -> u8 {\n    match b {\n        true => 1,\n        false => 2,\n        _ if c => 3,\n    }\n}\n",
+                    "pub struct NoDefault(u8);\npub fn make(v: u8) -> NoDefault {\n    NoDefault(v + 1)\n}\npub fn used(v: u8) -> u8 {\n    v * 2\n}\npub fn h(b: bool, c: bool) -> u8 {\n    match b {\n        true => 1,\n        false => 2,\n        _ if c => 3,\n    }\n}\npub mod np {\n    #![no_implicit_prelude]\n    pub fn v() -> ::std::vec::Vec<u8> {\n        ::std::vec::Vec::new()\n    }\n}\n",
                 ),
                 (
                     "tests/t.rs",
@@ -3542,6 +3546,9 @@ mod tests {
         let found = verdicts(&request);
         let unviable = &found["src/lib.rs:3:5-3:21:FnValue:Default::default()"];
         assert_eq!(unviable["status"], "unviable", "{found:?}");
+        // A macro the replacement names that is not in scope there.
+        let no_macro = &found["src/lib.rs:18:9-18:31:FnValue:vec![]"];
+        assert_eq!(no_macro["status"], "unviable", "{found:?}");
         // The ones that compile keep the plan's verdict: none is written.
         assert!(
             !found.contains_key("src/lib.rs:3:17-3:18:BinaryOperator:-"),

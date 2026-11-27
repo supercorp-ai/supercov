@@ -87,8 +87,8 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
 const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown|stryker|pit [--output <file>]]
 
 Weak mutation: for each mutant the language's established tool would make
-(StrykerJS for JavaScript and TypeScript, cargo-mutants for Rust; in
-preview, mutmut for Python, Gremlins for Go and mutant for Ruby), whether a test
+(StrykerJS for JavaScript and TypeScript, cargo-mutants for Rust;
+in preview, mutmut for Python, Gremlins for Go and mutant for Ruby), whether a test
 ran the mutated code (reach) and whether its value differed there
 (infection), read from the run without running anything. A run lists its
 mutants from its sources the first time they are asked for.

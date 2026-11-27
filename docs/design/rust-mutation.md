@@ -309,9 +309,19 @@ catches (or times out) that Supercov calls survived or no-coverage is a
 soundness violation, and the reverse too. Unviable mutants are counted
 apart.
 
-The corpus is under `mutation-corpora/rust/`, cloned at a tag: strsim-rs
-v0.11.1, rust-hex v0.4.3, semver 1.0.27. The results are in
-"Measured" below.
+The corpus is `benchmarks/mutation/rust/corpus.json`: eleven public crates
+at a tag (strsim, hex, semver, itoa, smallvec, unicode-width, bitflags,
+anyhow, base64, fastrand under cargo-nextest, regex-syntax as a workspace
+member), run by `.github/workflows/mutation-rust.yml` on GitHub's runners:
+cargo-mutants in shards, `supercov mutants --shard k/n` in shards merged by
+`supercov merge`, joined by `benchmarks/mutation/rust/summarize.mjs`. The
+table and every disagreement are in `docs/mutation.md` ("Rust, against
+cargo-mutants 27.1.0"). Its first runs found the gaps 4.29.18 fixed: value
+probes that failed itoa's `u128` tests (33 soundness violations), `const fn`
+mutants read as never run (12), a regrouping operator mutant (1), mutants of
+`Result<impl Trait, E>` bodies called unviable, unviable mutants no test
+reaches listed as gaps, and diverging arms. "Measured" below is the
+original three crates' record, on 16-CPU machines.
 
 ## Measured
 
@@ -486,3 +496,14 @@ build: such a pass cannot tell anything of it.
   pages the JavaScript strong pass runs them (`mutation-drivers.md`).
 - The value probes on `&&` and `||`, struct fields and non-number returns:
   those mutants stay `unknown` where they ran.
+- Equivalent mutants by compiled code, as JavaScript's pass finds them
+  (Trivial Compiler Equivalence): a Rust mutant would need a build of its
+  own to compare, which is what cargo-mutants pays per mutant and the
+  switched build exists to avoid. Every mutant runs; none is skipped.
+- A stalled attempt ended early, as Playwright's are: a libtest process
+  shows no wait a pass could read, so a test runs to its limit.
+- On Windows, a test's limit or the pass's stop ends the test process, not
+  processes it started (nextest's, rustdoc's): Unix ends the process group.
+- A slow mutant's time limit is per test (5 × the test's baseline, at least
+  20 s); cargo-mutants' is per suite run. A mutant that slows one test past
+  20 s but leaves the suite within 5 × its time is a `timeout` here (fastrand).

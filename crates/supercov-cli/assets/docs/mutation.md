@@ -646,9 +646,23 @@ mutants recorded `error`. mutmut's `do_not_mutate_patterns` and
 Every mutant of a pass is built in one switched copy, and each test runs by
 its exact name in a process of its own; doctests run through `cargo test
 --doc`. Under cargo-nextest each test runs through nextest with the project's
-configuration. A mutant the compiler refuses is `unviable`, as cargo-mutants
-reports it; a mutant in code the compiler evaluates (`const`, `static`,
-`const fn`) is built on its own.
+configuration. Each mutant is the program cargo-mutants' replacement text
+makes, regrouping included (`a - b * c` with `*` made `+` is `(a - b) + c`).
+A mutant the compiler refuses is `unviable`, as cargo-mutants reports it,
+those no test reaches included; a mutant in code the compiler evaluates
+(`const`, `static`, `const fn`) is built on its own.
+
+- **Time limits** are cargo-mutants': a test's baseline × 5, at least 20 s.
+  A test past its limit beside other tests runs again alone, after a run of
+  it without the mutant sets its limit, so a busier machine makes no
+  timeout.
+- **Stopping**: `--budget` and a signal stop the pass at once, its test
+  processes with it; nothing a stop cut short is judged, and each candidate a
+  mutant already passed is kept for the next pass.
+- **After an edit**, a Rust test keeps a verdict where nothing its own
+  function can name changed, a trait implementation's methods counting
+  where its type or trait is named; a doctest keeps one only where no code
+  changed (`docs/design/rust-mutation.md`, After an edit).
 
 Limits: tests built for wasm run against mutants in Node, under WASI and in
 Chrome; tests run in Firefox, Safari or Edge have their mutants recorded
@@ -763,23 +777,59 @@ each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
 | parse 1.22.4 | 1,306 | 56.5 s | 1.4 + 12.6 s |
 | humanize 4.17.0 | 1,348 | 152.3 s | 4.6 + 19.8 s |
 
-### Rust (preview), against cargo-mutants 27.1.0
+### Rust, against cargo-mutants 27.1.0
 
-On 16-CPU Linux machines (AWS c8a and m8a.4xlarge), one a job, 2026-11-22,
-cargo-mutants with `-j 8` in shards, Supercov's strong pass with its default 8
-workers:
+Eleven public crates pinned to a tag (`benchmarks/mutation/rust/`), every
+mutant of each joined by id: cargo-mutants runs the package's whole suite
+for each mutant; Supercov measures the suite and runs its strong pass. Both
+on GitHub's `ubuntu-latest` (4 vCPUs), two mutants at a time, 2026-11-27:
+cargo-mutants in shards of a crate's mutants, Supercov's `supercov mutants
+--shard k/n` (measuring included) with its shards merged. Times are summed
+over each tool's jobs (wall / CPU seconds), each job repeating its own build
+and baseline, or its own measured run.
 
-| Crate | Mutants | Agree | Soundness violations | Viability disagreements | cargo-mutants (shards summed) | Supercov strong pass |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| strsim-rs 0.11.1 | 363 | 363 | 0 | 0 | 60.3 s | 15.7 s |
-| rust-hex 0.4.3 | 104 | 102 | 0 | 2 | 74.2 s | 22.5 s |
-| semver 1.0.27 | 365 | 362 | 0 | 3 | 43.0 s | 15.8 s |
+| Crate | Shape | Mutants joined | Agree | Soundness violations | Other disagreements | cargo-mutants | Supercov |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| strsim 0.11.1 | small library, doctests | 363 | 363 | 0 | 0 | 195 / 529 s | 97 / 201 s |
+| hex 0.4.3 | deny-by-default lints | 104 | 102 | 0 | 2 lint | 131 / 434 s | 88 / 216 s |
+| semver 1.0.27 | `const` code, integration tests | 365 | 363 | 0 | 2 lint | 163 / 405 s | 136 / 185 s |
+| itoa 1.0.15 | generic over integer types | 46 | 46 | 0 | 0 | 8 / 17 s | 2 / 2 s |
+| smallvec 1.15.1 | unsafe collection | 458 | 458 | 0 | 0 | 301 / 876 s | 181 / 368 s |
+| unicode-width 0.2.1 | generated tables | 383 | 383 | 0 | 0 | 576 / 1,598 s | 218 / 410 s |
+| bitflags 2.9.1 | macro-generated code | 107 | 107 | 0 | 0 | 267 / 577 s | 134 / 309 s |
+| anyhow 1.0.98 | build script, `deny(dead_code)` | 201 | 192 | 0 | 9 lint | 218 / 796 s | 74 / 238 s |
+| fastrand 2.3.0 | under cargo-nextest | 205 | 195 | 0 | 10 (8 lint) | 508 / 1,537 s | 719 / 340 s |
+| regex-syntax 0.8.5 | workspace member, parser | 1,301 | 1,301 | 0 | 0 | 13,679 / 50,595 s (39 jobs) | 3,611 / 8,964 s |
+| base64 0.22.1 | randomized round trips | 311 | 311 | 0 | 0 | 9,561 / 30,615 s (23 jobs) | 3,247 / 9,470 s |
 
-Four of the five viability disagreements are mutants cargo-mutants' build
-refuses on a deny-by-default lint, which Supercov caps as a measured run does
-(the mutant then builds and is killed); the fifth is in a `const` no test
-reaches, which cargo-mutants' build refuses and Supercov records as no
-coverage. None is a mutant one tool kills and the other calls survived.
+No mutant one tool detects is one the other lets live. The other
+disagreements, each applied by hand:
+
+- **Lints** (hex, semver, anyhow, fastrand): cargo-mutants' build fails on a lint the
+  crate denies (`arithmetic_overflow` after `+` made `*`, anyhow's
+  `#![deny(dead_code, unused_imports)]` once a body is replaced); Supercov
+  caps lints as a measured run does, builds the mutant, and its tests kill
+  it, or none reaches it.
+- **`vec!` in a `no_std` crate** (fastrand, 2): a body replaced by `vec![]`
+  where no `vec!` is in scope does not compile, an error rustc gives no code.
+  The run measured here called those mutants `no-coverage`; this release reads
+  that error as the mutant's own, and calls them `unviable`.
+- **Time limits**: a test's limit is cargo-mutants' rule applied to that test,
+  5 × its baseline and at least 20 s, where cargo-mutants applies it to the
+  whole suite. A mutant of fastrand that makes rejection sampling loop far
+  longer ended its one test past 20 s in one run, within 5 × the suite: a
+  `timeout` here, missed there; in another run it ended in time, as there.
+
+Mutants the table does not join were left by a job's time: base64's tests
+are slow under mutation (cargo-mutants' 24 jobs reached 375 of its 619
+mutants), fastrand runs each test through nextest (27 of Supercov's left for
+a next pass), and regex-syntax's mutants of a `const fn`'s arms are each
+built on their own (19). Supercov's wall time is the larger on fastrand:
+nextest starts a process per test, against cargo-mutants' one per mutant;
+its CPU time is a fifth. Each earlier gap the benchmark found is fixed and held by a test (`CHANGELOG.md`,
+4.29.18): a probe that failed `u128` tests, `const fn` mutants read as never
+run, operator mutants that regroup their expression, unviable mutants no
+test reaches.
 
 ### Go (preview), against Gremlins 0.6.0
 
