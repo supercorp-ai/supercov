@@ -33,7 +33,19 @@ case "$runner:${LAUNCHER:-}" in
   pytest:) command=(python -m pytest -p no:cacheprovider) ;;
   pytest:script) command=(pytest -p no:cacheprovider) ;;
   pytest:uv) command=(uv run --active --no-sync pytest -p no:cacheprovider) ;;
-  pytest:poetry) command=(poetry run pytest -p no:cacheprovider) ;;
+  pytest:poetry)
+    command=(poetry run pytest -p no:cacheprovider)
+    # semver's version is dynamic (setuptools-scm), which Poetry 2 refuses
+    # in package mode: Poetry runs from a project of its own that only
+    # names no package, in the same active environment, from the same
+    # directory.
+    if [ "$project" = semver ]; then
+      shim="$dir/poetry-shim"
+      mkdir -p "$shim"
+      printf '[project]\nname = "shim"\nversion = "0"\n\n[tool.poetry]\npackage-mode = false\n' > "$shim/pyproject.toml"
+      command=(poetry --project "$shim" run pytest -p no:cacheprovider)
+    fi
+    ;;
   unittest:*) command=(python -m unittest discover -s tests -t .) ;;
 esac
 now() { date +%s.%N; }
