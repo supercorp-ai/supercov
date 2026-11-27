@@ -53,9 +53,11 @@ jobs:
             console.log(`supercov=${JSON.stringify(jobs)}`);
           ' >> "$GITHUB_OUTPUT"
 
+  # A release build from a cold cache takes longer than ten minutes; the
+  # cache it saves brings the next under five.
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0

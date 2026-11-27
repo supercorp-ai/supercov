@@ -24,8 +24,8 @@ npx supercov -- mvn test
 | Python | Available | `npx supercov -- pytest` | Preview: mutmut 3.8.1's mutants |
 | Ruby | Available | `npx supercov -- rspec` | Preview: mutant 0.17.1's mutants |
 | Go | Available | `npx supercov -- go test ./...` | Preview: Gremlins 0.6.0's mutants |
-| Java | Available | `npx supercov -- mvn test` | Not yet |
-| Kotlin | Available | `npx supercov -- ./gradlew test` | Not yet |
+| Java | Available | `npx supercov -- mvn test` | PIT 1.17.1's mutants |
+| Kotlin | Available | `npx supercov -- ./gradlew test` | PIT 1.17.1's mutants |
 | Zig | Coming soon | — | — |
 | PHP | Coming soon | — | — |
 | C | Coming soon | — | — |
@@ -37,9 +37,9 @@ The npm-distributed CLI requires Node.js 22 or newer for every language.
 `npx supercov mutants -- <test command>` lists the mutants the language's
 established tool would make of every source the run measured, says from the
 run which ones no test reaches or infects, and runs the rest against the tests
-that reach them. JavaScript, TypeScript and Rust are fully supported; Python,
-Go and Ruby are in preview, each validated against its tool on public
-projects; Java and Kotlin have no mutants yet. The Mutation testing column of
+that reach them. JavaScript, TypeScript, Rust, Java and Kotlin are fully
+supported; Python, Go and Ruby are in preview, each validated against its
+tool on public projects. The Mutation testing column of
 each runner table below says whether that runner's tests run against mutants.
 A runner without a strong driver still gets the mutants list and the weak
 report, from its coverage; its mutants are `error` in a strong pass, counted

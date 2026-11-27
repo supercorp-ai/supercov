@@ -39,7 +39,7 @@
     "targets": "com.squareup.kotlinpoet.*",
     "junit5": false,
     "jdk": "17",
-    "shards": 30
+    "shards": 12
   },
   "picnic": {
     "repository": "https://github.com/JakeWharton/picnic.git",
@@ -51,7 +51,7 @@
     "junit5": false,
     "jdk": "11",
     "gradlePlugin": "1.5.2",
-    "shards": 2
+    "shards": 1
   },
   "ant": {
     "repository": "https://github.com/apache/ant.git",

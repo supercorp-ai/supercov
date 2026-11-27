@@ -15,13 +15,14 @@ counts and verdicts can be compared with that tool's:
 | JavaScript, TypeScript | StrykerJS 10.1.1 | Full, under nine runners |
 | Python | mutmut 3.8.1 | Preview |
 | Rust | cargo-mutants 27.1.0 | Full, under `cargo test` (libtest and doctests) and cargo-nextest |
+| Java, Kotlin | PIT 1.17.1, its default mutators | Full, under JUnit 5, JUnit 4, Kotest, Spock and TestNG, with Maven, Gradle and Ant |
 | Go | Gremlins 0.6.0, every mutator | Preview |
 | Ruby | mutant 0.17.1, light operators | Preview |
 
 A preview language works end to end and was validated against its tool on
 public projects (see [Compared with the established tools](#compared-with-the-established-tools)),
 but has been run on fewer projects than JavaScript and may change in a later
-release. Java and Kotlin have no mutants in this release. On Windows,
+release. On Windows,
 Python's and Ruby's mutants are listed and the weak report reads them, but
 the strong pass does not run them: their drivers fork the loaded suite, which
 Windows cannot, so each is counted "not run" under its runner.
@@ -542,6 +543,7 @@ no mutants shows none of this.
 | JavaScript, TypeScript | Vitest, Vitest Browser Mode, Playwright, Jest, `node:test`, Mocha, AVA, node-tap, `bun:test` |
 | Python (preview) | pytest, `python -m unittest` |
 | Rust | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
+| Java, Kotlin | JUnit 5, JUnit 4 (through Vintage and under Ant's `<junit>`), Kotest, Spock, TestNG; Maven, Gradle, Ant |
 | Go (preview) | `go test` |
 | Ruby (preview) | RSpec, Minitest, test-unit, Cucumber |
 
@@ -679,6 +681,51 @@ measured run skipped (`#[ignore]`, unless the command asked for
 `--ignored` or `--include-ignored`) is recorded `skipped`, not failed, and
 is never a candidate.
 
+### Java and Kotlin
+
+The mutants are PIT's default mutators, made from source rather than bytecode
+(`ConditionalsBoundary`, `NegateConditionals`, `Math`, `Increments`,
+`InvertNegs`, `VoidMethodCall` and the return mutators), with PIT's default
+filters applied in source terms (`docs/design/jvm-mutation.md`). `supercov
+runs latest mutants --format pit` writes them as PIT's XML report, and
+`supercov runs latest mutants pit <mutations.xml>` joins a PIT report with
+the run's verdicts.
+
+The build compiles one switched copy and starts its test JVM as it always
+does (Maven's Surefire, Gradle's `test` task, Ant's `<junit>`,
+`<junitlauncher>` or `<testng>`); the pass runs inside it, as PIT's minion
+does, one test at a time by the name the measured run recorded.
+
+- **Fresh classes for each mutant**: each mutant runs in a class loader that
+  loads the project's classes afresh, so a cache or a static a test filled
+  without the mutant does not hide it.
+- **A test class's own work** (`@BeforeAll`, `@AfterAll`, a `@MethodSource`,
+  a static initializer, JUnit 4's `@BeforeClass`, a Kotest spec's body) is
+  credited to every test of its class: a mutant there runs against them.
+- **Baselines**: each test runs twice without a mutant before any mutant
+  runs against it; one that fails then is no candidate, and a kill is
+  confirmed by running the killing test again without the mutant.
+- **Time limits**: the longer of the test's measured time and its baseline,
+  × 1.5, at least 1 s; a mutant past it waits for a second round with × 3
+  and 10 s, past which it is a `timeout`. A mutant whose code loops past a
+  million evaluations is stopped there.
+- **Several JVMs** (`SUPERCOV_STRONG_JVMS`, by default half the machine's
+  processors, at most eight) share the pass; each works in a directory of
+  its own made of links to the project's files, so the files one JVM's test
+  makes or deletes are not another's.
+- **Stopping**: `--budget` stops the pass; each mutant decided is kept for
+  the next pass.
+
+Limits: a Kotest test runs through Kotest's own filter
+(`kotest.filter.tests`); where its baseline does not run that way, it runs
+with its whole spec, which is slower. Code kotlinc writes that has no source
+of its own (inlined standard-library code, property accessors, the null
+checks it adds) has no mutant here, where PIT mutates it: `mutants pit` names
+each such PIT-only mutant's category. Under TestNG, which reports no class
+boundary, work outside every test is credited to every test of the run. On
+Windows without the right to make links, the JVMs share one directory and
+say so.
+
 ### Go (preview)
 
 Each package's test binary is built once (`go test -c`); each mutant runs the
@@ -711,7 +758,6 @@ Measured on public projects pinned to a tag, every mutant of each tool joined
 by its id. A soundness violation is a mutant one tool kills and the other
 calls survived; every disagreement was applied by hand and the suite run as
 written. Each tool's settings and every disagreement are in `docs/design/`.
-Support for PIT's mutants, for Java and Kotlin, is planned.
 
 ### JavaScript and TypeScript, against StrykerJS 10.1.1
 
