@@ -31442,6 +31442,20 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
         &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
     );
     assert_eq!(gated.code(), 2, "{}", gated.stderr());
+    let critical = project.supercov_with(
+        &[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--budget",
+            "1",
+            "--critical",
+            "src/**",
+        ],
+        &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
+    );
+    assert_eq!(critical.code(), 2, "{}", critical.stderr());
     // Measured first, as the latest run recorded no values for its
     // mutants: measuring, which takes two seconds here, spends the budget,
     // and the pass runs nothing.
