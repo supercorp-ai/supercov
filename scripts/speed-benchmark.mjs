@@ -418,7 +418,7 @@ function suiteRun(round, variant, suite, binary) {
   // Every answer the run gives, in its first two rounds: two runs of one
   // binary say how far the suite itself varies, and a binary against
   // another, whether either measures differently (scripts/speed/answers.mjs).
-  if (round <= 2) {
+  if (round <= 2 && process.env.SPEED_ANSWERS !== '0') {
     run(
       project,
       process.execPath,

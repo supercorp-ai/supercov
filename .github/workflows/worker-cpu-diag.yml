@@ -1,0 +1,171 @@
+name: Worker CPU diagnostic
+
+# DIAGNOSTIC ONLY (never merged): the collector's changes against the base,
+# for exactness on deterministic browser suites and for cost on the generated
+# large app in sixteen parts (plain, base and new, twice each).
+
+on:
+  push:
+    branches: [diag/worker-cpu]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-cpu-diag-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_REF: 1cbe4805d45316fe4e85a836889d1cd417602138
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        variant: [base, new]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.variant == 'base' && env.BASE_REF || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-${{ matrix.variant }}
+      - run: cargo build --profile measure -p supercov
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  exact:
+    needs: build
+    name: exact ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bench, next]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      - run: npx -y playwright@1.49.1 install-deps chromium
+      - name: Runs
+        timeout-minutes: 8
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/exact"; mkdir -p "$out"
+          project="$RUNNER_TEMP/project"
+          if [ "${{ matrix.suite }}" = bench ]; then
+            node scripts/speed/exact-bench.mjs "$project" 4471
+            command="npx playwright test"
+            roots=public
+          else
+            cp -r tests/fixtures/next-playwright "$project"
+            command="npx playwright test --config tests/e2e/playwright.config.ts"
+            roots=
+          fi
+          cd "$project"
+          npm install --no-audit --no-fund >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+          git init -q && git add -A && git -c user.name=x -c user.email=x@example.com commit -qm fixture
+          for round in 1 2; do
+            for variant in base new; do
+              binary="$GITHUB_WORKSPACE/binaries/supercov-$variant/supercov"
+              rm -rf .supercov .next test-results
+              start=$(date +%s.%N)
+              env ${roots:+SUPERCOV_SOURCE_ROOTS=$roots} "$binary" -- $command > "$out/run-$round-$variant.log" 2>&1 || echo "$variant round $round: the suite failed"
+              echo "$variant round $round: $(echo "$(date +%s.%N) - $start" | bc) s"
+              id=$("$binary" runs latest --json | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")).data; console.log(d.run ?? d.id ?? d.runId)')
+              node "$GITHUB_WORKSPACE/scripts/speed/answers.mjs" "$binary" "$PWD" "$id" "$out/answers-$round-$variant.json"
+            done
+          done
+          for pair in "1-base 2-base" "1-new 2-new" "1-base 1-new" "2-base 2-new"; do
+            set -- $pair
+            echo "$1 against $2: $(node "$GITHUB_WORKSPACE/scripts/speed/compare-answers.mjs" "$out/answers-$1.json" "$out/answers-$2.json")" | tee -a "$out/compare.txt"
+          done
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-${{ matrix.suite }}
+          path: ${{ runner.temp }}/exact/
+          retention-days: 7
+
+  large:
+    needs: build
+    # Only for a commit that asks: the exactness jobs alone otherwise.
+    if: contains(github.event.head_commit.message, '[large]')
+    name: large ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/16', '2/16', '3/16', '4/16', '5/16', '6/16', '7/16', '8/16', '9/16', '10/16', '11/16', '12/16', '13/16', '14/16', '15/16', '16/16']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
+      - run: npx -y playwright@1.49.1 install-deps chromium
+      - run: |
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" >/dev/null 2>&1 || true
+          sudo sysctl kernel.perf_event_paranoid=1
+          perf=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          if [ -n "$perf" ] && "$perf" stat -e task-clock -x , -- true; then
+            echo "SPEED_PERF=$perf" >> "$GITHUB_ENV"
+          fi
+      # Each knob variant is the new binary with one part of the collector off.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/wrap"
+          list=""
+          for variant in ${KNOBS:-new}; do
+            binary="$GITHUB_WORKSPACE/binaries/supercov-$([ "$variant" = base ] && echo base || echo new)/supercov"
+            skip=$(case "$variant" in base|new) echo "" ;; all) echo "cookies,frames,read,prelude,initscript,binding" ;; *) echo "$variant" ;; esac)
+            printf '#!/bin/sh\nexport SUPERCOV_DIAG_SKIP=%s\nexec %s "$@"\n' "$skip" "$binary" > "$RUNNER_TEMP/wrap/$variant"
+            chmod +x "$RUNNER_TEMP/wrap/$variant"
+            list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
+          done
+          echo "KNOB_BINARIES=$list" >> "$GITHUB_ENV"
+      - name: Measure
+        timeout-minutes: 8
+        env:
+          SUPERCOV_BINARIES: ${{ env.KNOB_BINARIES }}
+          SPEED_ANSWERS: 0
+          SPEED_APP: large
+          SPEED_ROUNDS: 2
+          SPEED_OUTPUT: ${{ runner.temp }}/speed
+          SPEED_DIAGNOSE: 0
+          SPEED_SHARD: ${{ matrix.shard }}
+        run: node scripts/speed-benchmark.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/speed/samples.jsonl
+            ${{ runner.temp }}/speed/summary.md
+            ${{ runner.temp }}/speed/cpu-*.json
+            ${{ runner.temp }}/speed/logs/
+          retention-days: 7
