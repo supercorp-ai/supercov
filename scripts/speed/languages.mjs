@@ -61,7 +61,7 @@ const projects = {
   },
   'ruby-liquid': {
     repo: 'https://github.com/Shopify/liquid', ref: 'v5.5.0',
-    setup: 'bundle config set --local path vendor/bundle && bundle config set --local without development && bundle install --quiet',
+    setup: 'bundle config set --local path vendor/bundle && bundle install --quiet',
     test: 'bundle exec rake base_test TESTOPTS=--seed=1',
   },
   'jvm-gson': {
@@ -206,9 +206,9 @@ if (diagnose) {
   if (process.env.SPEED_PERF && (name.startsWith('python-') || name.startsWith('ruby-') || name.startsWith('go-'))) {
     // Supercov's own process: where its evidence and publication time goes.
     const data = join(diag, 'perf.data');
-    const { seconds } = shell(dir, `${process.env.SPEED_PERF} record -F 999 -o ${data} -- ${diagnose.path} -- ${project.test}`, 'diag-perf', true);
+    const { seconds } = shell(dir, `${process.env.SPEED_PERF} record -F 499 --call-graph dwarf,32768 -o ${data} -- ${diagnose.path} -- ${project.test}`, 'diag-perf', true);
     record({ project: name, variant: 'diag-perf', round: 0, kind: 'diag', seconds });
-    shell(dir, `${process.env.SPEED_PERF} report -i ${data} --stdio --no-children --comm supercov --sort symbol --percent-limit 0.3 > ${diag}/perf-supercov.txt 2>&1; ${process.env.SPEED_PERF} report -i ${data} --stdio --no-children --sort comm,dso --percent-limit 0.5 > ${diag}/perf-processes.txt 2>&1; rm -f ${data}`, 'diag-perf-report', true);
+    shell(dir, `${process.env.SPEED_PERF} report -i ${data} --stdio --no-children --comm supercov --sort symbol --percent-limit 0.3 -g none > ${diag}/perf-supercov.txt 2>&1; ${process.env.SPEED_PERF} report -i ${data} --stdio --children --comm supercov --sort symbol --percent-limit 2 -g none > ${diag}/perf-supercov-inclusive.txt 2>&1; ${process.env.SPEED_PERF} report -i ${data} --stdio --no-children --sort comm,dso --percent-limit 0.5 > ${diag}/perf-processes.txt 2>&1; rm -f ${data}`, 'diag-perf-report', true);
   }
   if (name.startsWith('python-') && process.env.SUPERCOV_PYSPY_BIN) {
     process.env.SUPERCOV_PYSPY = diag;

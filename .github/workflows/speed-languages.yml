@@ -104,7 +104,9 @@ jobs:
       - if: startsWith(matrix.project, 'python-')
         run: pip install -q py-spy && echo "SUPERCOV_PYSPY_BIN=$(which py-spy)" >> "$GITHUB_ENV"
       - if: startsWith(matrix.project, 'ruby-')
-        run: gem install stackprof --no-document
+        run: |
+          gem install stackprof --no-document
+          echo "SUPERCOV_STACKPROF_LIB=$(ruby -e 'puts Gem::Specification.find_by_name("stackprof").full_require_paths.join(":")')" >> "$GITHUB_ENV"
       - run: |
           sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
           sudo sysctl kernel.perf_event_paranoid=1

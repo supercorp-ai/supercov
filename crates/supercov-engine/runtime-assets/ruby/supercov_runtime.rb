@@ -2370,6 +2370,7 @@ end
 
 if ENV["SUPERCOV_STACKPROF"] && !ENV["SUPERCOV_STACKPROF"].empty?
   begin
+    ENV["SUPERCOV_STACKPROF_LIB"].to_s.split(":").reverse_each { |path| $LOAD_PATH.unshift(path) }
     require "stackprof"
     StackProf.start(mode: :cpu, interval: 500, raw: true)
     dump = Module.new do
