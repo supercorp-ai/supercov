@@ -1505,15 +1505,13 @@ fn strong_arguments(
 
 /// Runs the `[build] command` of the configuration at `config` once for the
 /// switched build `build`, whichever of the tests running side by side gets
-/// there first; the others wait for it. Where the configuration has no
-/// build, nothing runs.
+/// there first; the others wait for it. The pass builds each Worker itself
+/// first ([`build_worker`]), so this is a fallback. A build whose builder is
+/// gone (a test that ended under it) is taken over. Where the configuration
+/// has no build, nothing runs.
 fn build_once(config: &Path, build: &str) -> Result<(), String> {
-    let (_, document) = read_config(config).ok_or("its configuration could not be read")?;
-    let Some(command) = build_command(&document) else {
-        return Ok(());
-    };
     let directory = config.parent().unwrap_or(Path::new("."));
-    let marker = directory.join(".supercov-strong-worker-built");
+    let marker = directory.join(STRONG_BUILT_MARKER);
     let lock = directory.join(".supercov-strong-worker-build.lock");
     let done = || fs::read_to_string(&marker).is_ok_and(|text| text == build);
     let started = Instant::now();
@@ -1526,48 +1524,84 @@ fn build_once(config: &Path, build: &str) -> Result<(), String> {
             .create_new(true)
             .open(&lock)
         {
-            Ok(_) => break,
-            // Another test builds it: wait, unless its build was given up.
-            Err(_) if started.elapsed() < BUILD_PATIENCE => {
-                std::thread::sleep(Duration::from_millis(100));
+            Ok(mut file) => {
+                let _ = write!(file, "{}", std::process::id());
+                break;
             }
             Err(_) => {
-                let _ = fs::remove_file(&lock);
+                let builder = fs::read_to_string(&lock)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok());
+                let gone = builder.is_some_and(|pid| !process_alive(pid));
+                if gone || started.elapsed() >= BUILD_PATIENCE {
+                    let _ = fs::remove_file(&lock);
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
             }
         }
     }
-    let outcome = (|| {
-        if done() {
-            return Ok(());
-        }
-        let rustflags = worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default());
-        let mut shell = if cfg!(windows) {
-            let mut shell = std::process::Command::new("cmd");
-            shell.arg("/C");
-            shell
-        } else {
-            let mut shell = std::process::Command::new("sh");
-            shell.arg("-c");
-            shell
-        };
-        let output = shell
-            .arg(&command)
-            .current_dir(directory)
-            .env("RUSTFLAGS", rustflags)
-            .stdin(std::process::Stdio::null())
-            .launch_output()
-            .map_err(|error| format!("`{command}`: {error}"))?;
-        if !output.status.success() {
-            let said = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "`{command}` failed: {}",
-                said.lines().rev().take(5).collect::<Vec<_>>().join(" / ")
-            ));
-        }
-        fs::write(&marker, build).map_err(|error| format!("{}: {error}", marker.display()))
-    })();
+    let outcome = if done() {
+        Ok(())
+    } else {
+        build_worker(config, build, None)
+    };
     let _ = fs::remove_file(&lock);
     outcome
+}
+
+/// Marks a Worker's directory with the switched build it was built for.
+const STRONG_BUILT_MARKER: &str = ".supercov-strong-worker-built";
+
+/// Runs the `[build] command` of the configuration at `config` for the
+/// switched build `build`, with Cargo's output in `target` where given, and
+/// marks it built for that build. Nothing runs for a configuration without
+/// a build.
+pub(crate) fn build_worker(
+    config: &Path,
+    build: &str,
+    target: Option<&Path>,
+) -> Result<(), String> {
+    let (_, document) = read_config(config).ok_or("its configuration could not be read")?;
+    let directory = config.parent().unwrap_or(Path::new("."));
+    let marker = directory.join(STRONG_BUILT_MARKER);
+    let Some(command) = build_command(&document) else {
+        return fs::write(&marker, build).map_err(|error| format!("{}: {error}", marker.display()));
+    };
+    let rustflags = worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default());
+    let mut shell = if cfg!(windows) {
+        let mut shell = std::process::Command::new("cmd");
+        shell.arg("/C");
+        shell
+    } else {
+        let mut shell = std::process::Command::new("sh");
+        shell.arg("-c");
+        shell
+    };
+    shell
+        .arg(&command)
+        .current_dir(directory)
+        .env("RUSTFLAGS", rustflags)
+        .stdin(std::process::Stdio::null());
+    if let Some(target) = target {
+        shell.env("CARGO_TARGET_DIR", target);
+    }
+    let output = shell
+        .launch_output()
+        .map_err(|error| format!("`{command}`: {error}"))?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "`{command}` failed: {}",
+            said.lines().rev().take(5).collect::<Vec<_>>().join(" / ")
+        ));
+    }
+    fs::write(&marker, build).map_err(|error| format!("{}: {error}", marker.display()))
+}
+
+/// The configurations of the Rust Workers under `root`.
+pub(crate) fn rust_worker_configs(root: &Path) -> Vec<PathBuf> {
+    worker_configs(root)
 }
 
 /// How long a test waits for another's build of the Worker before taking it

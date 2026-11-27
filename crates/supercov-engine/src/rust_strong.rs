@@ -1282,6 +1282,45 @@ fn build_switched(
                     continue;
                 }
             }
+            // Each Worker built once for the tests, from the switched copy,
+            // before any test starts one: in the same target as the check, so
+            // what it compiled is not compiled again.
+            let build = runner_environment
+                .iter()
+                .find(|(name, _)| name == crate::rust_worker::STRONG_WORKER_ENV)
+                .map(|(_, build)| build.clone());
+            if let Some(build) = build {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] building the Workers with the mutants switched in"
+                );
+                let failed =
+                    crate::rust_worker::rust_worker_configs(&prepared.project.workspace_root)
+                        .iter()
+                        .find_map(|config| {
+                            crate::rust_worker::build_worker(
+                                config,
+                                &build,
+                                Some(&places.switched_target.join("wasm")),
+                            )
+                            .err()
+                        });
+                if let Some(reason) = failed {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the Workers do not build with the mutants switched in ({reason}): their tests run the Workers wrangler builds, without the mutants"
+                    );
+                    runner_environment.retain(|(name, _)| {
+                        ![
+                            "PATH",
+                            crate::rust_worker::REAL_WRANGLER,
+                            crate::rust_worker::HOOK_ENV,
+                            crate::rust_worker::STRONG_WORKER_ENV,
+                        ]
+                        .contains(&name.as_str())
+                    });
+                }
+            }
         }
         let errors = match built {
             Ok(artifacts) => {
