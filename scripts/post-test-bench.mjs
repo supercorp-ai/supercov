@@ -212,7 +212,16 @@ for (let round = 1; round <= rounds; round += 1) {
       }
       // The merged evidence, entry for entry, as a digest.
       const evidence = gunzipSync(readFileSync(join(project, '.supercov/runs', merged, 'evidence.raw.gz')));
-      keep(name, 'merged-evidence.sha256', createHash('sha256').update(evidence.toString('latin1').split(merged).join('<merged>'), 'latin1').digest('hex') + '\n');
+      const hash = createHash('sha256');
+      const needle = Buffer.from(merged);
+      for (let from = 0; ;) {
+        const at = evidence.indexOf(needle, from);
+        hash.update(evidence.subarray(from, at < 0 ? evidence.length : at));
+        if (at < 0) break;
+        hash.update('<merged>');
+        from = at + needle.length;
+      }
+      keep(name, 'merged-evidence.sha256', `${hash.digest('hex')} ${evidence.length}\n`);
       writeFileSync(join(output, `index-sections-${name}.txt`), `full: ${indexSections(join(project, '.supercov/runs', full, 'query-index.v1.bin'))}\nmerged: ${indexSections(join(project, '.supercov/runs', merged, 'query-index.v1.bin'))}\n`);
       storeSizes[name] = {
         full: sizes(join(project, '.supercov/runs', full)),
