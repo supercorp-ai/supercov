@@ -444,7 +444,7 @@ const WORKFLOWS = {
   'self-coverage': { measure: { selfCoverage: true } },
 };
 
-const SLICE_SECONDS = 900;
+const SLICE_SECONDS = 600;
 const MAX_SLICES = 10;
 // CI's check job: a part's share of the tests, in nextest seconds, which are
 // about half of Self Coverage's (no instrumentation): some three minutes on
@@ -559,7 +559,7 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       // Every test to run: the affected ones, and every test written in a
       // file the change touched -- one it added is in no map, and the lines
       // it was written for are held to the floor. Dealt into as few slices
-      // as hold them at about fifteen minutes each.
+      // as hold them at about ten minutes each.
       const written = testsInFiles(changed);
       const measured = new Set([...run, ...written]);
       selection.names = [...measured];
