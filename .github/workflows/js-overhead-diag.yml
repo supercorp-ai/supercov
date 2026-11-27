@@ -59,39 +59,6 @@ jobs:
           - { app: excalidraw, suites: unit, node: 22, offset: 3, rounds: 1, diagnose: 0, variants: 'new,hook,nosmap,cache' }
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: speed-new
-      - run: cargo build --profile measure -p supercov
-        env:
-          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
-          CARGO_PROFILE_MEASURE_STRIP: none
-      - uses: actions/upload-artifact@v4
-        with:
-          name: supercov-new
-          path: target/measure/supercov
-          retention-days: 3
-
-  measure:
-    needs: build
-    name: ${{ matrix.app }} ${{ matrix.shard }}${{ matrix.offset }} ${{ matrix.variants }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 7/16, offset: 3, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 9/16, offset: 4, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 11/16, offset: 5, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
-    steps:
-      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node || 24 }}
