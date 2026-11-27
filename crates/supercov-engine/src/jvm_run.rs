@@ -2637,6 +2637,25 @@ mod tests {
         );
     }
 
+    /// The runtime class compiles with the project's main sources, under the
+    /// project's own `--release`: gson builds for Java 7, where a lambda or
+    /// a method reference does not compile and the whole build failed.
+    #[test]
+    fn the_runtime_class_compiles_for_java_7() {
+        for (number, line) in RUNTIME_SOURCE.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") || code.starts_with('*') || code.starts_with("/*") {
+                continue;
+            }
+            let code = code.split("//").next().unwrap_or_default();
+            assert!(
+                !code.contains("->") && !code.contains("::"),
+                "Supercov.java:{}: Java 8 syntax in a class built for Java 7: {line}",
+                number + 1
+            );
+        }
+    }
+
     #[test]
     fn an_ant_source_root_is_the_directory_less_the_package() {
         let root = |relative: &str, package: &str| {

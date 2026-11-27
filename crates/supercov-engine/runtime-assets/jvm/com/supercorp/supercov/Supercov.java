@@ -564,22 +564,35 @@ public final class Supercov {
             directory,
             "server-" + System.nanoTime() + "-" + Long.toHexString(Double.doubleToLongBits(Math.random())) + ".windows");
     final long[] start = {System.currentTimeMillis()};
+    // Anonymous classes, not lambdas: this class compiles with the
+    // project's own sources, and a project may build for Java 7.
     Thread sweeper =
         new Thread(
-            () -> {
-              while (true) {
-                try {
-                  Thread.sleep(SERVER_WINDOW_MILLIS);
-                } catch (InterruptedException interrupted) {
-                  return;
+            new Runnable() {
+              @Override
+              public void run() {
+                while (true) {
+                  try {
+                    Thread.sleep(SERVER_WINDOW_MILLIS);
+                  } catch (InterruptedException interrupted) {
+                    return;
+                  }
+                  window(file, start);
                 }
-                window(file, start);
               }
             },
             "supercov-server-windows");
     sweeper.setDaemon(true);
     sweeper.start();
-    Runtime.getRuntime().addShutdownHook(new Thread(() -> window(file, start)));
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(
+                new Runnable() {
+                  @Override
+                  public void run() {
+                    window(file, start);
+                  }
+                }));
   }
 
   /** Sweeps the array into one window and appends it, if it reached anything. */
