@@ -2379,13 +2379,12 @@ fn hold_to_budget(budget_at: std::time::Instant) {
     std::thread::spawn(move || {
         let deadline = budget_at + BUDGET_DEADLINE;
         std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+        let code = budget_end_code();
         eprintln!(
-            "[supercov] still running {} s after its budget was spent, so it is ended: the verdicts it reached were saved into the run as they came, and the next pass runs the rest",
+            "[supercov] still running {} s after its budget was spent, so it is ended as a finished pass (exit {code}): the verdicts it reached were saved into the run as they came, and the next pass runs the rest",
             BUDGET_DEADLINE.as_secs()
         );
-        std::process::exit(
-            supercov_engine::process_supervision::ForwardedSignal::Sigterm.exit_code(),
-        )
+        std::process::exit(code)
     });
 }
 
@@ -2398,6 +2397,22 @@ static LIVED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSe
 /// The marks `LIVED` holds now.
 fn lived() -> BTreeSet<String> {
     LIVED.lock().expect("no thread panics holding it").clone()
+}
+
+/// Whether the pass gates on its verdicts (`--fail-on`, `--critical`): one
+/// ended at its budget before it could judge them cannot say it passed.
+static GATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The exit code of a pass ended at its budget before it ended by itself: a
+/// finished pass's, `0` (its verdicts saved, the rest left for the next
+/// pass), not a termination's 143, which a CI job reads as a crash; `2`
+/// where it gates, as its gate went unjudged.
+fn budget_end_code() -> i32 {
+    if GATED.load(std::sync::atomic::Ordering::SeqCst) {
+        2
+    } else {
+        0
+    }
 }
 
 /// Set once the pass's budget is spent: the termination that stops the
@@ -2427,16 +2442,16 @@ fn end_now(
     signal: supercov_engine::process_supervision::ForwardedSignal,
 ) -> ! {
     let _ = saving.save(results);
-    let why = if BUDGET_SPENT.load(std::sync::atomic::Ordering::SeqCst) {
-        "its budget spent".to_owned()
+    let (why, code) = if BUDGET_SPENT.load(std::sync::atomic::Ordering::SeqCst) {
+        ("its budget spent".to_owned(), budget_end_code())
     } else {
-        format!("sent {}", signal.name())
+        (format!("sent {}", signal.name()), signal.exit_code())
     };
     eprintln!(
-        "[supercov] the strong pass did not end within {} s of being told to stop ({why}), so it is ended: the verdicts it reached are saved into the run, and the next pass runs the rest",
+        "[supercov] the strong pass did not end within {} s of being told to stop ({why}), so it is ended (exit {code}): the verdicts it reached are saved into the run, and the next pass runs the rest",
         STOP_PATIENCE.as_secs()
     );
-    std::process::exit(signal.exit_code())
+    std::process::exit(code)
 }
 
 /// A pass's results so far: each mutant's verdict, what its driver said
@@ -2753,6 +2768,10 @@ fn execute(
         if budget_at.is_some_and(|at| std::time::Instant::now() >= at) {
             BUDGET_SPENT.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        GATED.store(
+            !options.fail_on.is_empty() || !options.critical.is_empty(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         // One measuring spent already runs nothing, and says so.
         if let Some(at) = budget_at.filter(|at| std::time::Instant::now() < *at) {
             hold_to_budget(at);

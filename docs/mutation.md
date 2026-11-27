@@ -449,7 +449,10 @@ merge ([CLI reference](cli.md#combine-shards)).
 - **The budget.** `--budget <seconds>` ends a job in time without a
   `timeout` around it: it counts from the command's start, measuring
   included, and past it the pass stops, saves what it decided, and exits as
-  a finished pass. Within a pass the cheapest mutants
+  a finished pass: `0`, or what `--fail-on` makes it. A pass that does not
+  end within 8 s of its budget's stop is ended, its verdicts saved, still
+  with `0` (`2` where it gates with `--fail-on` or `--critical`, whose
+  verdicts it could not judge), never a termination's 143. Within a pass the cheapest mutants
   run first, so a job cut short has decided as many as it could, and the
   mutants it left run in the next commit's pass, where the restored runs lend
   the rest of their verdicts.
