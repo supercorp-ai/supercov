@@ -14,4 +14,6 @@ case "$project" in
   cachetools) printf '\n[tool.mutmut]\nsource_paths = ["src/cachetools"]\n' ;;
   parse) printf '\n[tool.mutmut]\nsource_paths = ["parse"]\nalso_copy = ["README.rst"]\npytest_add_cli_args = ["--no-cov"]\n' ;;
   humanize) printf '\n[tool.mutmut]\nsource_paths = ["src/humanize"]\nalso_copy = ["scripts/"]\nprocess_isolation = "forkserver"\n' ;;
+  markupsafe) printf '\n[tool.mutmut]\nsource_paths = ["src/markupsafe"]\n' ;;
+  semver) printf '\n[tool.mutmut]\nsource_paths = ["src/semver"]\nalso_copy = ["docs/", "README.rst", ".pytest.ini"]\npytest_add_cli_args = ["--no-cov"]\n' ;;
 esac >> pyproject.toml

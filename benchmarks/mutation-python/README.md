@@ -11,9 +11,14 @@ The corpus and scripts that check Supercov's Python mutants against mutmut
 | cachetools | v8.0.2 | `src/cachetools/` | `unittest.TestCase` classes, run by pytest and by `python -m unittest` |
 | parse | 1.22.4 | `parse/` | pytest with `--doctest-modules`, README doctests and pytest-cov |
 | humanize | 4.17.0 | `src/humanize/` | pytest with doctests, freezegun, pytest-benchmark and translations |
+| markupsafe | 3.0.3 | `src/markupsafe/` | a C extension beside the pure Python code; a session-scoped, parametrized autouse fixture runs every test against both |
+| semver | 3.0.4 | `src/semver/` | heavily parametrized pytest, doctests of the modules and the docs' `.rst` files, `--import-mode=importlib`, pytest-cov in `addopts` |
 
 `setup.sh <project> <dir>` clones a project at its tag and installs it with
-its test dependencies (uv, Python 3.12). `mutmut-config.sh` adds mutmut's
+its test dependencies (uv, Python 3.12; `PYTHON_VERSION` and
+`INSTALLER=pip` choose another interpreter, or `python -m venv` and pip).
+markupsafe's C extension is built in place, and the setup fails if it
+cannot be imported. `mutmut-config.sh` adds mutmut's
 configuration: the source path and what the tests read beside the source
 (python-slugify's `tools/` and README, parse's README, humanize's
 `scripts/`), and humanize's `forkserver` isolation (one of its tests changes
@@ -22,7 +27,11 @@ its own parameter lists, so the suite cannot run twice in one process).
 ## Scripts
 
 - `run-supercov.sh <project> <dir> <pytest|unittest> <supercov> <out>`: one
-  measured run and its strong pass, timed; copies the verdicts.
+  measured run and its strong pass, timed; copies the verdicts. `LAUNCHER`
+  starts pytest through the environment's `pytest` script, `uv run` or
+  `poetry run` instead of `python -m pytest`. The workflow runs markupsafe
+  and semver under Python 3.10 and 3.13, pip's `pytest` script, `uv run` and
+  `poetry run`, and `compare-all.sh` compares each such pass with 3.12's.
 - `run-mutmut.sh <project> <dir> <out>`: `mutmut run` with one child per CPU,
   timed; writes mutmut's verdicts.
 - `generate.py <src>`: mutmut's mutated tree without running anything.
