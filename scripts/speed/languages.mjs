@@ -22,7 +22,7 @@ const projects = {
   },
   'python-click': {
     repo: 'https://github.com/pallets/click', ref: '8.1.7',
-    setup: 'python -m venv .venv && .venv/bin/pip install -q -e . pytest',
+    setup: 'python -m venv .venv && .venv/bin/pip install -q -e . pytest==8.3.3',
     test: '.venv/bin/python -m pytest -q -p no:cacheprovider',
   },
   'python-h11': {
@@ -45,20 +45,25 @@ const projects = {
     setup: 'bundle config set --local path vendor/bundle && bundle install --quiet',
     test: 'bundle exec rake test',
   },
-  'ruby-httparty': {
-    repo: 'https://github.com/jnunemaker/httparty', ref: 'v0.22.0',
-    setup: 'bundle config set --local path vendor/bundle && bundle install --quiet',
-    test: 'bundle exec rspec',
+  'python-jinja': {
+    repo: 'https://github.com/pallets/jinja', ref: '3.1.4',
+    setup: 'python -m venv .venv && .venv/bin/pip install -q -e . pytest==8.3.3 trio',
+    test: '.venv/bin/python -m pytest -q -p no:cacheprovider',
+  },
+  'ruby-liquid': {
+    repo: 'https://github.com/Shopify/liquid', ref: 'v5.5.0',
+    setup: 'bundle config set --local path vendor/bundle && bundle config set --local without development && bundle install --quiet',
+    test: 'bundle exec rake base_test',
   },
   'jvm-gson': {
     repo: 'https://github.com/google/gson', ref: 'gson-parent-2.11.0',
-    setup: 'mvn -q -B -DskipTests install -pl gson -am',
-    test: 'mvn -q -B -o test -pl gson',
+    setup: 'mvn -q -B -DskipTests install -pl gson -am && mvn -q -B test -pl gson',
+    test: 'mvn -q -B test -pl gson',
   },
   'jvm-commons-cli': {
     repo: 'https://github.com/apache/commons-cli', ref: 'rel/commons-cli-1.9.0',
-    setup: 'mvn -q -B -DskipTests -Drat.skip -Djapicmp.skip install',
-    test: 'mvn -q -B -o -Drat.skip -Djapicmp.skip -Danimal.sniffer.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip test',
+    setup: 'mvn -q -B -Drat.skip -Djapicmp.skip install',
+    test: 'mvn -q -B -Drat.skip -Djapicmp.skip -Danimal.sniffer.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip test',
   },
 };
 
@@ -161,6 +166,43 @@ for (const variant of variants) measure(variant, 0, 'cold');
 for (let round = 0; round < rounds; round += 1) {
   const order = round % 2 === 0 ? variants : [...variants].reverse();
   for (const variant of order) measure(variant, round, 'warm');
+}
+
+// Diagnostics, apart from the timed rounds: where the measured run's time goes.
+const diagnose = process.env.SPEED_DIAGNOSE === '1' ? binaries[binaries.length - 1] : undefined;
+if (diagnose) {
+  const dir = dirs[diagnose.label];
+  const diag = join(output, 'diag');
+  mkdirSync(diag, { recursive: true });
+  const workspace = join(dir, '.supercov', 'workspaces', 'workspace', `project-${diagnose.label}`);
+  if (name.startsWith('go-')) {
+    // The instrumented copy run by plain go: build reuse and probe cost apart
+    // from Supercov's own phases.
+    for (const attempt of [1, 2]) {
+      const { seconds } = shell(workspace, project.test, `diag-go-workspace-${attempt}`, true);
+      record({ project: name, variant: 'diag-go-workspace', round: attempt, kind: 'diag', seconds });
+    }
+    const { seconds } = shell(dir, `${diagnose.path} -- ${project.test.replace('go test', 'go test -x')}`, 'diag-go-x', true);
+    record({ project: name, variant: 'diag-go-x', round: 0, kind: 'diag', seconds });
+  }
+  if (name.startsWith('ruby-')) {
+    process.env.SUPERCOV_STACKPROF = diag;
+    const { seconds } = shell(dir, `${diagnose.path} -- ${project.test}`, 'diag-ruby-stackprof', true);
+    delete process.env.SUPERCOV_STACKPROF;
+    record({ project: name, variant: 'diag-stackprof', round: 0, kind: 'diag', seconds });
+    shell(dir, `stackprof --text --limit 60 ${diag}/*.dump > ${diag}/stackprof.txt 2>&1; stackprof --text --limit 60 --method 'Supercov::Runtime#probe_decision' ${diag}/*.dump > ${diag}/stackprof-decision.txt 2>&1 || true`, 'diag-ruby-report', true);
+  }
+  if (name.startsWith('python-') && process.env.SUPERCOV_PYSPY_BIN) {
+    process.env.SUPERCOV_PYSPY = diag;
+    const { seconds } = shell(dir, `${diagnose.path} -- ${project.test}`, 'diag-python-pyspy', true);
+    delete process.env.SUPERCOV_PYSPY;
+    record({ project: name, variant: 'diag-pyspy', round: 0, kind: 'diag', seconds });
+    shell(plainDir, `sudo -n ${process.env.SUPERCOV_PYSPY_BIN} record --rate 500 --format raw -o ${diag}/plain.txt -- ${project.test}`, 'diag-python-pyspy-plain', true);
+  }
+  if (name.startsWith('rust-')) {
+    const { seconds } = shell(dir, `${diagnose.path} -- ${project.test} 2>&1 | ts -s '%.s' || true`, 'diag-rust-ts', true);
+    record({ project: name, variant: 'diag-rust-ts', round: 0, kind: 'diag', seconds });
+  }
 }
 
 // Summary: median warm seconds per variant, ratio against plain, and the

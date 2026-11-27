@@ -17,7 +17,7 @@ concurrency:
 env:
   # A base ref to compare against, or empty to measure the head alone.
   BASE_REF: ''
-  PROJECTS: '["rust-semver","rust-ripgrep","python-click","python-h11","go-cobra","go-gin","ruby-rack","ruby-httparty","jvm-gson","jvm-commons-cli"]'
+  PROJECTS: '["rust-semver","rust-ripgrep","python-click","python-h11","python-jinja","go-cobra","go-gin","ruby-rack","ruby-liquid","jvm-gson","jvm-commons-cli"]'
 
 jobs:
   setup:
@@ -92,16 +92,21 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
       - uses: actions/download-artifact@v4
         with:
           pattern: supercov-*
           path: binaries
       - run: chmod +x binaries/*/supercov && nproc && lscpu | grep 'Model name'
+      - if: startsWith(matrix.project, 'python-')
+        run: pip install -q py-spy && echo "SUPERCOV_PYSPY_BIN=$(which py-spy)" >> "$GITHUB_ENV"
+      - if: startsWith(matrix.project, 'ruby-')
+        run: gem install stackprof --no-document
       - name: Measure
         env:
           SPEED_PROJECT: ${{ matrix.project }}
           SPEED_ROUNDS: '2'
+          SPEED_DIAGNOSE: '1'
           SPEED_OUTPUT: ${{ runner.temp }}/speed/out
           SUPERCOV_BINARIES: ${{ needs.setup.outputs.base != '' && 'base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov' || 'new=binaries/supercov-new/supercov' }}
         run: node scripts/speed/languages.mjs

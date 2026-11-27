@@ -2355,4 +2355,13 @@ module Supercov
   end
 end
 
+if ENV["SUPERCOV_STACKPROF"] && !ENV["SUPERCOV_STACKPROF"].empty?
+  begin
+    require "stackprof"
+    StackProf.start(mode: :cpu, interval: 500, raw: true)
+    at_exit { StackProf.stop; StackProf.results(File.join(ENV["SUPERCOV_STACKPROF"], "#{Process.pid}.dump")) }
+  rescue LoadError => e
+    warn("[diag] no stackprof: #{e.message}")
+  end
+end
 Supercov.install
