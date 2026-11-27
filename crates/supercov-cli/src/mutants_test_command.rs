@@ -2422,20 +2422,13 @@ impl Progress {
                     let last = results
                         .parent()
                         .and_then(crate::strong_status::last_output_line);
-                    // What the driver says it is doing stands for the
-                    // command's start-up lines: a Rust pass building is not
-                    // a command starting.
-                    let said_lines = if phase.is_some() {
-                        Vec::new()
-                    } else {
-                        crate::strong_status::lines(
-                            status.as_ref(),
-                            now,
-                            verdicts.len(),
-                            last.as_deref(),
-                        )
-                    };
-                    for line in said_lines {
+                    for line in start_up_lines(
+                        phase.as_deref(),
+                        status.as_ref(),
+                        now,
+                        verdicts.len(),
+                        last.as_deref(),
+                    ) {
                         eprintln!("{line}");
                     }
                 }
@@ -2684,6 +2677,22 @@ fn progress_line(
         count("error"),
         supercov_engine::process_supervision::format_duration(elapsed.as_millis()),
     )
+}
+
+/// The lines under the progress line: what the command's start-up says,
+/// unless the driver says what it is doing (`phase`), which stands for them
+/// -- a Rust pass building is not a command starting.
+fn start_up_lines(
+    phase: Option<&str>,
+    status: Option<&crate::strong_status::DriverStatus>,
+    now: u64,
+    decided: usize,
+    last: Option<&str>,
+) -> Vec<String> {
+    if phase.is_some() {
+        return Vec::new();
+    }
+    crate::strong_status::lines(status, now, decided, last)
 }
 
 /// The progress line's time left: the cost of the mutants left at the pace
@@ -5461,6 +5470,18 @@ mod tests {
         .collect::<std::collections::BTreeMap<_, _>>();
         let mut estimate = Estimate::default();
         let at = std::time::Instant::now();
+        // Nothing decided: no estimate yet.
+        assert_eq!(
+            estimate.left(&Default::default(), &costs, elapsed, at),
+            None
+        );
+        // While the driver says what it does, the command's start-up lines
+        // are not said.
+        assert!(start_up_lines(Some("building"), None, 0, 0, None).is_empty());
+        assert_eq!(
+            start_up_lines(None, None, 0, 0, Some("compiling")),
+            crate::strong_status::lines(None, 0, 0, Some("compiling"))
+        );
         let left = estimate.left(&decided, &costs, elapsed, at);
         assert_eq!(left, Some(std::time::Duration::from_secs(980)));
         let line = progress_line(&decided, &costs, elapsed, left, None, None);
