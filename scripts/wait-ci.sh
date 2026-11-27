@@ -37,7 +37,7 @@ if [[ $target =~ ^[0-9]{1,7}$ ]]; then
         totalCount
         checkRunCountsByState { state count }
         statusContextCountsByState { state count }
-        nodes { ... on CheckRun { name conclusion } ... on StatusContext { context state } }
+        nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } }
       } } } } } } } }'
   arguments=(-F number="$target")
 else
@@ -67,12 +67,13 @@ while true; do
       [ $commit.oid[0:8],
         $c.totalCount,
         total($pending),
-        # A check counts as failed only when no check of its name passed: a
-        # run that a newer one replaced (concurrency) shows as cancelled.
-        ([$c.nodes[] | {name: (.name // .context), result: (.conclusion // .state // "")}]
+        # A check counts as failed only when no check of its name passed or
+        # is still running: a run that a newer one replaced (concurrency)
+        # shows as cancelled.
+        ([$c.nodes[] | {name: (.name // .context), result: (.conclusion // .status // .state // "")}]
           | group_by(.name)
           | map(select(any(.[]; .result as $s | $failed | split(" ") | index($s))
-                       and (any(.[]; .result == "SUCCESS") | not)) | .[0].name)
+                       and (any(.[]; .result as $s | "SUCCESS NEUTRAL SKIPPED \($pending)" | split(" ") | index($s)) | not)) | .[0].name)
           | join(", ")),
         ($commit.statusCheckRollup.state // "NONE"),
         $pr.state ] | map(tostring) | join("\u001f")' <<<"$answer")
