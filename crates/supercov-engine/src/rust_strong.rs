@@ -560,6 +560,7 @@ fn pass(
                 &invocation,
                 &built.project,
                 &places.switched_target,
+                &places.switched_target,
             )?),
             RustCargoCommandKind::CargoTest => None,
         },
@@ -713,12 +714,13 @@ fn pass(
                     doctest: DoctestCommand::new(
                         &invocation,
                         &alone_build.project,
-                        &places.plain_target,
+                        &places.switched_target,
                     ),
                     nextest: match invocation.kind {
                         RustCargoCommandKind::NextestRun => Some(Nextest::prepare(
                             &invocation,
                             &alone_build.project,
+                            &places.switched_target,
                             &places.plain_target,
                         )?),
                         RustCargoCommandKind::CargoTest => None,
@@ -1711,7 +1713,10 @@ fn build_alone(
     let workspace = crate::fault_fs::canonicalize(&places.plain)
         .map_err(|error| format!("{}: {error}", places.plain.display()))?;
     let mut project = crate::rust_project::PreparedRustProject::plain(workspace);
-    project.target_directory = places.plain_target.clone();
+    // The switched build's target: the dependencies it built are built for
+    // this one too (Cargo keys each by what it is built from and with), and
+    // only the copy's own crates, at their own paths, are built again.
+    project.target_directory = places.switched_target.clone();
     match cargo_build(&project, invocation, stop)? {
         Err(errors) => Ok(Err(errors
             .first()
@@ -1771,6 +1776,7 @@ impl Nextest {
         invocation: &CargoTestInvocation,
         project: &crate::rust_project::PreparedRustProject,
         target: &Path,
+        own: &Path,
     ) -> Result<Self, String> {
         let position = invocation.command_position();
         let prefix = invocation.arguments[..position].to_vec();
@@ -1782,7 +1788,7 @@ impl Nextest {
             ),
         ];
         let (kept, build) = Self::options(invocation);
-        let metadata = target.join("supercov-nextest");
+        let metadata = own.join("supercov-nextest");
         // fault-site: rust-strong.prepare.create-dir-all
         crate::fault_fs::create_dir_all(&metadata)
             .map_err(|e| format!("{}: {e}", metadata.display()))?;
