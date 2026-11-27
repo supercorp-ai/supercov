@@ -268,7 +268,7 @@ export function packageIsCommonJs(root) {
 // Resident runners (strongJestHost.mjs, strongMochaHost.mjs), each running one
 // job at a time. A host whose job passes its limit is stopped, and the next
 // job starts another.
-function residentHosts({ script, args, root, environment, log }) {
+function residentHosts({ script, args, root, environment, log, asCommand = false }) {
     const idle = [];
     const all = new Set();
     const host = () => new Promise((resolveHost, rejectHost) => {
@@ -359,6 +359,10 @@ function residentHosts({ script, args, root, environment, log }) {
             for (const child of all)
                 stop(child);
         },
+        // Whether a job it stops at its limit, and a baseline that does not
+        // pass in it, run again as commands (the runners whose jobs used to
+        // start the command, and whose limits came from such a start).
+        asCommand,
     };
 }
 
@@ -458,7 +462,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // (strongVitestHost.mjs). A file it cannot run as a command would runs
     // as a command from then on (`commandOnly`).
     const vitestArgs = residentAllowed ? vitestArguments(withoutNpx(command, root)) : undefined;
-    const vitestHosts = residentHosts({ script: "strongVitestHost.mjs", args: vitestArgs, root, environment: { ...environment, SUPERCOV_STRONG_PLAN: "" }, log: join(work, "vitest-hosts.log") });
+    const vitestHosts = residentHosts({ script: "strongVitestHost.mjs", args: vitestArgs, root, environment: { ...environment, SUPERCOV_STRONG_PLAN: "" }, log: join(work, "vitest-hosts.log"), asCommand: true });
     const commandOnly = new Set();
     const commonJs = packageIsCommonJs(root);
     const broken = new Set();
@@ -658,7 +662,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                 const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
                 resolveJob(read({
                     timedOut,
-                    resident: true,
+                    resident: resident.asCommand,
                     mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
                     exitCode: error ? 1 : 0,
                     error,

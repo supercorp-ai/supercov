@@ -55,16 +55,19 @@ jobs:
           path: target/measure/supercov
           retention-days: 3
 
+  # Both binaries on one runner, taking turns (old, new, new, old): runners
+  # differ by more than the change measured, and the second run of a pair
+  # finds a warmer machine. The two old runs also show how much a verdict
+  # moves with no change at all.
   measure:
     needs: build
-    name: ${{ matrix.project }} ${{ matrix.variant }}
+    name: ${{ matrix.project }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         project: [mini-throttle, ms, dot-prop]
-        variant: [old, new]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -72,26 +75,31 @@ jobs:
           node-version: 24
       - uses: actions/download-artifact@v4
         with:
-          name: supercov-${{ matrix.variant }}
+          pattern: supercov-*
           path: bin
-      - run: chmod +x bin/supercov && nproc
+      - run: chmod +x bin/*/supercov && nproc
       - uses: ./.github/actions/system-packages
         with:
           command: npx -y playwright@1.60.0 install-deps chromium
           key: apt-chromium-strong-bench-${{ runner.os }}-${{ runner.arch }}-1.60.0
           prefix: apt-chromium-strong-bench-${{ runner.os }}-${{ runner.arch }}-
-      - name: Measure and strong pass
+      - name: Measure and strong pass, old and new in turn
         run: |
-          node benchmarks/mutation/js-runners/run.mjs --project ${{ matrix.project }} \
-            --supercov bin/supercov --out "$RUNNER_TEMP/out" --work "$RUNNER_TEMP/work" --skip-stryker 1
-          tail -40 "$RUNNER_TEMP/out/supercov-strong.log"
+          for turn in old-1 new-1 new-2 old-2; do
+            node benchmarks/mutation/js-runners/run.mjs --project ${{ matrix.project }} \
+              --supercov "bin/supercov-${turn%-*}/supercov" --out "$RUNNER_TEMP/out/$turn" --work "$RUNNER_TEMP/work" --skip-stryker 1
+          done
       - name: Where a browser job's time goes
-        if: matrix.project == 'mini-throttle' && matrix.variant == 'old'
+        if: matrix.project == 'mini-throttle'
         run: node benchmarks/mutation/js-runners/diag-browser.mjs "$RUNNER_TEMP/work/${{ matrix.project }}" 5 | tee "$RUNNER_TEMP/out/diag-browser.txt"
+      - name: Old against new
+        run: |
+          node benchmarks/mutation/js-runners/compare.mjs "$RUNNER_TEMP/out/old-1,$RUNNER_TEMP/out/old-2" "$RUNNER_TEMP/out/new-1,$RUNNER_TEMP/out/new-2" --markdown \
+            | tee -a "$GITHUB_STEP_SUMMARY"
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: bench-${{ matrix.project }}-${{ matrix.variant }}
+          name: bench-${{ matrix.project }}
           path: ${{ runner.temp }}/out
           retention-days: 7
 
@@ -153,21 +161,15 @@ jobs:
           retention-days: 7
 
   compare:
-    needs: [measure, e2e]
-    if: ${{ !cancelled() }}
+    needs: e2e
+    if: ${{ !cancelled() && needs.e2e.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
-          pattern: bench-*
+          pattern: bench-rallly-*
           path: bench
       - name: Old against new
-        run: |
-          status=0
-          for project in $(ls bench | sed -n 's/^bench-\(.*\)-old$/\1/p'); do
-            node benchmarks/mutation/js-runners/compare.mjs "bench/bench-$project-old" "bench/bench-$project-new" --markdown \
-              | tee -a "$GITHUB_STEP_SUMMARY" || status=1
-          done
-          exit $status
+        run: node benchmarks/mutation/js-runners/compare.mjs bench/bench-rallly-old bench/bench-rallly-new --markdown | tee -a "$GITHUB_STEP_SUMMARY"
