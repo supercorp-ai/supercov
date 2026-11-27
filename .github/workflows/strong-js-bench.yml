@@ -45,13 +45,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: mutation-rust-supercov
+          shared-key: strong-js-bench
           save-if: ${{ matrix.variant == 'old' }}
-      - run: cargo build --release --bin supercov
+      # Release code without the whole-program optimisation (Cargo.toml).
+      - run: cargo build --profile measure --bin supercov
       - uses: actions/upload-artifact@v4
         with:
           name: supercov-${{ matrix.variant }}
-          path: target/release/supercov
+          path: target/measure/supercov
           retention-days: 3
 
   measure:
