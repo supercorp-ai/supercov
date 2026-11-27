@@ -2372,7 +2372,15 @@ if ENV["SUPERCOV_STACKPROF"] && !ENV["SUPERCOV_STACKPROF"].empty?
   begin
     require "stackprof"
     StackProf.start(mode: :cpu, interval: 500, raw: true)
-    at_exit { StackProf.stop; StackProf.results(File.join(ENV["SUPERCOV_STACKPROF"], "#{Process.pid}.dump")) }
+    dump = Module.new do
+      define_method(:close_after_tests) do |runtime|
+        super(runtime)
+      ensure
+        StackProf.stop
+        StackProf.results(File.join(ENV["SUPERCOV_STACKPROF"], "#{Process.pid}.dump"))
+      end
+    end
+    Supercov.singleton_class.prepend(dump)
   rescue LoadError => e
     warn("[diag] no stackprof: #{e.message}")
   end

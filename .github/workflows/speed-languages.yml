@@ -52,6 +52,9 @@ jobs:
           key: speed-languages-${{ matrix.variant }}
       - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
         run: cargo build --profile measure -p supercov
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
       - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
         uses: actions/upload-artifact@v4
         with:
@@ -102,6 +105,11 @@ jobs:
         run: pip install -q py-spy && echo "SUPERCOV_PYSPY_BIN=$(which py-spy)" >> "$GITHUB_ENV"
       - if: startsWith(matrix.project, 'ruby-')
         run: gem install stackprof --no-document
+      - run: |
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
+          sudo sysctl kernel.perf_event_paranoid=1
+          perf=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          if [ -n "$perf" ] && "$perf" stat -e task-clock -x , -- true; then echo "SPEED_PERF=$perf" >> "$GITHUB_ENV"; fi
       - name: Measure
         env:
           SPEED_PROJECT: ${{ matrix.project }}
@@ -112,7 +120,14 @@ jobs:
         run: node scripts/speed/languages.mjs
       - if: always()
         run: |
-          cd "$RUNNER_TEMP/speed/out/answers" 2>/dev/null && ls -la && { [ -f base.json ] && [ -f new.json ] && (cmp base.json new.json && echo "ANSWERS IDENTICAL" || { echo "ANSWERS DIFFER"; diff base.json new.json | head -50; }) || true; }
+          a="$RUNNER_TEMP/speed/out/answers"
+          for pair in "base base-2" "new new-2" "base new" "base-2 new-2"; do
+            set -- $pair
+            if [ -f "$a/$1.json" ] && [ -f "$a/$2.json" ]; then
+              echo "== $1 vs $2"
+              node scripts/speed/canonical-answers.mjs "$a/$1.json" "$a/$2.json" | tee -a "$a/compare.txt" | tail -45 || true
+            fi
+          done
       - if: always()
         uses: actions/upload-artifact@v4
         with:
