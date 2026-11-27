@@ -983,7 +983,8 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // A shard's share is dealt from every mutant of the run, whatever has a
     // verdict already: dealt from those left, as it was, a second shard run
     // after the first against the same run took half of what the first left
-    // and left the rest without a verdict.
+    // and left the rest without a verdict. Each mutant's share follows from
+    // its id alone, so jobs whose measurements differ deal alike.
     let share = options.shard.map(|(k, n)| {
         let mut dealt = narrowed.clone();
         dealt.keep_share(k, n);
@@ -1058,8 +1059,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     {
         eprintln!("{line}");
     }
-    // A shard: the k-th of n shares of about the same cost; the decided
-    // ones with the first shard.
+    // A shard: the k-th of n shares, each mutant in one, decided or not.
     if let Some(share) = &share {
         plan.mutants.retain(|mutant| share.contains(&mutant.id));
     }

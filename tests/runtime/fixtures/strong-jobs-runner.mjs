@@ -14,7 +14,7 @@
 //   "stops" (marks the pass as told to stop, `stopped-at` beside its
 //   results, and the process ends, nothing written: a job the stop ended).
 // A test id may also carry a second rule after a comma: "slow,subset-fail".
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const suite = JSON.parse(readFileSync(process.env.FAKE_SUITE, "utf8"));
@@ -48,22 +48,33 @@ for (const [file, chosen] of Object.entries(job.files)) {
         }
         if (also === "locked" || rule === "locked") {
             // Released when its holder ends, however it ends, as Cargo's is.
+            // The lock is taken by linking a file that already holds this
+            // process's pid, so it never exists without its holder's pid: a
+            // lock created and then written, its holder stopped in between,
+            // was an empty file whose holder read as pid 0 -- this process's
+            // own group, always alive -- and every job after it waited on it
+            // until its limit.
             const lock = join(dirname(process.env.FAKE_SUITE), "build.lock");
+            const mine = `${lock}.${process.pid}`;
+            writeFileSync(mine, String(process.pid));
             for (;;) {
                 try {
-                    writeFileSync(lock, String(process.pid), { flag: "wx" });
+                    linkSync(mine, lock);
                     break;
                 }
                 catch {
                     try {
                         process.kill(Number(readFileSync(lock, "utf8")), 0);
                     }
-                    catch {
-                        rmSync(lock, { force: true });
+                    catch (error) {
+                        // Gone, or held by a process that ended.
+                        if (error.code !== "EPERM")
+                            rmSync(lock, { force: true });
                     }
                     await new Promise((done) => setTimeout(done, 10));
                 }
             }
+            rmSync(mine);
             await new Promise((done) => setTimeout(done, 800));
             rmSync(lock);
         }

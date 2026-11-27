@@ -23668,6 +23668,73 @@ fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
     );
 }
 
+/// Jobs of a split pass whose measurements differ -- a test that takes
+/// another path on one job's machine, as randomized or timing-dependent
+/// tests do -- still split the mutants between them, each mutant in one
+/// share, and their merge holds every verdict they reached: as many, and
+/// the same, as the jobs' runs added up. Dealt by cost from each job's own
+/// measurement, as up to 4.29.19, some mutants ran in two jobs and some in
+/// none, and the merge held fewer verdicts than the jobs reported.
+#[cfg(unix)]
+#[test]
+fn jobs_that_measured_differently_split_the_mutants_and_merge_every_verdict() {
+    let project = vitest_mutants_project("strong-shards-measured-apart");
+    // On one job's machine, a second test file reaches label() too: its
+    // mutants run another copy and test there, and shipping()'s do not.
+    project.write(
+        "test/again.test.js",
+        "import { expect, it } from \"vitest\";\nimport { label } from \"../src/cart.js\";\nit(\"again\", () => {\n  if (process.env.LATE) expect(label(\" a \")).toBe(\"A\");\n});\n",
+    );
+    project.commit("again");
+    let runs = project.root.join(".supercov/runs");
+    let away = project.root.join(".supercov/elsewhere");
+    std::fs::create_dir_all(&away).unwrap();
+    let verdicts = |run: &str| {
+        let saved = serde_json::from_str::<serde_json::Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // Each job on a machine of its own: the store holds no other job's run.
+    let mut jobs = Vec::new();
+    for (shard, late) in [("1/2", ""), ("2/2", "1")] {
+        let ran = project.supercov_with(
+            &[
+                "mutants", "--shard", shard, "--json", "--", "npx", "vitest", "run",
+            ],
+            &[("LATE", late)],
+        );
+        assert_eq!(ran.code(), 0, "{}", ran.stderr());
+        let run = ran.json()["run"].as_str().unwrap().to_owned();
+        jobs.push((run.clone(), verdicts(&run)));
+        std::fs::rename(runs.join(&run), away.join(&run)).unwrap();
+    }
+    for (run, _) in &jobs {
+        std::fs::rename(away.join(run), runs.join(run)).unwrap();
+    }
+    let (first, second) = (&jobs[0].1, &jobs[1].1);
+    assert!(
+        !first.is_empty() && !second.is_empty(),
+        "{first:?}\n{second:?}"
+    );
+    let twice = first
+        .keys()
+        .filter(|id| second.contains_key(*id))
+        .collect::<Vec<_>>();
+    assert!(twice.is_empty(), "in both shares: {twice:?}");
+    let merged = project.supercov(&["merge"]).succeeds();
+    let kept = verdicts(&project.latest());
+    let mut reached = first.clone();
+    reached.extend(second.clone());
+    assert_eq!(kept, reached, "{merged}");
+}
+
 /// A measured run whose command failed only because a test failed (one
 /// timing-sensitive test, unrelated to the mutated code) is continued by a
 /// shard as one whose command passed is: the failed test is no candidate,
@@ -24424,6 +24491,21 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
     assert_eq!(reply["summary"]["error"], 0, "{runner}: {reply}\n{said}");
     assert_eq!(reply["passes"][0]["driver"], "jobs", "{runner}: {reply}");
     let statuses = strong_statuses(project);
+    // Each mutant's strong verdict whole, for a failure to say why: a
+    // timeout's reason tells a job stopped at its limit from one whose
+    // mutant passed its evaluation limit.
+    let verdicts = {
+        let listed = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json();
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     for (id, status) in [
         ("src/cart.js:9:10-9:21:MethodExpression:removed", "killed"),
         ("src/cart.js:2:7-2:16:ConditionalExpression:true", "killed"),
@@ -24437,7 +24519,7 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
         assert_eq!(
             statuses.get(id).map(String::as_str),
             Some(status),
-            "{runner} {id}: {statuses:?}\n{said}"
+            "{runner} {id}: {statuses:?}\n{verdicts}\n{said}"
         );
     }
 }
@@ -29427,12 +29509,15 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         unknown.contains("git knows no commit by that name"),
         "{unknown}"
     );
-    // Two shares: what runs split between them, the decided in the first.
+    // Two shares: what runs and what is decided split between them.
     let first = plan(&["--shard", "1/2"]);
     let second = plan(&["--shard", "2/2"]);
-    assert_eq!(second["summary"]["decided"]["survived"], 0, "{second}");
-    assert_eq!(second["summary"]["decided"]["noCoverage"], 0, "{second}");
-    assert_eq!(first["summary"]["decided"], all["summary"]["decided"]);
+    for (kind, count) in all["summary"]["decided"].as_object().unwrap() {
+        let count = count.as_u64().unwrap();
+        let shared = first["summary"]["decided"][kind].as_u64().unwrap()
+            + second["summary"]["decided"][kind].as_u64().unwrap();
+        assert_eq!(shared, count, "{kind}: {first}\n{second}");
+    }
     assert_eq!(
         first["summary"]["toRun"].as_u64().unwrap() + second["summary"]["toRun"].as_u64().unwrap(),
         all["summary"]["toRun"].as_u64().unwrap()

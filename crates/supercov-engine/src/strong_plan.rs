@@ -1354,46 +1354,17 @@ impl StrongPlan {
             .sort_by_key(|mutant| costs.get(&mutant.id).copied().unwrap_or(0));
     }
 
-    /// Keeps the k-th of n shares of the mutants to run, the decided ones in
-    /// the first. The shares have about the same cost: the mutants are dealt
-    /// in turn, back and forth, most costly first, so every share gets its
-    /// part of the costly ones. The cost read here is what the plan lists --
-    /// how many copies a mutant starts and how many tests they run -- not
-    /// the tests' times: each job of a sharded pass measures the suite
-    /// itself, the times differ between jobs, and a split that read them
-    /// would put some mutants in no share and some in two.
+    /// Keeps the k-th of n shares of the mutants, decided or not. Each
+    /// mutant's share follows from its id alone (`share_of`), so every job of
+    /// a sharded pass deals the same split, whatever its own measuring found.
+    /// A split read from the plan -- what each mutant runs, which ones it
+    /// decides -- differs between jobs whose suites cover a little
+    /// differently (randomized tests, timing), and then put some mutants in
+    /// two shares and others in none, and a merge of the shards held fewer
+    /// verdicts than they reached between them.
     pub fn keep_share(&mut self, k: usize, n: usize) {
-        let by_file = self.tests_by_file();
-        let mut undecided = self
-            .mutants
-            .iter()
-            .enumerate()
-            .filter(|(_, mutant)| mutant.decided.is_none())
-            .map(|(position, mutant)| {
-                let weight = self
-                    .copies_of(mutant, &by_file)
-                    .values()
-                    .map(|tests| 1 + tests.len())
-                    .sum::<usize>();
-                (std::cmp::Reverse(weight), position)
-            })
-            .collect::<Vec<_>>();
-        undecided.sort_unstable();
-        let mut shares = vec![0usize; self.mutants.len()];
-        for (dealt, (_, position)) in undecided.into_iter().enumerate() {
-            let (round, seat) = (dealt / n, dealt % n);
-            shares[position] = if round % 2 == 0 { seat } else { n - 1 - seat };
-        }
-        let mut position = 0;
-        self.mutants.retain(|mutant| {
-            let share = shares[position];
-            position += 1;
-            if mutant.decided.is_some() {
-                k == 1
-            } else {
-                share == k - 1
-            }
-        });
+        self.mutants
+            .retain(|mutant| share_of(&mutant.id, n) == k - 1);
     }
 }
 
@@ -1411,6 +1382,17 @@ fn names_its_test_file(file: &str, test: &PlannedTest) -> bool {
             .file
             .as_deref()
             .is_some_and(|test_file| stem(test_file).contains(&source))
+}
+
+/// The share (0 to n - 1) of n that the mutant `id` is in: the first eight
+/// bytes of its id's SHA-256, modulo n. The same on every machine and in
+/// every release that keeps mutant ids, and about as many mutants in each.
+pub fn share_of(id: &str, n: usize) -> usize {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(id.as_bytes());
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(first) % n as u64) as usize
 }
 
 #[cfg(test)]
@@ -2729,70 +2711,66 @@ mod tests {
         );
     }
 
-    /// The shares split what runs by what each mutant runs, dealt back and
-    /// forth from the costliest: every share gets its costly mutants, each
-    /// mutant is in one share, and the decided ones are the first share's.
+    /// Every job of a sharded pass deals the same split, whatever its own
+    /// measuring found. Two jobs' plans of the same mutants differ as two
+    /// measurements of a suite with randomized tests do: other candidates
+    /// for some mutants, and some the one decides that the other runs. The
+    /// shares, each taken from either plan, hold every mutant exactly once.
+    /// Dealt by cost from each job's own plan, as up to 4.29.19, they put
+    /// some in two shares and some in none.
     #[test]
-    fn shares_split_the_mutants_by_what_they_run() {
-        let tests = (0..8)
-            .map(|index| {
-                (
-                    Some(if index < 4 { "a.test.js" } else { "b.test.js" }),
-                    Some(1),
-                )
-            })
+    fn shares_hold_each_mutant_once_whatever_each_job_measured() {
+        let tests = [(Some("a.test.js"), Some(1)), (Some("b.test.js"), Some(1))];
+        let ids = (0..40)
+            .map(|line| format!("src/a.js:{line}:1-{line}:2:M:x"))
             .collect::<Vec<_>>();
-        let all: [&[usize]; 7] = [
-            &[0],
-            &[0, 1, 2, 3, 4, 5, 6, 7],
-            &[1],
-            &[0, 1, 2, 3],
-            &[2],
-            &[0, 4],
-            &[3],
-        ];
-        let ids = ["m0", "m1", "m2", "m3", "m4", "m5", "m6"];
-        let mut mutants = ids
-            .iter()
-            .zip(all)
-            .map(|(id, candidates)| (*id, Some(candidates), &[] as &[&str]))
-            .collect::<Vec<_>>();
-        mutants.insert(2, ("decided", None, &[]));
-        let plan = costed(&tests, &mutants);
-        let share = |k: usize| {
-            let mut part = plan.clone();
-            part.keep_share(k, 3);
-            part.mutants
-                .iter()
-                .map(|mutant| mutant.id.clone())
-                .collect::<Vec<_>>()
-        };
-        // Weights (copies and tests): m1 10, m3 5, m5 4, then 2 each. Dealt
-        // m1 m3 m5 to shares 1 2 3, then m0 m2 m4 to 3 2 1, then m6 to 1.
-        assert_eq!(share(1), ["m1", "decided", "m4", "m6"]);
-        assert_eq!(share(2), ["m2", "m3"]);
-        assert_eq!(share(3), ["m0", "m5"]);
-        // One share is the whole plan.
-        let mut whole = plan.clone();
-        whole.keep_share(1, 1);
-        assert_eq!(whole.mutants.len(), plan.mutants.len());
+        let one: &[usize] = &[0];
+        let both: &[usize] = &[0, 1];
+        let first = costed(
+            &tests,
+            &ids.iter()
+                .map(|id| (id.as_str(), Some(one), &[] as &[&str]))
+                .collect::<Vec<_>>(),
+        );
+        let second = costed(
+            &tests,
+            &ids.iter()
+                .enumerate()
+                .map(|(line, id)| {
+                    let candidates = match line % 7 {
+                        0 => None,
+                        1 | 4 => Some(both),
+                        _ => Some(one),
+                    };
+                    (id.as_str(), candidates, &[] as &[&str])
+                })
+                .collect::<Vec<_>>(),
+        );
+        for n in [1, 2, 3, 5, 16] {
+            let mut held = BTreeMap::<String, usize>::new();
+            for k in 1..=n {
+                let mut part = if k % 2 == 1 { &first } else { &second }.clone();
+                part.keep_share(k, n);
+                for mutant in part.mutants {
+                    *held.entry(mutant.id).or_default() += 1;
+                }
+            }
+            assert_eq!(held.len(), ids.len(), "{n} shares: {held:?}");
+            assert!(held.values().all(|times| *times == 1), "{n}: {held:?}");
+        }
     }
 
-    /// A plan with no test and every mutant decided (a run that measured
-    /// nothing runnable) deals nothing: the decided mutants stay with the
-    /// first share and the others are empty.
+    /// A mutant's share is its id's alone, and stays so from release to
+    /// release: a split that changed would leave a later round's shards
+    /// apart from the verdicts their mutants already hold.
     #[test]
-    fn a_plan_with_nothing_to_run_keeps_its_decided_mutants_in_the_first_share() {
-        let plan = costed(&[], &[("decided", None, &[])]);
-        let share = |k: usize| {
-            let mut part = plan.clone();
-            part.keep_share(k, 2);
-            part.mutants
-                .iter()
-                .map(|mutant| mutant.id.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(share(1), ["decided"]);
-        assert!(share(2).is_empty());
+    fn a_mutant_s_share_is_fixed_by_its_id() {
+        let id = "src/decode.rs:103:5-103:25:FnValue:Ok(vec![1])";
+        assert_eq!([2, 3, 16].map(|n| share_of(id, n)), [1, 2, 7]);
+        assert_eq!(
+            [2, 3, 16].map(|n| share_of("src/lib.rs:12:5-12:6:BinaryOperator:-", n)),
+            [0, 1, 14]
+        );
+        assert_eq!(share_of(id, 1), 0);
     }
 }

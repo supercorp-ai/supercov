@@ -432,11 +432,13 @@ restored, it measures nothing, as below. Name the command after `--`: without it
 Every job must measure the same commit with the same dependencies, as for any
 merge ([CLI reference](cli.md#combine-shards)).
 
-- **The shares.** Each job computes the same split from its own run: the
-  mutants to run are dealt in turn, back and forth, most costly first, so
-  every share gets its part of the costly ones. A mutant's cost there is what
-  the plan lists of it, the copies of test files it starts and the tests they
-  run, not the tests' times, which differ between jobs.
+- **The shares.** Every job deals the same split, whatever its own
+  measuring found: a mutant's share follows from its id alone (a hash of
+  it), so each mutant is in exactly one share, decided or not, and the
+  shards' verdicts add up to the merge's. A split read from each job's own
+  measurement, as up to 4.29.19 (the costliest dealt first), differed where
+  the suite covers a little differently from run to run (randomized inputs,
+  timing): some mutants ran in two jobs and some in none.
 - **The budget.** `--budget <seconds>` ends a job in time without a
   `timeout` around it: it counts from the command's start, measuring
   included, and past it the pass stops, saves what it decided, and exits as
@@ -461,7 +463,8 @@ merge ([CLI reference](cli.md#combine-shards)).
   again: the run holds that run's evidence
   under an id of its own. It keeps every verdict a pass reached that the
   restored runs hold (`1317 verdict(s) kept from runs r8, r7, r6, r5: the
-  checkout is unchanged since them`), and the shares are of what is left.
+  checkout is unchanged since them`), and each job runs what is left of
+  its share.
   Mutants the plan decides without running, such as a survivor no test
   infected, are decided again, not kept. Each job's run replaces the
   restored ones of its command, so the last job's `supercov merge` takes this
@@ -472,7 +475,8 @@ merge ([CLI reference](cli.md#combine-shards)).
   the earlier rounds' verdicts, counts for the first run named.
 - **The next pass.** The restored runs lend their verdicts on a later
   commit: each job keeps every verdict nothing changed could move, from
-  whichever earlier job's run holds it, and the shares are of what is left.
+  whichever earlier job's run holds it, and each job runs what is left of
+  its share.
   Keep the merged run's parts with it: a merged run's `tests affected` is
   answered from them.
 - **Copies of one run.** Up to 4.29.5, `supercov mutants --shard` on a
