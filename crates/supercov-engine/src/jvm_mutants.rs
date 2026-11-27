@@ -6230,6 +6230,7 @@ public class M {
         );
         assert_eq!(without_annotations("String @"), "String");
         assert_eq!(without_annotations("@A(1"), "");
+        assert_eq!(without_annotations("@A("), "");
     }
 
     /// The name a loop's condition reads first: through an increment and
@@ -6791,7 +6792,7 @@ class Loops {
     /// `@CoverageIgnore`), `@NotNull` ones by either spelling (no
     /// `NullReturnVals`), a `void` method returning a value, which javac
     /// rejects: no return mutant; an abstract method, a negation returned,
-    /// and `i -= 3` on a local (an `IINC`).
+    /// `i -= 3` on a local (an `IINC`) and `i += 2` as a loop's counter.
     #[test]
     fn java_annotated_methods() {
         let source = r#"package a;
@@ -6839,6 +6840,11 @@ abstract class G {
     void down(int i) {
         i -= 3;
     }
+
+    void each(int n) {
+        for (int i = 0; i < n; i += 2) {
+        }
+    }
 }
 "#;
         let listed = enumerated("a/G.java", source);
@@ -6860,6 +6866,11 @@ abstract class G {
         assert_eq!(
             down,
             [(Mutator::Increments, Form::StepBy { operator: "-=" })]
+        );
+        // `i += 2` as the `for` update is the counter's `IINC`: dropped.
+        assert_eq!(
+            listed_on(&listed, 48),
+            ["ConditionalsBoundary:<=", "NegateConditionals:negated"]
         );
     }
 
