@@ -23723,6 +23723,21 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
     assert_eq!(reply["summary"]["error"], 0, "{runner}: {reply}\n{said}");
     assert_eq!(reply["passes"][0]["driver"], "jobs", "{runner}: {reply}");
     let statuses = strong_statuses(project);
+    // Each mutant's strong verdict whole, for a failure to say why: a
+    // timeout's reason tells a job stopped at its limit from one whose
+    // mutant passed its evaluation limit.
+    let verdicts = {
+        let listed = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json();
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     for (id, status) in [
         ("src/cart.js:9:10-9:21:MethodExpression:removed", "killed"),
         ("src/cart.js:2:7-2:16:ConditionalExpression:true", "killed"),
@@ -23736,7 +23751,7 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
         assert_eq!(
             statuses.get(id).map(String::as_str),
             Some(status),
-            "{runner} {id}: {statuses:?}\n{said}"
+            "{runner} {id}: {statuses:?}\n{verdicts}\n{said}"
         );
     }
 }
