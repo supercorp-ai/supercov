@@ -485,12 +485,13 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
             .find(|file| *file == &mutant.file || file.ends_with(&format!("/{}", mutant.file)))
             .cloned()
             .unwrap_or_else(|| mutant.file.clone());
-        for key in pit_keys(mutant) {
+        // Its own key and the names it holds: one at least.
+        pit_keys(mutant).into_iter().for_each(|key| {
             by_group
                 .entry((file.clone(), mutant.mutator.clone(), key))
                 .or_default()
                 .push(at);
-        }
+        });
     }
     // A group's mutants in code order, ours in source order, so that where
     // several share the line PIT reports (kotlinc puts a condition's jumps
@@ -540,22 +541,21 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
     let mut crowded = vec![false; pit.len()];
     let mut crowded_lines = std::collections::BTreeSet::<(String, String, String, u32)>::new();
     for ((file, mutator, key), group) in &by_group {
+        // A group holds one mutant at least, and so a line.
         let mut theirs_on_line = BTreeMap::<u32, Vec<usize>>::new();
-        for at in group {
+        group.iter().for_each(|at| {
             theirs_on_line.entry(pit[*at].line).or_default().push(*at);
-        }
-        for (line, theirs) in theirs_on_line {
+        });
+        theirs_on_line.into_iter().for_each(|(line, theirs)| {
             let ours = ours_on_line
                 .get(&(file.clone(), mutator.as_str(), key.clone(), line))
                 .copied()
                 .unwrap_or(0);
             if ours > 0 && theirs.len() > ours {
                 crowded_lines.insert((file.clone(), mutator.clone(), key.clone(), line));
-                for at in theirs {
-                    crowded[at] = true;
-                }
+                theirs.iter().for_each(|at| crowded[*at] = true);
             }
-        }
+        });
     }
     // Three passes, each taking what the one before left: the exact line,
     // then any line of the mutant's statement, then (for a return) any line
@@ -708,8 +708,7 @@ fn inlines_a_lambda(line: &str) -> bool {
             let after = line[at + name.len()..].trim_start();
             !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
                 && (after.starts_with('{')
-                    || after.starts_with('(') && after.contains("::")
-                    || after.starts_with('(') && line.contains('{'))
+                    || after.starts_with('(') && (after.contains("::") || line.contains('{')))
         })
     })
 }
@@ -758,10 +757,10 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
     let code = line.trim_start();
     let conditional = mutant.mutator.contains("Conditionals");
     if kotlin
-        && ((line.contains("->") && !line.contains('{'))
+        && ((conditional && (code.contains("when (") || code.ends_with("-> {")))
             || code.starts_with("is ")
             || code.starts_with("!is ")
-            || (conditional && (code.contains("when (") || code.ends_with("-> {"))))
+            || (line.contains("->") && !line.contains('{')))
     {
         return "a `when` branch's comparison with its subject";
     }
@@ -1677,6 +1676,7 @@ mod tests {
         assert_eq!(kotlin("Math", "        1 -> {"), "other");
         assert_eq!(kotlin("Math", "        is Int"), when);
         assert_eq!(kotlin("Math", "        !is Int"), when);
+        assert_eq!(kotlin("NegateConditionals", "        x > 1 -> {"), when);
         let assigned = "a Kotlin property assignment's setter or operator call";
         let call =
             |called: &str, line: &str| category("a/B.kt", "f", "VoidMethodCall", called, line);

@@ -155,10 +155,12 @@ impl Writer<'_> {
         let mut out = String::new();
         let mut regions = Vec::new();
         let mut placed = vec![false; holes.len()];
-        let mut rest = template.as_str();
-        while let Some(at) = rest.find('\u{1}') {
-            out.push_str(&rest[..at]);
-            let number = rest[at + 1..]
+        // Every form's template holds a hole: the text before the first,
+        // then each hole's number and the text after it.
+        let mut pieces = template.split('\u{1}');
+        out.push_str(pieces.next().expect("a split has a first piece"));
+        pieces.for_each(|piece| {
+            let number = piece
                 .chars()
                 .next()
                 .and_then(|c| c.to_digit(10))
@@ -177,9 +179,8 @@ impl Writer<'_> {
                 }
                 out.push_str(text);
             }
-            rest = &rest[at + 2..];
-        }
-        out.push_str(rest);
+            out.push_str(&piece[1..]);
+        });
         regions.push((index, (0, out.len())));
         (out, regions)
     }

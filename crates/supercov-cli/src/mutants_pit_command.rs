@@ -91,11 +91,13 @@ fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, S
     let root = std::env::current_dir().map_err(|e| e.to_string())?;
     let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
     let run = select_run(&inventory, Some(run_id)).map_err(|e| e.to_string())?;
+    // `command` refuses an empty list: there is one report at least.
     let mut pit = Vec::new();
-    for report in reports {
+    reports.iter().try_for_each(|report| {
         let text = std::fs::read_to_string(report).map_err(|e| format!("{report}: {e}"))?;
         pit.extend(supercov_engine::jvm_strong::parse_pit_report(&text));
-    }
+        Ok::<(), String>(())
+    })?;
     if !only.is_empty() {
         pit.retain(|mutant| only.iter().any(|file| file.ends_with(&mutant.file)));
     }
