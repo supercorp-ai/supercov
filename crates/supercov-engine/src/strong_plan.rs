@@ -61,6 +61,10 @@ pub struct PlannedTest {
     /// interrupted or unfinished test is none.
     #[serde(skip)]
     pub failed: bool,
+    /// Whether the measured run skipped it (`#[ignore]`, `test.skip`) in
+    /// every attempt: it ran nothing, so it neither passed nor failed.
+    #[serde(skip)]
+    pub skipped: bool,
 }
 
 /// Why a test is one of a mutant's candidates.
@@ -779,6 +783,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 span: raw.span,
                 runnable: true,
                 failed: false,
+                skipped: false,
             });
             runnable.push(true);
             stated.push(false);
@@ -794,6 +799,9 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             // Its evidence alone: the outcome is another record's.
         } else {
             runnable[index] &= passed(raw) || skipped_python(raw);
+            // Skipped until an attempt says otherwise.
+            tests[index].skipped = raw.status.as_deref() == Some("skipped")
+                && (!stated[index] || tests[index].skipped);
             stated[index] = true;
         }
         tests[index].failed |= failed(raw);
@@ -2554,6 +2562,7 @@ mod tests {
                     span: None,
                     runnable: true,
                     failed: false,
+                    skipped: false,
                 })
                 .collect(),
             mutants: mutants

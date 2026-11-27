@@ -526,3 +526,113 @@ fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
     );
     step("configuration", None, &[]);
 }
+
+/// A suite measured in parts, each naming its own tests after `--exact`
+/// (an `#[ignore]` test among them, which `cargo test` skips), merged, and
+/// its mutants run in shards of the merged run: the shards run under the
+/// parts' Cargo command, an ignored test is skipped rather than failed, and
+/// the shards' verdicts are those of one pass over the whole suite.
+#[test]
+fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
+    let project = Project::empty("strong-rust-merged");
+    project.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+    );
+    for member in ["a", "b"] {
+        project.write(
+            &format!("{member}/Cargo.toml"),
+            &format!("[package]\nname = \"{member}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        );
+    }
+    project.write(
+        "a/src/lib.rs",
+        "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(super::add(2, 3), 5);\n    }\n}\n",
+    );
+    project.write(
+        "b/src/lib.rs",
+        "pub fn big(v: u32) -> bool {\n    v > 10\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn bigs() {\n        assert!(super::big(11));\n        assert!(!super::big(10));\n    }\n\n    #[test]\n    #[ignore]\n    fn needs_credentials() {\n        assert!(super::big(100));\n        panic!(\"no credentials here\");\n    }\n}\n",
+    );
+    project.write(".gitignore", "target\n.supercov\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let part = |names: &[&str]| {
+        let mut args = vec![
+            "--", "cargo", "test", "--workspace", "--no-fail-fast", "--", "--test-threads=4",
+            "--exact",
+        ];
+        args.extend_from_slice(names);
+        project.supercov(&args).succeeds();
+        project.latest()
+    };
+    let first = part(&["tests::adds", "tests::needs_credentials"]);
+    let second = part(&["tests::bigs"]);
+    // The ignored test was skipped, not failed: no record says it did not
+    // pass.
+    let executions = serde_json::from_str::<Value>(
+        &project.read(&format!(".supercov/runs/{first}/test-executions.json")),
+    )
+    .unwrap();
+    let recorded = executions["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| (test["test"]["name"].as_str().unwrap().to_owned(), test["passed"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        [("a/src/lib.rs::tests::adds".to_owned(), Value::Bool(true))],
+        "{executions}"
+    );
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let merged = project.latest();
+    // Each shard runs on a machine of its own in CI; here, one after the
+    // other, the second continues the first's verdicts.
+    let mut last = Value::Null;
+    for shard in ["1/2", "2/2"] {
+        let ran = project.supercov(&["runs", "latest", "mutants", "test", "--shard", shard, "--json"]);
+        let reply = ran.json();
+        assert_eq!(ran.code(), 0, "{reply}\n{}", ran.stderr());
+        assert!(!ran.stderr().contains("stable Cargo invocation"), "{}", ran.stderr());
+        assert!(!ran.stderr().contains("did not pass"), "{}", ran.stderr());
+        assert_eq!(reply["summary"]["error"], 0, "{reply}");
+        assert!(reply["summary"]["ran"].as_u64() > Some(0), "{reply}");
+        last = reply;
+    }
+    let whole_pass = project.supercov(&["runs", "latest", "mutants", "test", "--json"]).json();
+    assert_eq!(whole_pass["summary"]["error"], 0, "{whole_pass}");
+    let saved = serde_json::from_str::<Value>(
+        &project.read(&format!(".supercov/runs/{}/strong-mutation.json", whole_pass["run"].as_str().unwrap())),
+    )
+    .unwrap();
+    let verdicts = saved["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(last["run"], whole_pass["run"]);
+    assert_ne!(merged, first);
+    // One pass over the whole suite, from nothing.
+    let whole = Project::empty("strong-rust-merged-whole");
+    for file in ["Cargo.toml", "a/Cargo.toml", "b/Cargo.toml", "a/src/lib.rs", "b/src/lib.rs", ".gitignore"] {
+        whole.write(file, &project.read(file));
+    }
+    whole.git(&["init", "-q"]);
+    whole.commit("fixture");
+    let reply = whole
+        .supercov(&["mutants", "--json", "--", "cargo", "test", "--workspace"])
+        .json();
+    let saved = serde_json::from_str::<Value>(
+        &whole.read(&format!(".supercov/runs/{}/strong-mutation.json", reply["run"].as_str().unwrap())),
+    )
+    .unwrap();
+    let fresh = saved["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(verdicts, fresh);
+    assert!(fresh.values().any(|status| status == "killed"), "{fresh:?}");
+}

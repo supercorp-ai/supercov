@@ -447,7 +447,7 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
     } else if !valued || own_run {
         let Some(command) = given
             .clone()
-            .or_else(|| latest.as_ref().map(|run| run.metadata.command.clone()))
+            .or_else(|| latest.as_ref().and_then(|run| test_command_of(run).ok()))
             .filter(|command| !command.is_empty())
         else {
             eprintln!(
@@ -516,6 +516,79 @@ struct Baseline<'a> {
     /// The tests that failed in it, where its command failed: none is a
     /// candidate.
     failed: Vec<String>,
+}
+
+/// The test command a run's mutants run under: its own, or, for a merged
+/// run (whose own is `supercov merge …`), its parts'. Parts that ran one
+/// command give it; Cargo commands that differ only in the test names after
+/// `--` give it without those names, since the pass names each test it runs
+/// itself. Parts that differ in anything else name no one command, and the
+/// caller is told to give it.
+fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
+    if run.metadata.merged != Some(true) {
+        return Ok(run.metadata.command.clone());
+    }
+    let kept = supercov_engine::run_store::RunInventory {
+        runs: Vec::new(),
+        rejected: Vec::new(),
+    };
+    // A part the merged run no longer holds names no command: none is
+    // then taken for it.
+    let mut commands = Vec::new();
+    for part in run
+        .metadata
+        .parents
+        .iter()
+        .flatten()
+        .filter_map(|id| supercov_engine::run_store::merged_part(&kept, run, id))
+    {
+        if !commands.contains(&part.metadata.command) {
+            commands.push(part.metadata.command);
+        }
+    }
+    let unfiltered = commands
+        .iter()
+        .map(|command| without_test_names(command))
+        .collect::<BTreeSet<_>>();
+    match (commands.len(), unfiltered.len()) {
+        (1, _) => Ok(commands.remove(0)),
+        (_, 1) => Ok(unfiltered.into_iter().next().unwrap_or_default()),
+        _ => Err(format!(
+            "run {} is a merged run, and the runs it was merged from do not share one test command ({}): give the one its mutants run under after --, as supercov runs {} mutants test -- <test command>",
+            run.id,
+            commands
+                .iter()
+                .map(|command| command.join(" "))
+                .collect::<Vec<_>>()
+                .join("; "),
+            run.id
+        )),
+    }
+}
+
+/// A Cargo test command without the test names libtest takes after `--`
+/// (`cargo test -- --exact a b` is `cargo test -- --exact`); any other
+/// command as it is.
+fn without_test_names(command: &[String]) -> Vec<String> {
+    let cargo = command.iter().any(|word| {
+        std::path::Path::new(word)
+            .file_stem()
+            .is_some_and(|stem| stem == "cargo")
+    });
+    let Some(separator) = command.iter().position(|word| word == "--").filter(|_| cargo) else {
+        return command.to_vec();
+    };
+    // libtest's options that take their value as the next word.
+    const VALUED: [&str; 6] = ["--test-threads", "--skip", "--logfile", "--format", "--color", "-Z"];
+    let mut kept = command[..=separator].to_vec();
+    let mut value = false;
+    for word in &command[separator + 1..] {
+        if value || word.starts_with('-') {
+            value = !value && VALUED.contains(&word.as_str());
+            kept.push(word.clone());
+        }
+    }
+    kept
 }
 
 /// The test files a run's tests are written in: a merged run's, those of
@@ -1176,10 +1249,11 @@ fn failed_command(run: &str, code: Option<i32>, plan: &StrongPlan) -> Option<Str
     if code == Some(0) {
         return None;
     }
+    // A test the run skipped (`#[ignore]`) is not one that did not pass.
     let not_passed = plan
         .tests
         .iter()
-        .filter(|test| !test.runnable)
+        .filter(|test| !test.runnable && !test.skipped)
         .map(|test| test.name.as_str())
         .collect::<Vec<_>>();
     let exited = code.map_or_else(
@@ -2590,10 +2664,10 @@ fn execute(
         budget_left: None,
     };
     if to_run > 0 {
-        let command = options
-            .command
-            .clone()
-            .unwrap_or_else(|| run.metadata.command.clone());
+        let command = match &options.command {
+            Some(command) => command.clone(),
+            None => test_command_of(run).map_err(Stop::Failed)?,
+        };
         if command.is_empty() {
             return Err(Stop::Failed(
                 "the run recorded no command: give one after --".into(),
@@ -3743,6 +3817,7 @@ mod tests {
                 span: None,
                 runnable: true,
                 failed: false,
+                skipped: false,
             })
             .to_vec();
         let mutant = |id: &str, language: &str, candidates: &[usize]| PlannedMutant {
@@ -3854,6 +3929,7 @@ mod tests {
                     span: None,
                     runnable: *runnable,
                     failed: false,
+                    skipped: false,
                 })
                 .collect(),
             mutants: weak
@@ -3959,6 +4035,31 @@ mod tests {
         assert!(no_test_message("r1", &tape, None, &plan).contains("ran none, so"));
     }
 
+    /// A Cargo command's test names after `--` are what parts of one suite
+    /// differ in; its options and their values stay, and another runner's
+    /// command is kept whole.
+    #[test]
+    fn a_cargo_command_without_its_test_names_keeps_its_options() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            without_test_names(&words(
+                "cargo test --workspace --no-fail-fast -- --test-threads=4 --exact a::b c"
+            )),
+            words("cargo test --workspace --no-fail-fast -- --test-threads=4 --exact")
+        );
+        assert_eq!(
+            without_test_names(&words(
+                "/usr/bin/cargo test -p x -- --test-threads 2 --skip slow --nocapture name"
+            )),
+            words("/usr/bin/cargo test -p x -- --test-threads 2 --skip slow --nocapture")
+        );
+        assert_eq!(without_test_names(&words("cargo test name")), words("cargo test name"));
+        assert_eq!(
+            without_test_names(&words("node --test -- a.test.js")),
+            words("node --test -- a.test.js")
+        );
+    }
+
     /// A failed command is said with the tests that did not pass, the first
     /// three of them; a passing one is not.
     #[test]
@@ -3977,6 +4078,14 @@ mod tests {
             failed_command("r1", None, &four)
                 .unwrap()
                 .starts_with("run r1's command ended without an exit status: 4 of its 4 test(s) did not pass (a, b, c, ...)")
+        );
+        // An ignored test the run skipped did not fail: one real failure.
+        let mut ignored = plan_of(&[("a", false), ("skipped", false)], &[]);
+        ignored.tests[1].skipped = true;
+        assert!(
+            failed_command("r1", Some(101), &ignored)
+                .unwrap()
+                .contains("1 of its 2 test(s) did not pass (a)")
         );
         let none = plan_of(&[("a", true)], &[]);
         assert!(
@@ -4196,6 +4305,7 @@ mod tests {
             span: None,
             runnable: true,
             failed: false,
+            skipped: false,
         }
     }
 
