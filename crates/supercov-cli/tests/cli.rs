@@ -6441,7 +6441,7 @@ fn a_second_run_restores_the_browser_runtime_the_bundled_modules_import() {
     let file = project
         .supercov(&["runs", "latest", "file", "app/price.mjs"])
         .succeeds();
-    assert!(file.contains("Tests touching this file: 1"), "{file}");
+    assert!(file.contains("Lines not executed              0"), "{file}");
 }
 
 /// Vitest reads `@vitest-environment` (and `@jest-environment`) anywhere in
@@ -31029,7 +31029,7 @@ fn a_ruby_suite_whose_coverage_tool_stops_coverage_is_still_measured() {
     let file = project
         .supercov(&["runs", "latest", "file", "lib/w.rb"])
         .succeeds();
-    assert!(file.contains("Tests touching this file: 1"), "{file}");
+    assert!(file.contains("Lines not executed              0"), "{file}");
 }
 
 /// A Ruby run measured for mutants records, per test, whether each mutant
