@@ -1041,25 +1041,31 @@ fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
 }
 
 /// Each file under `copy` (its build directory aside): its contents' hash
-/// and its modification time.
+/// and its modification time. What cannot be read is left out, and so
+/// keeps whatever time it gets.
 fn file_times(copy: &Path) -> HashMap<PathBuf, (u64, std::time::SystemTime)> {
     fn walk(directory: &Path, found: &mut HashMap<PathBuf, (u64, std::time::SystemTime)>) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
+        // fault-site: rust-strong.file-times.read-dir
+        let Ok(entries) = crate::fault_fs::read_dir(directory) else {
             return;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if metadata.is_dir() {
-                if entry.file_name() != "target" {
-                    walk(&path, found);
+        for path in entries.flatten().map(|entry| entry.path()) {
+            // fault-site: rust-strong.file-times.metadata
+            let metadata = crate::fault_fs::symlink_metadata(&path);
+            match metadata {
+                Ok(metadata) if metadata.is_dir() => {
+                    if path.file_name().is_some_and(|name| name != "target") {
+                        walk(&path, found);
+                    }
                 }
-            } else if metadata.is_file()
-                && let (Ok(modified), Ok(bytes)) = (metadata.modified(), std::fs::read(&path))
-            {
-                found.insert(path, (content_hash(&bytes), modified));
+                Ok(metadata) if metadata.is_file() => {
+                    // fault-site: rust-strong.file-times.read
+                    let bytes = crate::fault_fs::read(&path);
+                    if let (Ok(modified), Ok(bytes)) = (metadata.modified(), bytes) {
+                        found.insert(path, (content_hash(&bytes), modified));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1079,16 +1085,17 @@ fn content_hash(bytes: &[u8]) -> u64 {
 /// the time it had then: rewritten to the same bytes, it is not a change
 /// for Cargo, whose fingerprints read file times.
 fn keep_unchanged_times(copy: &Path, before: &HashMap<PathBuf, (u64, std::time::SystemTime)>) {
-    for (path, (hash, modified)) in file_times(copy) {
-        let Some((was_hash, was_modified)) = before.get(&path) else {
+    for (path, now) in file_times(copy) {
+        let Some(was) = before
+            .get(&path)
+            .filter(|was| was.0 == now.0 && was.1 != now.1)
+        else {
             continue;
         };
-        if *was_hash == hash
-            && *was_modified != modified
-            && let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path)
-        {
-            let _ = file.set_modified(*was_modified);
-        }
+        // fault-site: rust-strong.keep-unchanged-times.open
+        let file = crate::fault_fs::open_with(std::fs::OpenOptions::new().write(true), &path);
+        // A file that cannot be opened is rebuilt, as before.
+        let _ = file.and_then(|file| file.set_modified(was.1));
     }
 }
 
@@ -5087,7 +5094,8 @@ mod tests {
     /// A switched build put back and switched again leaves each file that
     /// ends as it was with the time it had, and only a file whose bytes
     /// changed with a new one: Cargo then rebuilds only the crates whose
-    /// switches changed. The build directory is not read.
+    /// switches changed. The build directory is not read; a file new since,
+    /// one left alone, a link and what cannot be read change nothing.
     #[test]
     fn a_file_rewritten_to_the_same_bytes_keeps_its_time() {
         let root = std::env::temp_dir().join(format!(
@@ -5098,17 +5106,33 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        for file in ["a/src/lib.rs", "b/src/lib.rs", "target/debug/out"] {
+        for file in [
+            "a/src/lib.rs",
+            "b/src/lib.rs",
+            "c/src/lib.rs",
+            "target/debug/out",
+        ] {
             std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
             std::fs::write(root.join(file), "switched").unwrap();
         }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("a/src/lib.rs"), root.join("link.rs")).unwrap();
         let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        for file in ["a/src/lib.rs", "b/src/lib.rs"] {
+        let time = |file: &str| {
+            std::fs::metadata(root.join(file))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        let set = |file: &str| {
             let handle = std::fs::OpenOptions::new()
                 .write(true)
                 .open(root.join(file))
                 .unwrap();
             handle.set_modified(old).unwrap();
+        };
+        for file in ["a/src/lib.rs", "b/src/lib.rs", "c/src/lib.rs"] {
+            set(file);
         }
         let before = file_times(&root);
         assert!(
@@ -5116,21 +5140,35 @@ mod tests {
                 .keys()
                 .any(|path| path.starts_with(root.join("target")))
         );
-        // Put back as written, then switched again: `a` as before, `b` not.
+        assert_eq!(before.len(), 3, "{before:?}");
+        // Put back as written, then switched again: `a` as before, `b` not;
+        // `c` left alone, `d` new.
         for file in ["a/src/lib.rs", "b/src/lib.rs"] {
             std::fs::write(root.join(file), "written").unwrap();
         }
         std::fs::write(root.join("a/src/lib.rs"), "switched").unwrap();
         std::fs::write(root.join("b/src/lib.rs"), "switched otherwise").unwrap();
+        std::fs::write(root.join("d.rs"), "new").unwrap();
+        // A file that cannot be opened keeps its new time.
+        crate::fault::during("fs.open_with#rust-strong.keep-unchanged-times.open", || {
+            keep_unchanged_times(&root, &before)
+        });
+        assert!(time("a/src/lib.rs") > old);
         keep_unchanged_times(&root, &before);
-        let time = |file: &str| {
-            std::fs::metadata(root.join(file))
-                .unwrap()
-                .modified()
-                .unwrap()
-        };
         assert_eq!(time("a/src/lib.rs"), old);
         assert!(time("b/src/lib.rs") > old);
+        assert_eq!(time("c/src/lib.rs"), old);
+        // What cannot be listed, described or read is left out.
+        for fault in [
+            "fs.read_dir#rust-strong.file-times.read-dir",
+            "fs.symlink_metadata#rust-strong.file-times.metadata",
+            "fs.read#rust-strong.file-times.read",
+        ] {
+            assert!(
+                crate::fault::during(fault, || file_times(&root)).is_empty(),
+                "{fault}"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }
