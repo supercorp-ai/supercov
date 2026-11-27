@@ -2036,6 +2036,16 @@ fn run_view_of(
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
     let comparison = checkout_comparison(root, run);
+    // The whole run's view is kept beside it; only some of its tests' is
+    // built from the evidence each time.
+    if filter.is_none() {
+        let mut view = supercov_engine::run_store::open_or_build_run_view(run, |run| {
+            analyze_stored_run_filtered(run, None)
+        })?;
+        view.stale = comparison.stale;
+        view.stale_reasons = comparison.reasons;
+        return Ok(view);
+    }
     let report = analyze_stored_run_filtered(run, filter)?;
     let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing

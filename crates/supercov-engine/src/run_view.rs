@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::coverage_analysis::CoverageSummary;
 use crate::coverage_report::{CoverageView, coverage_summary_for_file};
@@ -23,7 +23,8 @@ pub const RUN_VIEW_SCHEMA_VERSION: u32 = 1;
 /// Assertion assessment is deliberately absent. It answers a different
 /// question -- whether a test checks what it executes -- and its own check
 /// already carries the freshness and acknowledgement rules that answer costs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Metric {
     Lines,
@@ -72,7 +73,8 @@ impl Metric {
 }
 
 /// Whether a metric can be judged at all, before any number is compared.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum Applicability {
     /// Measured exactly. Only this state can pass or fail a floor.
@@ -87,7 +89,8 @@ pub enum Applicability {
     Incomplete { unmeasured: usize },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricView {
     pub metric: Metric,
@@ -163,14 +166,16 @@ fn metrics_of(summary: &CoverageSummary) -> Vec<MetricView> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Location {
     pub line: usize,
     pub column: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionRecord {
     pub line: usize,
@@ -180,7 +185,8 @@ pub struct FunctionRecord {
 
 /// One alternative of one branch, in the shape every export format wants:
 /// which decision it belongs to and whether it was taken.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchRecord {
     pub line: usize,
@@ -192,7 +198,8 @@ pub struct BranchRecord {
 /// A statement or a function as the frontend recorded it: where it starts,
 /// in the frontend's own column convention, and the source it spans, which
 /// places its end exactly once it is found in the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PointSite {
     pub function: bool,
     pub line: usize,
@@ -203,7 +210,8 @@ pub struct PointSite {
 }
 
 /// A branch as the frontend recorded it, with each alternative's outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchSite {
     pub kind: String,
     pub line: usize,
@@ -214,7 +222,8 @@ pub struct BranchSite {
 
 /// One condition of a decision: where the decision is, which of its
 /// conditions this is, and whether its independent effect was shown.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConditionRecord {
     pub line: usize,
     pub column: usize,
@@ -223,7 +232,8 @@ pub struct ConditionRecord {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileView {
     pub file: String,
@@ -280,7 +290,8 @@ pub struct Blocker {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunView {
     pub schema_version: u32,

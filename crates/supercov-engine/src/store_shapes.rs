@@ -176,6 +176,15 @@ fn stored() -> Vec<Stored> {
             read_only: false,
         },
         Stored {
+            file: crate::run_store::RUN_VIEW_FILE,
+            version: Some((
+                "run_store::RUN_VIEW_FILE_VERSION",
+                crate::run_store::RUN_VIEW_FILE_VERSION,
+            )),
+            shape: shape::<crate::run_store::KeptRunView>,
+            read_only: false,
+        },
+        Stored {
             file: "strong-mutation.json",
             version: Some((
                 "strong_plan::STRONG_VERDICTS_SCHEMA_VERSION",

@@ -1157,6 +1157,17 @@ pub(crate) fn publish_run_with_fault(
                         );
                     }
                 }),
+                // The view every report and gate reads: without it, each
+                // analysed the evidence again.
+                scope.spawn(move || {
+                    let view = crate::run_store::run_view_from_report(derived, report);
+                    if crate::run_store::write_run_view(derived, view, (evidence_sha256, copied))
+                        .is_err()
+                    {
+                        let _ =
+                            fs::remove_file(derived.directory.join(crate::run_store::RUN_VIEW_FILE));
+                    }
+                }),
             ]
         });
         let prepared = crate::source_manifest::prepare_publication_with(
