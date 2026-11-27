@@ -1040,6 +1040,58 @@ fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
     walk(root, copy, true).map_err(|error| format!("{}: {error}", copy.display()))
 }
 
+/// Each file under `copy` (its build directory aside): its contents' hash
+/// and its modification time.
+fn file_times(copy: &Path) -> HashMap<PathBuf, (u64, std::time::SystemTime)> {
+    fn walk(directory: &Path, found: &mut HashMap<PathBuf, (u64, std::time::SystemTime)>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                if entry.file_name() != "target" {
+                    walk(&path, found);
+                }
+            } else if metadata.is_file()
+                && let (Ok(modified), Ok(bytes)) = (metadata.modified(), std::fs::read(&path))
+            {
+                found.insert(path, (content_hash(&bytes), modified));
+            }
+        }
+    }
+    let mut found = HashMap::new();
+    walk(copy, &mut found);
+    found
+}
+
+fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Gives each file under `copy` whose contents are as `before` found them
+/// the time it had then: rewritten to the same bytes, it is not a change
+/// for Cargo, whose fingerprints read file times.
+fn keep_unchanged_times(copy: &Path, before: &HashMap<PathBuf, (u64, std::time::SystemTime)>) {
+    for (path, (hash, modified)) in file_times(copy) {
+        let Some((was_hash, was_modified)) = before.get(&path) else {
+            continue;
+        };
+        if *was_hash == hash
+            && *was_modified != modified
+            && let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path)
+        {
+            let _ = file.set_modified(*was_modified);
+        }
+    }
+}
+
 /// A build of the project and how to run its tests.
 struct Built {
     project: crate::rust_project::PreparedRustProject,
@@ -1191,8 +1243,6 @@ fn switched_build(
     invocation: &CargoTestInvocation,
     stop: &Stop,
 ) -> Result<(crate::rust_project::StrongWorkspace, BuildOutcome), String> {
-    // fault-site: rust-strong.switched-build
-    sync_project(root, &places.switched)?;
     let mut by_file = BTreeMap::<String, Vec<(u64, RustMutant)>>::new();
     for at in chosen {
         let job = &jobs[*at];
@@ -1201,8 +1251,16 @@ fn switched_build(
             .or_default()
             .push((job.ordinal, job.mutant.clone()));
     }
-    let mut prepared = crate::rust_project::prepare_rust_strong_project(&places.switched, &by_file)
-        .map_err(|error| error.to_string())?;
+    // The copy is put back as written, then switched again: a file that ends
+    // as it was keeps its time, so Cargo rebuilds only the crates whose
+    // switches changed, not every crate that holds a mutant.
+    let before = file_times(&places.switched);
+    // fault-site: rust-strong.switched-build
+    sync_project(root, &places.switched)?;
+    let prepared = crate::rust_project::prepare_rust_strong_project(&places.switched, &by_file)
+        .map_err(|error| error.to_string());
+    keep_unchanged_times(&places.switched, &before);
+    let mut prepared = prepared?;
     prepared.project.target_directory = places.switched_target.clone();
     let built = cargo_build(&prepared.project, invocation, stop)?;
     Ok((prepared, built))
@@ -5023,6 +5081,56 @@ mod tests {
             said.contains("without the mutants (they do not build for wasm: unplaced"),
             "{said}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A switched build put back and switched again leaves each file that
+    /// ends as it was with the time it had, and only a file whose bytes
+    /// changed with a new one: Cargo then rebuilds only the crates whose
+    /// switches changed. The build directory is not read.
+    #[test]
+    fn a_file_rewritten_to_the_same_bytes_keeps_its_time() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-times-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for file in ["a/src/lib.rs", "b/src/lib.rs", "target/debug/out"] {
+            std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            std::fs::write(root.join(file), "switched").unwrap();
+        }
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for file in ["a/src/lib.rs", "b/src/lib.rs"] {
+            let handle = std::fs::OpenOptions::new()
+                .write(true)
+                .open(root.join(file))
+                .unwrap();
+            handle.set_modified(old).unwrap();
+        }
+        let before = file_times(&root);
+        assert!(
+            !before
+                .keys()
+                .any(|path| path.starts_with(root.join("target")))
+        );
+        // Put back as written, then switched again: `a` as before, `b` not.
+        for file in ["a/src/lib.rs", "b/src/lib.rs"] {
+            std::fs::write(root.join(file), "written").unwrap();
+        }
+        std::fs::write(root.join("a/src/lib.rs"), "switched").unwrap();
+        std::fs::write(root.join("b/src/lib.rs"), "switched otherwise").unwrap();
+        keep_unchanged_times(&root, &before);
+        let time = |file: &str| {
+            std::fs::metadata(root.join(file))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        assert_eq!(time("a/src/lib.rs"), old);
+        assert!(time("b/src/lib.rs") > old);
         let _ = std::fs::remove_dir_all(root);
     }
 }
