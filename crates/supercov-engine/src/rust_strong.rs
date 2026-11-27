@@ -4556,5 +4556,27 @@ mod tests {
                 "{reason}"
             );
         }
+        // Resumed from candidates an earlier pass ran, whose reach is not
+        // kept, a mutant is judged as before: a survivor.
+        let mut plan: Value =
+            serde_json::from_slice(&std::fs::read(&request.plan).unwrap()).unwrap();
+        for mutant in plan["mutants"].as_array_mut().unwrap() {
+            mutant["passedBefore"] = json!(1);
+        }
+        std::fs::write(&request.plan, serde_json::to_vec(&plan).unwrap()).unwrap();
+        let resumed = StrongRustRequest {
+            results: request.root.join("resumed.jsonl"),
+            ..request.clone()
+        };
+        assert_eq!(run_strong_rust(&resumed, &mut Vec::new()), Ok(0));
+        let found = verdicts(&resumed);
+        let apart = found
+            .iter()
+            .filter(|(id, _)| id.starts_with("src/lib.rs:5:"))
+            .collect::<Vec<_>>();
+        assert!(!apart.is_empty(), "{found:?}");
+        for (id, verdict) in apart {
+            assert_eq!(verdict["status"], "survived", "{id}: {verdict}");
+        }
     }
 }
