@@ -95,8 +95,65 @@ jobs:
           path: ${{ runner.temp }}/out
           retention-days: 7
 
+  # A real Playwright suite (benchmarks/mutation/playwright-rallly.mjs): add
+  # the `strong-bench-e2e` label as well.
+  e2e:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'strong-bench-e2e')
+    name: rallly ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [old, new]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rallly
+        ports:
+          - 5450:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      mailpit:
+        image: axllent/mailpit
+        ports:
+          - 1025:1025
+          - 8025:8025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: bin
+      - run: chmod +x bin/supercov && nproc
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx -y playwright@1.49.1 install-deps chromium
+          key: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-1.49.1
+          prefix: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-
+      - name: Measure and strong pass
+        run: node benchmarks/mutation/playwright-rallly.mjs --supercov bin/supercov --out "$RUNNER_TEMP/out" --work "$RUNNER_TEMP/work" --budget 420
+      - name: Where the pass's time went
+        if: ${{ !cancelled() }}
+        run: node benchmarks/mutation/playwright-breakdown.mjs "$RUNNER_TEMP/out/strong" --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-rallly-${{ matrix.variant }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
   compare:
-    needs: measure
+    needs: [measure, e2e]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
