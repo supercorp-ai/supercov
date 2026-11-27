@@ -1080,7 +1080,9 @@ fn compile_error(message: &Value, workspace: &Path) -> CompileError {
                 continue;
             };
             let path = Path::new(file);
-            let relative = if path.is_absolute() {
+            // `/rustc/…/library/…` has a root but, on Windows, no drive: it is
+            // no less outside the workspace there.
+            let relative = if path.has_root() {
                 // fault-site: rust-strong.compile-error
                 crate::fault_fs::canonicalize(path)
                     .ok()
@@ -1968,10 +1970,12 @@ impl TestRunner<'_> {
         };
         command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
         let (ran, stdout, _) = timed(&mut command, limit, &self.stop);
+        // rustdoc writes the path with the platform's separator; the plan's
+        // doctest ids use `/` everywhere, and a kill names its test by its id.
         let failed = stdout.lines().find_map(|line| {
             line.strip_prefix("test ")
                 .and_then(|rest| rest.strip_suffix(" ... FAILED"))
-                .map(str::to_owned)
+                .map(|name| name.replace('\\', "/"))
         });
         (ran, failed)
     }
@@ -3201,13 +3205,9 @@ mod tests {
         );
         let doctest = &found["src/lib.rs:5:7-5:8:BinaryOperator:-"];
         assert_eq!(doctest["status"], "timeout", "{found:?}");
-        // rustdoc names a doctest by its file's path as the platform writes it.
-        let named = if cfg!(windows) {
-            "src\\lib.rs - a (line 1)"
-        } else {
-            "src/lib.rs - a (line 1)"
-        };
-        assert_eq!(doctest["killedBy"], named);
+        // rustdoc names a doctest by its file's path as the platform writes
+        // it; the kill names it by its id, with `/` on every platform.
+        assert_eq!(doctest["killedBy"], "src/lib.rs - a (line 1)");
         let untested = &found["src/lib.rs:5:7-5:8:BinaryOperator:*"];
         assert_eq!(untested["reason"], "no test can kill it", "{found:?}");
         let _ = std::fs::remove_dir_all(root);
