@@ -4281,7 +4281,7 @@ impl Enumerator<'_> {
         };
         // Kotlin marks a non-null reference return `@NotNull`, which PIT
         // reads as a promise that `null` is never returned.
-        let nullable = kotlin_declared_nullable(node, self.source);
+        let nullable = kotlin_declared_nullable(node);
         let not_null = !nullable || modifiers.contains("@NotNull");
         {
             let method = self.methods.last_mut().expect("pushed");
@@ -4999,9 +4999,9 @@ impl Enumerator<'_> {
             .child_by_field_name("operator")
             .map(|op| text(op, self.source).to_owned())
             .unwrap_or_default();
-        let Some(operand) = node.child_by_field_name("argument") else {
-            return;
-        };
+        let operand = node
+            .child_by_field_name("argument")
+            .expect("the grammar gives a unary expression its operand");
         match operator.as_str() {
             // `!a.b()` is `!(a.b())`, which the grammar reads as `(!a).b()`:
             // the chain holds the jump, and `a` is its receiver.
@@ -5042,12 +5042,12 @@ impl Enumerator<'_> {
             .child_by_field_name("operator")
             .map(|op| text(op, self.source).to_owned())
             .unwrap_or_default();
-        let (Some(left), Some(right)) = (
-            node.child_by_field_name("left"),
-            node.child_by_field_name("right"),
-        ) else {
-            return;
-        };
+        let left = node
+            .child_by_field_name("left")
+            .expect("the grammar gives an assignment its target");
+        let right = node
+            .child_by_field_name("right")
+            .expect("the grammar gives an assignment its value");
         if operator != "=" {
             let ty = self.kotlin_type_of(left);
             if ty.prim().is_some_and(Prim::numeric) || ty == Ty::Unknown {
@@ -5060,26 +5060,31 @@ impl Enumerator<'_> {
     }
 
     fn kotlin_loop_counter(&mut self, node: Node) {
-        let Some(condition) = node.child_by_field_name("condition") else {
-            return;
-        };
+        let condition = node
+            .child_by_field_name("condition")
+            .expect("the grammar gives a while loop its condition");
         let mut first = strip_parens(condition);
         while first.kind() == "binary_expression" {
-            match first.child_by_field_name("left") {
-                Some(left) => first = strip_parens(left),
-                None => break,
-            }
+            first = strip_parens(
+                first
+                    .child_by_field_name("left")
+                    .expect("the grammar gives a binary expression its left operand"),
+            );
         }
         if first.kind() != "identifier" {
             return;
         }
         let counter = text(first, self.source).to_owned();
-        let body = named_children(node).find(|child| child.kind() == "block");
-        let last = body.and_then(|body| {
-            named_children(body)
+        // The body follows the condition: a block, or one statement.
+        let body = named_children(node)
+            .last()
+            .filter(|body| *body != condition);
+        let last = match body {
+            Some(body) if body.kind() == "block" => named_children(body)
                 .filter(|child| !child.kind().ends_with("comment"))
-                .last()
-        });
+                .last(),
+            other => other,
+        };
         let Some(last) = last else {
             return;
         };
@@ -5096,9 +5101,9 @@ impl Enumerator<'_> {
     }
 
     fn kotlin_return(&mut self, statement: Node, value: Node) {
-        let Some(method) = self.method() else {
-            return;
-        };
+        let method = self
+            .method()
+            .expect("a return is walked inside the method it returns from");
         let Some(returns) = method.returns.clone() else {
             return;
         };
@@ -5153,13 +5158,7 @@ impl Enumerator<'_> {
         }
         let witness = method.written_returns.clone();
         let method_name = method.name.clone();
-        let cast = match (&returns, self.language) {
-            (Ty::Prim(prim @ (Prim::Byte | Prim::Short | Prim::Char)), JvmLanguage::Java) => {
-                Some(prim.java())
-            }
-            _ => None,
-        };
-        let probe = return_probe(value, cast);
+        let probe = return_probe(value, None);
         let before = self.mutants.len();
         for replacement in replacements {
             self.push(
@@ -5179,9 +5178,7 @@ impl Enumerator<'_> {
             );
         }
         // One probe serves every return mutant of the value.
-        let placeable = self.language == JvmLanguage::Java || !ends_in_braced_branch(value);
-        if placeable
-            && self.mutants.len() > before
+        if !ends_in_braced_branch(value)
             && let Some(first) = self.mutants.get_mut(before)
         {
             first.probe = Some(probe);
@@ -5211,12 +5208,12 @@ impl Enumerator<'_> {
                 match operator.as_str() {
                     "<" | "<=" | ">" | ">=" | "!=" | "===" | "!==" | "&&" | "||" => Tail::Zero,
                     "==" => {
-                        let (Some(left), Some(right)) = (
-                            value.child_by_field_name("left"),
-                            value.child_by_field_name("right"),
-                        ) else {
-                            return Tail::Other;
-                        };
+                        let left = value
+                            .child_by_field_name("left")
+                            .expect("the grammar gives a binary expression its left operand");
+                        let right = value
+                            .child_by_field_name("right")
+                            .expect("the grammar gives a binary expression its right operand");
                         if self.kotlin_primitive_equality(left, right)
                             || [left, right]
                                 .iter()
@@ -5273,9 +5270,18 @@ impl Enumerator<'_> {
                 name => self.lookup(name).and_then(|var| var.constant),
             },
             "unary_expression" => {
-                let operator = text(node.child_by_field_name("operator")?, self.source);
-                let operand = self.kotlin_constant_value(node.child_by_field_name("argument")?)?;
+                let operator = text(
+                    node.child_by_field_name("operator")
+                        .expect("the grammar gives a unary expression its operator"),
+                    self.source,
+                );
+                let operand = self.kotlin_constant_value(
+                    node.child_by_field_name("argument")
+                        .expect("the grammar gives a unary expression its operand"),
+                )?;
                 match (operator, operand) {
+                    // kotlinc folds `+1` as it does `-1`.
+                    ("+", Constant::Number(value)) => Some(Constant::Number(value)),
                     ("-", Constant::Number(value)) => Some(Constant::Number(-value)),
                     ("!", Constant::Bool(value)) => Some(Constant::Bool(!value)),
                     _ => None,
@@ -5283,8 +5289,14 @@ impl Enumerator<'_> {
             }
             "binary_expression" => {
                 let operator = binary_operator(node, self.source);
-                let left = self.kotlin_constant_value(node.child_by_field_name("left")?)?;
-                let right = self.kotlin_constant_value(node.child_by_field_name("right")?)?;
+                let left = self.kotlin_constant_value(
+                    node.child_by_field_name("left")
+                        .expect("the grammar gives a binary expression its left operand"),
+                )?;
+                let right = self.kotlin_constant_value(
+                    node.child_by_field_name("right")
+                        .expect("the grammar gives a binary expression its right operand"),
+                )?;
                 Some(match (left, right) {
                     (Constant::Number(a), Constant::Number(b)) => match operator.as_str() {
                         "+" => Constant::Number(a + b),
@@ -5321,7 +5333,8 @@ impl Enumerator<'_> {
             "number_literal" | "float_literal" => {
                 let literal = text(node, self.source);
                 let lower = literal.to_ascii_lowercase();
-                if node.kind() == "float_literal" || lower.contains('.') {
+                // The grammar's integer literals have no `.` or exponent.
+                if node.kind() == "float_literal" {
                     return if lower.ends_with('f') {
                         Ty::Prim(Prim::Float)
                     } else {
@@ -5445,9 +5458,9 @@ impl Enumerator<'_> {
                 }
             }
             "call_expression" => {
-                let Some(callee) = named_children(node).next() else {
-                    return Ty::Unknown;
-                };
+                let callee = named_children(node)
+                    .next()
+                    .expect("the grammar gives a call its callee");
                 let name = match callee.kind() {
                     "identifier" => text(callee, self.source),
                     "navigation_expression" => named_children(callee)
@@ -5515,7 +5528,6 @@ impl Enumerator<'_> {
                     (ty, _) => ty,
                 }
             }
-            "collection_literal" => Ty::Object("Array".into()),
             "lambda_literal" | "callable_reference" | "anonymous_function" => {
                 Ty::Object("Function".into())
             }
@@ -5622,20 +5634,21 @@ fn nullable_property(property: Node, source: &str) -> bool {
         .is_some_and(|ty| text(ty, source).trim_end().ends_with('?'))
 }
 
-fn kotlin_declared_nullable(node: Node, source: &str) -> bool {
-    let mut after_parameters = false;
-    for child in children(node) {
-        match child.kind() {
-            "function_value_parameters" => after_parameters = true,
-            "function_body" => return false,
-            "nullable_type" if after_parameters => return true,
-            "user_type" | "function_type" if after_parameters => {
-                return text(child, source).trim_end().ends_with('?');
-            }
-            _ => {}
-        }
-    }
-    false
+/// Whether a function declares a nullable return type: the type between
+/// its parameters and its body (a receiver's comes before the parameters).
+fn kotlin_declared_nullable(node: Node) -> bool {
+    children(node)
+        .skip_while(|child| child.kind() != "function_value_parameters")
+        .take_while(|child| child.kind() != "function_body")
+        .find(|child| {
+            matches!(
+                child.kind(),
+                "nullable_type" | "user_type" | "function_type"
+            )
+        })
+        // The grammar reads any trailing `?` as a `nullable_type` around
+        // the type it ends.
+        .is_some_and(|ty| ty.kind() == "nullable_type")
 }
 
 #[cfg(test)]
@@ -5985,5 +5998,436 @@ public class M {
         );
         // `B` folds to true: only its replacement with false.
         assert_eq!(sorted(46), ["BooleanFalseReturnVals:false"]);
+    }
+
+    // Coverage of package B2: Kotlin's unary operators and compound
+    // assignments, while-loop counters, returns and their tails, folded
+    // constants, inferred types, collection inlines and declared nullability.
+
+    /// The ids on `line` of `listed`, sorted.
+    fn sorted_on(listed: &[String], file: &str, line: u32) -> Vec<String> {
+        let mut found = on_line(listed, file, line);
+        found.sort();
+        found
+    }
+
+    /// `-x`, `x++` and `x += y` are arithmetic only where the operand is a
+    /// number or of a type the source does not say: an operator function
+    /// (`BigDecimal`'s `-`, `BigInteger`'s `++`, a `-` that returns a
+    /// Boolean the code branches on) and a string's `+=` are calls, and
+    /// `+x` changes nothing.
+    #[test]
+    fn kotlin_unary_and_compound_operators_follow_the_operand_s_type() {
+        let file = "a/U.kt";
+        let source = r#"package a
+
+import java.math.BigDecimal
+import java.math.BigInteger
+
+class Flag {
+    operator fun unaryMinus(): Boolean = true
+}
+
+class Counter(var count: Int)
+
+fun neg(b: BigDecimal): BigDecimal {
+    return -b
+}
+
+fun flagged(flag: Flag): Int {
+    if (-flag) return 1
+    return 2
+}
+
+fun steps(c: Counter, big: BigInteger, x: Int): String {
+    var b = big
+    b++
+    c.count++
+    c.count += 2
+    var s = ""
+    s += "x"
+    val p = +x
+    return s + b + p
+}
+"#;
+        let listed = ids(file, source);
+        let sorted = |line: u32| sorted_on(&listed, file, line);
+        // `BigDecimal.negate()`, returned where the type is not null.
+        assert!(sorted(13).is_empty(), "{listed:?}");
+        // A Boolean `-flag` branched on: negated, not inverted.
+        assert_eq!(
+            sorted(17),
+            ["NegateConditionals:negated", "PrimitiveReturns:0"]
+        );
+        assert!(sorted(23).is_empty(), "{listed:?}");
+        // Another object's property: of a type the source does not say.
+        assert_eq!(sorted(24), ["Math:--"]);
+        assert_eq!(sorted(25), ["Math:-="]);
+        assert!(sorted(27).is_empty(), "{listed:?}");
+        assert!(sorted(28).is_empty(), "{listed:?}");
+        assert_eq!(sorted(29), ["EmptyObjectReturnVals:\"\""]);
+    }
+
+    /// PIT's loop-counter filter keeps a `while` loop's last statement
+    /// unmutated where it increments the local its condition reads first,
+    /// the loop's body a block or one statement; it leaves every other
+    /// increment of a local `int`, and a loop whose condition is a call or
+    /// whose body is empty has no counter to keep.
+    #[test]
+    fn kotlin_while_loops_keep_their_counter_s_increment() {
+        let file = "a/W.kt";
+        let source = r#"package a
+
+fun loops(n: Int, items: MutableList<Int>, running: () -> Boolean): Int {
+    var k = 0
+    k++
+    var i = 0
+    while (i < n) i++
+    var j = 0
+    var total = 0
+    while (j < n) {
+        total += j
+        j += 1
+    }
+    while (k < 0) {
+    }
+    while (items.isNotEmpty()) {
+        items.removeAt(0)
+    }
+    while (running()) {
+    }
+    return total + k
+}
+"#;
+        let listed = ids(file, source);
+        let sorted = |line: u32| sorted_on(&listed, file, line);
+        assert_eq!(sorted(5), ["Increments:--"]);
+        for line in [7, 10, 14] {
+            assert_eq!(
+                sorted(line),
+                ["ConditionalsBoundary:<=", "NegateConditionals:negated"],
+                "{line}: {listed:?}"
+            );
+        }
+        assert_eq!(sorted(11), ["Math:-="]);
+        assert!(sorted(12).is_empty(), "{listed:?}");
+        for line in [16, 19] {
+            assert_eq!(sorted(line), ["NegateConditionals:negated"], "{line}");
+        }
+        assert_eq!(sorted(21), ["Math:-", "PrimitiveReturns:0"]);
+    }
+
+    /// A Kotlin return is mutated by its type as PIT chooses, less what it
+    /// already returns: a `Boolean?` ending in `true` or a comparison, `""`,
+    /// a boxed `0`, `null`, a block's last value. A receiver's `?` is not the
+    /// return type's, and a getter of a type the source does not say has
+    /// none to mutate by.
+    #[test]
+    fn kotlin_returns_leave_out_what_the_value_already_is() {
+        let file = "a/R.kt";
+        let source = r#"package a
+
+class Foo
+
+interface Resettable {
+    fun reset()
+}
+
+class Box {
+    val owner
+        get() = Foo()
+}
+
+fun positive(x: Int): Boolean? = x > 0
+fun yes(): Boolean? = true
+fun same(x: Boolean?): Boolean? = x
+fun empty(): String = ""
+fun echo(x: String): String = x
+fun zero(): Int? = 0
+fun boxed(x: Int): Int? = x
+fun none(): Foo? = null
+fun some(): Foo? = Foo()
+fun no(): Boolean = false
+fun pick(c: Boolean): Int = if (c) { 1 } else { 0 }
+fun pickLast(c: Boolean): Int = if (c) { 0 } else { 1 }
+fun owner(): Foo = Foo()
+fun String?.blank(): Boolean = this == null
+fun String.twice(): String = repeat(2)
+"#;
+        let listed = ids(file, source);
+        let sorted = |line: u32| sorted_on(&listed, file, line);
+        for line in [6, 10, 11, 17, 19, 21, 26] {
+            assert!(sorted(line).is_empty(), "{line}: {listed:?}");
+        }
+        let expected: [(u32, &[&str]); 11] = [
+            (
+                14,
+                &[
+                    "BooleanTrueReturnVals:true",
+                    "ConditionalsBoundary:>=",
+                    "NegateConditionals:negated",
+                ],
+            ),
+            (15, &["BooleanFalseReturnVals:false"]),
+            (
+                16,
+                &["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"],
+            ),
+            (18, &["EmptyObjectReturnVals:\"\""]),
+            (20, &["EmptyObjectReturnVals:0"]),
+            (22, &["NullReturnVals:null"]),
+            (23, &["BooleanTrueReturnVals:true"]),
+            (24, &["NegateConditionals:negated"]),
+            (25, &["NegateConditionals:negated", "PrimitiveReturns:0"]),
+            (
+                27,
+                &["BooleanTrueReturnVals:true", "NegateConditionals:negated"],
+            ),
+            (28, &["EmptyObjectReturnVals:\"\""]),
+        ];
+        for (line, mutants) in expected {
+            assert_eq!(sorted(line), mutants, "{line}: {listed:?}");
+        }
+    }
+
+    /// kotlinc folds constants (`6 / 2`, `+2 - 1`, `true && false`, `"a" +
+    /// "b"`), so PIT has nothing to mutate in them and nothing in the branch
+    /// a constant condition leaves out; a division by zero, an elvis and an
+    /// operator a file declares (`!5`) are not folded.
+    #[test]
+    fn kotlin_constants_fold_as_kotlinc_folds_them() {
+        let file = "a/F.kt";
+        let source = r#"package a
+
+operator fun Int.not(): Int = -this
+
+operator fun Boolean.unaryPlus(): Boolean = this
+
+class Folds {
+    var n = 0
+
+    fun arithmetic(x: Int): Int {
+        val a = 6 + 2
+        val b = 6 - 2
+        val c = 6 * 2
+        val d = 6 / 2
+        val e = 6 / 0
+        val f = 6 % 4
+        val g = 6 % 0
+        val h = (2 ?: 3) * x
+        val i = +2 - 1
+        val left = !5 * 2
+        val right = 2 * !5
+        return a + b + c + d + e + f + g + h + i + left + right
+    }
+
+    fun logic(flag: Boolean) {
+        if (true && false) n += 1 else n -= 1
+        if (false && true) n += 1 else n -= 1
+        if (true && true) n += 1 else n -= 1
+        if (true || false) n += 1 else n -= 1
+        if (false || false) n += 1 else n -= 1
+        if (false || true) n += 1 else n -= 1
+        if (true == false) n += 1 else n -= 1
+        if (true != false) n += 1 else n -= 1
+        if (!false) n += 1 else n -= 1
+        if (-1 < 0) n += 1 else n -= 1
+        if (+1 > 0) n += 1 else n -= 1
+        if (1 <= 2) n += 1 else n -= 1
+        if (2 > 3) n += 1 else n -= 1
+        if (2 >= 3) n += 1 else n -= 1
+        if (1 == 2) n += 1 else n -= 1
+        if (1 != 2) n += 1 else n -= 1
+        val same = (true ?: false) == flag
+        val text = "a" == "b"
+        val joined = "a" + "b"
+    }
+
+    fun lifted(b: Boolean) = +b
+}
+"#;
+        let listed = ids(file, source);
+        let sorted = |line: u32| sorted_on(&listed, file, line);
+        assert_eq!(sorted(3), ["InvertNegs:removed", "PrimitiveReturns:0"]);
+        assert_eq!(
+            sorted(5),
+            ["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"]
+        );
+        for line in [11, 12, 13, 14, 16, 19] {
+            assert!(sorted(line).is_empty(), "{line}: {listed:?}");
+        }
+        for line in [15, 17] {
+            assert_eq!(sorted(line), ["Math:*"], "{line}: {listed:?}");
+        }
+        for line in [18, 20, 21] {
+            assert_eq!(sorted(line), ["Math:/"], "{line}: {listed:?}");
+        }
+        // Only the branch the constant condition takes: `n += 1` where it
+        // is true, `n -= 1` where it is false.
+        let taken = [
+            (26, false),
+            (27, false),
+            (28, true),
+            (29, true),
+            (30, false),
+            (31, true),
+            (32, false),
+            (33, true),
+            (34, true),
+            (35, true),
+            (36, true),
+            (37, true),
+            (38, false),
+            (39, false),
+            (40, false),
+            (41, true),
+        ];
+        for (line, condition) in taken {
+            let branch = if condition { "Math:-=" } else { "Math:+=" };
+            assert_eq!(sorted(line), [branch], "{line}: {listed:?}");
+        }
+        assert_eq!(sorted(42), ["NegateConditionals:negated"]);
+        assert!(sorted(43).is_empty(), "{listed:?}");
+        assert!(sorted(44).is_empty(), "{listed:?}");
+        assert_eq!(
+            sorted(47),
+            ["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"]
+        );
+    }
+
+    /// An expression body's return type is the expression's: a literal's,
+    /// a cast's, an `if`'s or a `when`'s branches' where they agree (boxed
+    /// where one is `null`), an elvis's, a `!!`'s, a negation's, and a
+    /// library call's that the walker knows; none where branches disagree.
+    #[test]
+    fn kotlin_expression_bodies_return_the_expression_s_type() {
+        let file = "a/E.kt";
+        let source = r#"package a
+
+import java.math.BigDecimal
+import kotlin.math.abs
+
+fun ratio() = 1.5
+fun letter() = 'a'
+fun cast(x: Any) = x as String
+fun mixed(c: Boolean, i: Int, l: Long) = if (c) i else l
+fun boolOrInt(c: Boolean) = if (c) true else 1
+fun intOrBool(c: Boolean) = if (c) 1 else true
+fun maybe(c: Boolean) = if (c) 1 else null
+fun maybeNot(c: Boolean) = if (c) null else 1
+fun maybeText(c: Boolean) = if (c) "x" else null
+fun known(c: Boolean, x: Int) = if (c) 1 else abs(x)
+fun unit(c: Boolean, x: Any) = if (c) x as Unit else x.hashCode()
+fun braced(c: Boolean) = if (c) { 1 } else { 2 }
+fun kinds(c: Boolean) = when {
+    c -> "a"
+    else -> 2
+}
+fun orZero(x: Int?, y: Int) = x ?: y
+fun orText(s: String?, d: String) = s ?: d
+fun lookup(m: Map<String, Int>, y: Int) = m["a"] ?: y
+fun sure(x: Int?) = x!!
+fun sureText(s: String?) = s!!
+fun negByte(b: Byte) = -b
+fun negBig(b: BigDecimal) = -b
+fun table() = mapOf("a" to 1)
+fun asDouble(x: Int) = x.toDouble()
+fun asFloat(x: Int) = x.toFloat()
+fun asText(x: Int) = x.toString()
+fun starts(s: String) = s.startsWith("a")
+"#;
+        let listed = ids(file, source);
+        // The return mutants on `line`: what the type decides.
+        let returns = |line: u32| {
+            let mut found = on_line(&listed, file, line)
+                .into_iter()
+                .filter(|id| id.contains("Return"))
+                .collect::<Vec<_>>();
+            found.sort();
+            found
+        };
+        let zero = ["PrimitiveReturns:0"];
+        let text = ["EmptyObjectReturnVals:\"\""];
+        let boxed_zero = ["EmptyObjectReturnVals:0"];
+        for line in [6, 7, 15, 17, 22, 24, 25, 27, 30, 31] {
+            assert_eq!(returns(line), zero, "{line}: {listed:?}");
+        }
+        for line in [8, 14, 23, 26, 32] {
+            assert_eq!(returns(line), text, "{line}: {listed:?}");
+        }
+        for line in [12, 13] {
+            assert_eq!(returns(line), boxed_zero, "{line}: {listed:?}");
+        }
+        for line in [9, 10, 11, 16, 18, 28] {
+            assert!(returns(line).is_empty(), "{line}: {listed:?}");
+        }
+        assert_eq!(returns(29), ["EmptyObjectReturnVals:emptyMap"]);
+        assert_eq!(
+            returns(33),
+            ["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"]
+        );
+        // `-b` of a `Byte` is an `Int` negated; of a `BigDecimal`, a call.
+        assert_eq!(
+            on_line(&listed, file, 27)
+                .into_iter()
+                .filter(|id| id.starts_with("InvertNegs"))
+                .count(),
+            1
+        );
+        assert!(on_line(&listed, file, 28).is_empty(), "{listed:?}");
+    }
+
+    /// A range is an object (`(0 until n) + 5` is a list's `plus`); an
+    /// infix call of another name, a call through a parenthesized value,
+    /// `coerceIn` and `sumOf` are of no type the walker knows. A lambda kept
+    /// as a value runs later, in a method of its own; one passed to a
+    /// collection function kotlinc inlines is the enclosing method's code.
+    #[test]
+    fn kotlin_ranges_calls_and_lambdas_as_values() {
+        let file = "a/L.kt";
+        let source = r#"package a
+
+fun ranges(n: Int, a: List<Int>, b: List<Int>, g: () -> Int, x: Int, xs: List<Int>) {
+    val listed = (0 until n) + 5
+    val commented = 0 /* from */ until n
+    val zipped = a zip b
+    val called = (g)()
+    val low = x.coerceIn(0, 9)
+    val total = xs.sumOf { it }
+    val square = { y: Int -> y * y }
+    val ref = ::ranges
+    val big = xs.any { it > 2 }
+}
+"#;
+        let index = ProjectIndex::of([(file, source)]);
+        let mutants = crate::jvm_strong::file_mutants(file, source, &index)
+            .expect("parses")
+            .mutants;
+        let on = |line: u32| {
+            mutants
+                .iter()
+                .filter(|mutant| mutant.start.0 == line)
+                .collect::<Vec<_>>()
+        };
+        for line in [4, 5, 6, 7, 8, 11] {
+            assert!(on(line).is_empty(), "{line}: {:?}", on(line));
+        }
+        let square = on(10);
+        assert_eq!(square.len(), 1, "{square:?}");
+        assert_eq!(square[0].mutator, Mutator::Math);
+        assert_eq!(square[0].method, "ranges$lambda");
+        assert!(square[0].deferred.is_some());
+        let mut inlined = on(12)
+            .iter()
+            .map(|mutant| (mutant.mutator, mutant.method.as_str(), mutant.deferred))
+            .collect::<Vec<_>>();
+        inlined.sort_by_key(|(mutator, _, _)| *mutator);
+        assert_eq!(
+            inlined,
+            [
+                (Mutator::ConditionalsBoundary, "ranges", None),
+                (Mutator::NegateConditionals, "ranges", None),
+            ]
+        );
     }
 }
