@@ -1477,6 +1477,38 @@ test("discount", () => assert.equal(price({ cents: 5 }, true), 4));
     assert!(merged.contains("merged run"), "{merged}");
 }
 
+/// A merged run's mutants run under its parts' test command, not under the
+/// `supercov merge` that made it; parts of different commands name none,
+/// and the pass says to give one.
+#[test]
+fn a_merged_run_s_mutants_run_under_its_parts_command() {
+    let project = Project::cart("merge-mutants");
+    let first = project.measure(&[]);
+    let second = project.measure(&[]);
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let reply = ran.json();
+    assert_eq!(ran.code(), 0, "{reply}\n{}", ran.stderr());
+    assert!(!ran.stderr().contains("supercov merge"), "{}", ran.stderr());
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
+
+    let parts = Project::cart("merge-mutants-parts");
+    let total = parts.measure(&["--test-name-pattern=total"]);
+    let shipping = parts.measure(&["--test-name-pattern=shipping"]);
+    parts.supercov(&["merge", &total, &shipping]).succeeds();
+    let refused = parts.supercov(&["runs", "latest", "mutants", "test"]);
+    assert_ne!(refused.code(), 0, "{}", refused.stderr());
+    contains_all(
+        &refused.stderr(),
+        &[
+            "is a merged run",
+            "--test-name-pattern=total",
+            "mutants test -- <test command>",
+        ],
+    );
+}
+
 #[test]
 fn shards_merge_into_one_run_and_mismatched_ones_do_not() {
     let project = Project::cart("merge");

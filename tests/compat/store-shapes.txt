@@ -240,6 +240,7 @@ type EventId, read = string | uint
 type Execution, written = closed {
   test: TestSelector
   passed: boolean
+  skipped?: boolean
   files: {string: [uint]}
   attribution: string
 }
@@ -247,6 +248,7 @@ type Execution, written = closed {
 type Execution, read = closed {
   test: TestSelector
   passed: boolean
+  skipped?: boolean
   files: {string: [uint]}
   attribution?: string
 }
