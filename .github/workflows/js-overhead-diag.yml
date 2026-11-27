@@ -1,0 +1,128 @@
+name: JS overhead diagnostic
+
+# DIAGNOSTIC ONLY (never merged): where a measured JavaScript run's extra time
+# goes, by switching parts of Supercov off one at a time
+# (SUPERCOV_DIAG_SKIP), against plain, in turns.
+
+on:
+  push:
+    branches: [diag/js-overhead]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: js-overhead-diag-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build new
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-new
+      - run: cargo build --profile measure -p supercov
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-new
+          path: target/measure/supercov
+          retention-days: 3
+
+  measure:
+    needs: build
+    name: ${{ matrix.app }} ${{ matrix.shard }} ${{ matrix.variants }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 7/16, offset: 3, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 9/16, offset: 4, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 11/16, offset: 5, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,activate,prelude' }
+          # Node CPU profiles of every process, and the pages' renderer
+          # profile, plain against measured.
+          - { app: large, shard: 2/16, offset: 0, rounds: 0, diagnose: 1, variants: 'new' }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov
+      # Each variant is the binary with one part of its work off.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/wrap"
+          list=""
+          for variant in $(echo "${{ matrix.variants }}" | tr ',' ' '); do
+            case "$variant" in
+              new) extra="SPEED_NOTHING=1" ;;
+              noinstr) extra="SUPERCOV_SOURCE_ROOTS=src/proxy.ts" ;;
+              *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
+            esac
+            printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "$extra" "$GITHUB_WORKSPACE/binaries/supercov-new/supercov" > "$RUNNER_TEMP/wrap/$variant"
+            chmod +x "$RUNNER_TEMP/wrap/$variant"
+            list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
+          done
+          echo "DIAG_BINARIES=$list" >> "$GITHUB_ENV"
+      - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx -y playwright@1.49.1 install-deps chromium
+          key: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-1.49.1
+          prefix: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-
+      - run: |
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" >/dev/null 2>&1 || true
+          sudo sysctl kernel.perf_event_paranoid=1
+          perf=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          if [ -n "$perf" ] && "$perf" stat -e task-clock -x , -- true; then
+            echo "SPEED_PERF=$perf" >> "$GITHUB_ENV"
+          else
+            echo "perf cannot count here: the runs are timed alone"
+          fi
+      - name: Measure
+        timeout-minutes: 10
+        env:
+          SUPERCOV_BINARIES: ${{ env.DIAG_BINARIES }}
+          SPEED_APP: ${{ matrix.app }}
+          SPEED_ROUNDS: ${{ matrix.rounds }}
+          SPEED_ORDER_OFFSET: ${{ matrix.offset }}
+          SPEED_ANSWERS: '0'
+          SPEED_REPEAT: 10
+          SPEED_OUTPUT: ${{ runner.temp }}/speed
+          SPEED_DIAGNOSE: ${{ matrix.diagnose }}
+          SPEED_SHARD: ${{ matrix.shard }}
+        run: node scripts/speed-benchmark.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ matrix.app }}-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/machine.txt
+            ${{ runner.temp }}/speed/samples.jsonl
+            ${{ runner.temp }}/speed/summary.md
+            ${{ runner.temp }}/speed/cpu-*.json
+            ${{ runner.temp }}/speed/profile.md
+            ${{ runner.temp }}/speed/profile-top-*.txt
+            ${{ runner.temp }}/speed/profile-processes-*.txt
+            ${{ runner.temp }}/speed/profile-callers-*.txt
+            ${{ runner.temp }}/speed/browser-profile-*.txt
+            ${{ runner.temp }}/speed/logs/
+          retention-days: 7

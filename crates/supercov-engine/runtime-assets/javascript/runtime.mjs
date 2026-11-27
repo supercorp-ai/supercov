@@ -209,6 +209,9 @@ var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
 var _a;
 var isBrowser = !(typeof process !== "undefined" && typeof ((_a = process.versions) == null ? void 0 : _a.node) === "string");
+// DIAGNOSTIC ONLY (never merged): switch parts of the recording off.
+var diagSkipList = String(globalThis.__SUPERCOV_DIAG_SKIP__ != null ? globalThis.__SUPERCOV_DIAG_SKIP__ : (typeof process !== "undefined" && process.env && process.env.SUPERCOV_DIAG_SKIP) || "").split(",");
+var diagRecordOff = isBrowser ? diagSkipList.includes("record-b") : diagSkipList.includes("record-s");
 var _a2;
 var testId = (_a2 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a2 : "unscoped";
 var storageKey = "__supercov_coverage_" + testId;
@@ -2603,6 +2606,8 @@ function registerProbeV2(definition) {
     if (hitEpochs[index] !== clock.e)
       recordCoverageHitV2(file, index);
   };
+  if (diagRecordOff)
+    file.hit = () => {};
   // What a decision's outcome calls: this file's end, by decision alone, with
   // its vector and the outcome, which a false one leaves out (`end(3, 1)`,
   // `end(3, 2, 1)`). It records what mcdcEndV2(file, ...) does, and makes the
@@ -2618,6 +2623,8 @@ function registerProbeV2(definition) {
     }
     recordMcdcEndV2(file, decisionIndex, encoded, outcome);
   };
+  if (diagRecordOff)
+    file.end = () => {};
   if (isBrowser) {
     state.probeV2Clock.fast = true;
     activateProbeV2Key(`browser\0${(_a8 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a8 : testId}\0${(_b = runtimeGlobal.__SUPERCOV_PHASE_ID__) != null ? _b : "unscoped"}`);
@@ -2658,6 +2665,8 @@ function rememberProbeV2File(file) {
 // pathological match inside a second, and the full body in every call put it
 // at ten times the uninstrumented time.
 function coverageHitV2(file, index) {
+  if (diagRecordOff)
+    return;
   const clock = file.clock;
   if (clock.fast && file.hitEpochs[index] === clock.e)
     return;
@@ -2702,6 +2711,8 @@ function decodeProbeV2Vector(conditionCount, encoded, outcome) {
   return remaining === 0 ? { values, outcome } : void 0;
 }
 function mcdcEndV2(file, decisionIndex, encoded, value) {
+  if (diagRecordOff)
+    return value;
   // Nothing evaluated: a decision used as a value in a tree whose evaluation
   // never reached it. Every evaluation evaluates its first condition.
   if (encoded === 0)

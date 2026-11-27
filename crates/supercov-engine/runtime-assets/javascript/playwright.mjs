@@ -40,6 +40,8 @@ const adapter = (targetModule === "@playwright/test"
 // run. Every copy keys its state on the page's global, so this copy and one a
 // bundler imports record into the same place. Its locals stay inside a
 // function, out of the page's global scope.
+// DIAGNOSTIC ONLY (never merged): skip parts of the browser work.
+const diagSkip = new Set((process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").filter(Boolean));
 const browserRuntimeSource = readFileSync(new URL("./runtime.mjs", import.meta.url), "utf8");
 const browserRuntimeExport = browserRuntimeSource.lastIndexOf("\nexport {");
 if (/^import\s/m.test(browserRuntimeSource) || browserRuntimeExport < 0)
@@ -1115,6 +1117,8 @@ class CoveragePhaseController {
         return internally(this.anyOwner(), () => this.activateInBrowserNow(phaseId, documentPhaseId));
     }
     async activateInBrowserNow(phaseId, documentPhaseId) {
+        if (diagSkip.has("activate"))
+            return;
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context) && !this.closedContexts.has(context))
@@ -1392,7 +1396,9 @@ function prepareContext(context) {
         // attempt's mutant, by its file in the crate's Cargo workspace.
         if (process.env.SUPERCOV_WASM_STRONG)
             parts.push(`Object.defineProperty(globalThis, "__SUPERCOV_WASM_STRONG__", { value: ${JSON.stringify(JSON.parse(process.env.SUPERCOV_WASM_STRONG))}, writable: true, configurable: true });`);
-        parts.push(browserRuntimePrelude);
+        parts.push(`globalThis.__SUPERCOV_DIAG_SKIP__ = ${JSON.stringify(process.env.SUPERCOV_DIAG_SKIP ?? "")};`);
+        if (!diagSkip.has("prelude"))
+            parts.push(browserRuntimePrelude);
         prepared = Promise.resolve(internally(context, () => Promise.all([
             context.addInitScript({ content: separately(parts) }).catch(() => undefined),
             context.exposeBinding(LEAVING_BINDING, takeLeavingEvidence).catch(() => undefined),
@@ -1402,6 +1408,8 @@ function prepareContext(context) {
     return prepared;
 }
 function readSnapshot(target) {
+    if (diagSkip.has("collect"))
+        return Promise.resolve(undefined);
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;

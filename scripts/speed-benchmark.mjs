@@ -418,7 +418,7 @@ function suiteRun(round, variant, suite, binary) {
   // Every answer the run gives, in its first two rounds: two runs of one
   // binary say how far the suite itself varies, and a binary against
   // another, whether either measures differently (scripts/speed/answers.mjs).
-  if (round <= 2) {
+  if (round <= 2 && process.env.SPEED_ANSWERS !== '0') {
     run(
       project,
       process.execPath,
@@ -441,11 +441,20 @@ function suiteRun(round, variant, suite, binary) {
 for (let round = 1; round <= rounds; round += 1) {
   // A run leaves its copy of the repository in .supercov, and the app's
   // Vitest includes collect the copy's tests: plain starts from none.
-  rmSync(join(project, '.supercov'), { recursive: true, force: true });
-  for (const suite of suites) suiteRun(round, 'plain', suite);
-  const order = binaries.map((_, index) => binaries[(index + round) % binaries.length]);
+  // Plain takes its turn with the binaries, in an order that turns each
+  // round and reverses every other (A B C, then C B A shifted), so no variant
+  // always runs first or on a warmer machine. SPEED_ORDER_OFFSET shifts the
+  // start, so jobs of one matrix start from different variants.
+  const variants = [{ name: 'plain' }, ...binaries];
+  const shift = (round - 1 + Number(process.env.SPEED_ORDER_OFFSET ?? 0)) % variants.length;
+  let order = variants.map((_, index) => variants[(index + shift) % variants.length]);
+  if (round % 2 === 0) order = order.reverse();
   for (const { name, path } of order) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
+    if (!path) {
+      for (const suite of suites) suiteRun(round, 'plain', suite);
+      continue;
+    }
     for (const suite of suites) suiteRun(round, name, suite, path);
     const { seconds } = run(project, path, ['merge'], `${round}-${name}-merge`);
     sample(round, name, 'merge', seconds);
