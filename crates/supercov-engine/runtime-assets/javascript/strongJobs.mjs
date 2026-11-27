@@ -386,7 +386,7 @@ function stop(child) {
     }
 }
 
-export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env, graceMs = 10_000, baselineGraceMs = 60_000 }) {
+export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env, graceMs = 10_000, baselineGraceMs = 60_000, aloneGraceMs = graceMs }) {
     const started = Date.now();
     // Once the pass is told to stop (`stopped-at` beside the results), its
     // jobs are stopped under their tests: one that ends then says nothing of
@@ -704,7 +704,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                 profile.alone += 1;
                 const now = await job({ mutant: null, file: group.file, tests: chosen, bail: false, limitMs: baselineLimit(group.file, chosen), alone: true });
                 const slowest = Math.max(baseline.durationMs, now.durationMs);
-                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs: 3 * slowest + graceMs, alone: true });
+                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs: 3 * slowest + aloneGraceMs, alone: true });
             }
             const ran = [...result.statuses].filter(([id, status]) => status !== "skipped" && (chosen === null || chosen.has(id)));
             const killer = killerIn(result);
