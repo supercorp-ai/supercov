@@ -6,15 +6,34 @@ name: Self Coverage
 # jobs, each measured on its own, and the runs merged into one per platform.
 # Linux and macOS compile different code, so each platform is merged on its own.
 #
-# Every pull request ready for review is measured, again on each push, and
-# fails unless lines, branches and MC/DC are all at 100%: the speed releases
-# that skipped this measurement left 161 gaps on main that nothing reported. A
-# draft is measured when it carries the `self-coverage` label, and on each
-# push while it does: Linux alone, about 40 minutes. The `self-coverage-macos`
-# label, or `macos: true` by hand, measures macOS too; the two platforms
-# differ by a handful of gaps.
+# Every push to main is measured in full, held to 100% lines, branches and
+# MC/DC, and kept as the map CI's plan reads (`affected-map`): which code each
+# test ran, for `tests affected` to say which tests a pull request's change
+# can reach, and with each test's seconds (`test-seconds`), which CI and these
+# slices deal their tests by. A pull request is measured by the slow tier
+# (slow-tier.yml), once it is ready to merge: its affected tests and every
+# test written in a file it changed (a test it adds is in no map;
+# scripts/ci-affected.mjs), and the lines it adds or changes held to 100% --
+# every other line is covered as on main, by tests the change cannot reach. A
+# release pull request, a change to CI, or a change the map cannot answer for
+# is measured in full and held to 100% everywhere: the speed releases that
+# skipped this measurement left 161 gaps on main that nothing reported. The
+# `self-coverage-macos` label, or `macos: true` by hand, measures macOS too;
+# the two platforms differ by a handful of gaps.
 
 on:
+  # The slow tier's measurement of a pull request, and its nightly one.
+  workflow_call:
+    inputs:
+      macos:
+        type: boolean
+        default: false
+      tests:
+        type: string
+        default: ""
+      files:
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       macos:
@@ -29,30 +48,46 @@ on:
         description: "Space-separated path prefixes: the step summary counts the gaps in these files. Most useful with tests."
         type: string
         default: ""
-  pull_request:
-    types: [labeled, opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
+  # The plan finds main's map among this workflow's runs.
+  actions: read
 
-# A newer push replaces the measurement of the one before. A label that does
-# not ask for a measurement is a run of its own, so adding one cancels nothing.
+# A newer measurement of a pull request replaces the one before (the slow
+# tier runs one per commit it is asked for). On main a measurement is never
+# cancelled -- a busy day would leave no map -- and only the newest push, or
+# the nightly run, waits behind the one running.
 concurrency:
-  group: self-coverage-${{ github.ref }}-${{ github.event.action == 'labeled' && !startsWith(github.event.label.name, 'self-coverage') && github.run_id || 'measure' }}
-  cancel-in-progress: true
+  group: self-coverage-${{ github.ref }}-measure
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   SLICES: 10
 
 jobs:
+  # Which tests a pull request's change can affect: they alone are measured.
+  # Every test on a push, by hand, on a release pull request, on a change to
+  # CI, or when the map cannot answer (the step summary says why).
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: self-coverage
+
   platforms:
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event.action == 'labeled' && startsWith(github.event.label.name, 'self-coverage'))
-      || (github.event.action != 'labeled'
-          && (!github.event.pull_request.draft
-              || contains(github.event.pull_request.labels.*.name, 'self-coverage')
-              || contains(github.event.pull_request.labels.*.name, 'self-coverage-macos')))
+    needs: plan
+    if: fromJSON(needs.plan.outputs.jobs).measure.run
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.os.outputs.os }}
@@ -80,8 +115,12 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
-      # The release build's dependencies kept between runs.
+      # The measure build's dependencies kept between runs, saved by main's
+      # run (this workflow runs on a push to main) and only restored by a
+      # pull request's.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # The system packages the slices' browsers need, fetched once here and
       # kept before any slice starts: ten slices fetching them at once from
@@ -100,8 +139,11 @@ jobs:
           path: target/measure/supercov
           retention-days: 3
 
+  # Beside the build, not after it: a slice's setup takes as long as the
+  # build, and the slice waits for the build only where it needs it, at its
+  # tests (below).
   measure:
-    needs: [platforms, build]
+    needs: [plan, platforms]
     name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -113,7 +155,11 @@ jobs:
         # is that half, which ran last and longest in slice 0; slices 1..8
         # share the gates by their time.
         # A targeted measurement (`tests`) is one slice of the named tests.
-        slice: ${{ fromJSON(inputs.tests != '' && '[0]' || '[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]') }}
+        # A pull request's affected tests take as few slices as hold them.
+        slice: ${{ inputs.tests != '' && fromJSON('[0]') || fromJSON(needs.plan.outputs.jobs).measure.matrix.slice }}
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).measure.mode == 'partial' }}
+      AFFECTED_SLICES: ${{ fromJSON(needs.plan.outputs.jobs).measure.slices }}
     steps:
       # The instrumented workspace, its build and the gates' toolchains do not
       # fit a Linux runner's free space as it comes.
@@ -146,15 +192,13 @@ jobs:
           distribution: temurin
           java-version: "21"
       # What the Maven and Gradle tests resolve, kept: fetched each run, they
-      # took nine minutes of one slice.
-      - uses: actions/cache@v4
+      # took nine minutes of one slice. Restored only: CI's check and
+      # engine-integrations jobs run the same tests and scripts, and keep
+      # what they fetch; ten slices saving would crowd the cache. Maven's
+      # and Gradle's own retries are turned up for the rest.
+      - uses: ./.github/actions/jvm-dependencies
         with:
-          path: |
-            ~/.m2/repository
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: jvm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/supercov-engine/tests/jvm_*.rs', 'scripts/*jvm*.mjs', 'scripts/java-*.mjs') }}
-          restore-keys: jvm-${{ runner.os }}-${{ runner.arch }}-
+          step: restore
       # The Ant tests skip without it, and the Ant support then shows as
       # gaps the local measurement does not have. After the cache: a key
       # restored from before these jars still gets them.
@@ -162,10 +206,19 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      # The Bun tests skip without it, and the map would then say they run
+      # none of what CI's bun-bootstrap job runs them for.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      # A version, not the latest: asking GitHub's API for the latest
+      # release timed out on 2026-11-24 and failed the job before its tests.
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.9"
       # The versions CI's wasm and worker jobs use.
       - uses: taiki-e/install-action@v2
         with:
@@ -186,7 +239,8 @@ jobs:
             macOS-ARM64) build=aarch64-macos ;;
             macOS-X64) build=x86_64-macos ;;
           esac
-          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          curl -q -sSfL --retry 6 --retry-all-errors --retry-delay 10 "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" -o "$RUNNER_TEMP/wasmtime.tar.xz"
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-v49.0.3-$build" >> "$GITHUB_PATH"
       - run: npm ci
       # The browsers of every pinned Playwright, kept while no lockfile
@@ -197,7 +251,11 @@ jobs:
       - name: Hash the lockfiles
         id: locks
         run: echo "hash=$(git ls-files -s '*package-lock.json' | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      # Restored only, but for main's run: at 1.2 GB, a copy saved by each
+      # pull request was an eighth of the repository's 10 GB, and three of
+      # them evicted main's caches. Saved below, once the browsers are in.
+      - id: browsers
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/ms-playwright
@@ -227,14 +285,52 @@ jobs:
               PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npx -y "playwright@$version" install chromium
             fi
           done
+      - if: github.ref == 'refs/heads/main' && matrix.slice == 0 && steps.browsers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
+      # The build job's Supercov, once it has kept it: this slice started
+      # beside the build. A build that failed fails the slice. An artifact
+      # is listed a few seconds before it can be fetched (a slice found it
+      # 3 s after it was made and could not fetch it), so the fetch is the
+      # test, tried until it comes whole.
+      - name: Wait for the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: supercov-self-${{ matrix.os }}
+          BUILD: Build on ${{ matrix.os }}
+        run: |
+          for attempt in $(seq 1 120); do
+            rm -rf "$RUNNER_TEMP/self"
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D "$RUNNER_TEMP/self" 2>/dev/null \
+              && [ -s "$RUNNER_TEMP/self/supercov" ]; then
+              echo "Fetched $ARTIFACT after $attempt attempt(s)."
+              exit 0
+            fi
+            # A job of a called workflow is named after its caller's job too.
+            build=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
+              --jq ".jobs[] | select(.name == \"$BUILD\" or (.name | endswith(\"/ $BUILD\"))) | .conclusion // \"\"" 2>/dev/null | head -1)
+            case "$build" in
+              failure|cancelled|skipped) echo "$BUILD ended $build: there is no Supercov to measure with."; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "$BUILD kept no Supercov in twenty minutes."
+          exit 1
+      # The plan's selection, and the test seconds every slice deals by: the
+      # same file for every slice, or a test could be dealt to none.
       - uses: actions/download-artifact@v5
         with:
-          name: supercov-self-${{ matrix.os }}
-          path: ${{ runner.temp }}/self
+          name: affected-selection-self-coverage
+          path: ${{ runner.temp }}/affected
       - name: Choose this slice's tests
         id: tests
         env:
           TARGET_TESTS: ${{ inputs.tests }}
+          CI_TEST_SECONDS: ${{ runner.temp }}/affected/test-seconds.tsv
         run: |
           # What this platform cannot run: the clang oracle's golden file
           # comes from Apple's clang; macOS runners have no Docker.
@@ -259,17 +355,21 @@ jobs:
           # Every gate and every test costing two seconds or more, dearest
           # first, each to the slice with the least so far. A test costs the
           # larger of the seconds it took in a run and the processor seconds
-          # it and the children it waited for used (test-seconds.tsv; a gate
-          # not timed there costs its CI seconds, or a minute): tests share a
+          # it and the children it waited for used (test-seconds.tsv, those of
+          # main's newest run first, as the plan found them; a gate not timed
+          # there costs its CI seconds, or a minute): tests share a
           # slice's four processors, and dealt by seconds alone, gates heavy
           # on all four landed together and each ran up to 3.5 times longer
           # than measured; processor seconds alone miss what a browser or a
           # container does. Slice 0 starts with the cheaper tests, which only
           # it runs, each with the fifth of a second Supercov spends between
           # them, and runs any test no run has timed yet.
-          awk -v n="$SLICES" -v s="$slice" -v lists="$lists" '
+          # Main's newest seconds, read after the committed ones: they win.
+          fresh="$CI_TEST_SECONDS"
+          [ -f "$fresh" ] || fresh=/dev/null
+          awk -v n="$SLICES" -v s="$slice" -v lists="$lists" -v fresh="$fresh" '
             FILENAME == ".github/gate-seconds.tsv" { if ($0 !~ /^#/ && NF) gate_seconds[$1] = $2; next }
-            FILENAME == ".github/test-seconds.tsv" { if ($0 !~ /^#/ && NF) test_seconds[$1] = $3 > $2 ? $3 : $2; next }
+            FILENAME == ".github/test-seconds.tsv" || FILENAME == fresh { if ($0 !~ /^#/ && NF) test_seconds[$1] = $3 > $2 ? $3 : $2; next }
             FILENAME == lists "/excluded" { if (NF) excluded[$1] = 1; next }
             FILENAME == lists "/gates" {
               if (NF) {
@@ -295,9 +395,20 @@ jobs:
                 if (s != 0 && best == s) print unit[order[i]]
               }
               if (s == 0) for (name in excluded) print "--skip " name
-            }' .github/gate-seconds.tsv .github/test-seconds.tsv "$lists/excluded" "$lists/gates" > "$lists/picked"
+            }' .github/gate-seconds.tsv .github/test-seconds.tsv "$fresh" "$lists/excluded" "$lists/gates" > "$lists/picked"
           # A slice dealt nothing runs nothing: no name at all would be every test.
           [ -s "$lists/picked" ] || echo "no_test_was_dealt_to_this_slice" > "$lists/picked"
+          # A pull request's affected tests, this slice's share of them by
+          # their seconds.
+          if [ "$AFFECTED" = true ]; then
+            names=$(node scripts/ci-affected.mjs cargo-test "$RUNNER_TEMP/affected/selection.json" "$slice" "$AFFECTED_SLICES")
+            # Less what this platform cannot run: a change to the gates' file
+            # picks every gate in it.
+            names=$(printf '%s\n' $names | grep -vxF -f <(printf '%s\n' $elsewhere $tests_elsewhere) | tr '\n' ' ')
+            [ -n "${names// }" ] || names=no_test_was_dealt_to_this_slice
+            echo "command=cargo test --workspace -- --include-ignored --exact $names" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # A targeted measurement runs the named tests alone, matched as
           # libtest matches a filter: by substring.
           if [ -n "$TARGET_TESTS" ]; then
@@ -370,18 +481,27 @@ jobs:
       - name: Fail the slice when a test failed
         run: grep -qx 'exit 0' <(tail -1 "$RUNNER_TEMP/out/measure.log")
 
+  # After slices that failed too, to say what they covered; not after a run
+  # that was cancelled (a newer push, a failure elsewhere on the commit),
+  # whose slices left nothing to merge, and whose merge then failed as well.
   merge:
-    needs: [platforms, measure]
-    if: always() && needs.measure.result != 'skipped'
+    needs: [plan, platforms, measure]
+    if: ${{ !cancelled() && needs.measure.result != 'skipped' }}
     name: Merge ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).measure.mode == 'partial' }}
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The merge's base too: a pull request's changed lines are read
+          # against it.
+          fetch-depth: 2
       - uses: actions/download-artifact@v5
         with:
           name: supercov-self-${{ matrix.os }}
@@ -454,7 +574,49 @@ jobs:
       # A targeted measurement ran only some tests: it shows what they cover,
       # not what the whole suite leaves, so it holds no floor.
       - name: Hold Supercov to 100% coverage
-        if: inputs.tests == ''
+        if: inputs.tests == '' && env.AFFECTED != 'true'
         run: |
           "$RUNNER_TEMP/self/supercov" runs "$(cat "$RUNNER_TEMP/out/merged-id")" check \
             --min-lines 100 --min-branches 100 --min-mcdc 100
+      # A pull request measured in part: the lines it adds or changes held to
+      # 100% lines, branches and MC/DC by the affected tests. Every other line
+      # is covered as it was on main, where every test runs and the whole is
+      # held to 100%.
+      - name: Hold the changed lines to 100% coverage
+        if: env.AFFECTED == 'true'
+        run: node scripts/ci-affected.mjs changed-gaps HEAD^1 "$RUNNER_TEMP/out"/lines-gaps.jsonl "$RUNNER_TEMP/out"/branches-gaps.jsonl "$RUNNER_TEMP/out"/mcdc-gaps.jsonl
+      # Each test's seconds and processor seconds in this full measurement,
+      # a name in several slices summed: CI's plan hands them to every job
+      # that deals tests by their time (.github/actions/affected).
+      - name: Keep the test seconds
+        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p "$RUNNER_TEMP/seconds"
+          find "$RUNNER_TEMP/runs" -name test-seconds.tsv -exec cat {} + \
+            | awk -F'\t' '{ w[$1] += $2; c[$1] += $3 } END { for (n in w) printf "%s\t%.1f\t%.1f\n", n, w[n], c[n] }' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/seconds/test-seconds.tsv"
+          wc -l "$RUNNER_TEMP/seconds/test-seconds.tsv"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        with:
+          name: test-seconds
+          path: ${{ runner.temp }}/seconds/test-seconds.tsv
+          retention-days: 90
+      # main's measurement (or a full one by hand), kept as the map CI's plan
+      # reads: the runs (without
+      # what only queries read) and the build that answers for them.
+      - name: Keep the map
+        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        run: |
+          map="$RUNNER_TEMP/map"
+          mkdir -p "$map"
+          tar -czf "$map/map.tar.gz" --exclude='query-index.v1.bin*' --exclude='assessment-input.json.gz' --exclude='statement-spans.json' .supercov/runs
+          cp "$RUNNER_TEMP/self/supercov" "$map/supercov"
+          cp "$RUNNER_TEMP/out/merged-id" "$map/merged-id"
+          du -sh "$map"/*
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        with:
+          name: affected-map
+          path: ${{ runner.temp }}/map
+          retention-days: 30

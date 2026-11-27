@@ -418,6 +418,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 .map(|decision| decision.file.clone()),
         )
         .collect::<BTreeSet<_>>();
+    // fault-site: outside-evidence.import-line-evidence
     let canonical_root = crate::workspace::canonicalize_simplified(request.root)
         .unwrap_or_else(|_| request.root.to_owned());
     let mut by_file = BTreeMap::<String, RecordedFile>::new();
@@ -764,6 +765,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             recorded_by: parent.metadata.recorded_by.clone(),
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         publish_run(request.root, &metadata, &archive_path)
             .map_err(|error| format!("Could not publish the imported run: {error}"))?;

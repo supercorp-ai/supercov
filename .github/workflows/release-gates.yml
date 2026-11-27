@@ -1,0 +1,75 @@
+name: Release gates
+
+# The rest of the release check: the steps no other job runs, so the slow
+# tier's green status covers everything a release checks and a release needs
+# no long local run. They ran only in `release:check` on a busy machine, where
+# the timing gates (the watchdog's timeout exit) and the fixtures on fixed
+# ports failed for reasons of their own. A release build, the packed install
+# and the benchmark against the last release take ten minutes: they ran in
+# CI on every push, last of its jobs, and are the slow tier's now
+# (slow-tier.yml), every time it runs.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The stop-on-failure step cancels this commit's runs.
+  actions: write
+
+jobs:
+  release-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt
+      # The toolchain's one Rust cache, kept by main; restored only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The packed-install check holds the binary to the glibc 2.28 floor the
+      # release promises; this runner's own glibc is 2.39, so the binary is
+      # linked the way native-artifacts.yml links it, with cargo-zigbuild.
+      - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
+      - run: npm ci
+      - run: npm run test:watchdog
+      - run: npm run test:engine-contract
+      - run: npm run test:agent
+      - run: npm run test:child-attribution
+      - run: npm run test:host-loader
+      # Thin LTO in sixteen units: the published build's fat LTO in one unit
+      # took six minutes here, and what these gates check is behaviour. The
+      # benchmark below still holds this build to the last release.
+      - run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      - run: node scripts/native-package-integration.mjs --target x86_64-unknown-linux-gnu --binary target/x86_64-unknown-linux-gnu/release/supercov
+      - run: node scripts/native-release-set-integration.mjs
+      # The packed install, run with the release build above rather than a
+      # second release build of the same source.
+      - run: node scripts/packed-npx-integration.mjs
+        env:
+          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
+      # The benchmark, likewise with the release build above, and held to the
+      # last release built from its tag the same way: against the published
+      # fat-LTO build, the profile alone read 1.05x.
+      - run: node scripts/rust-transform-benchmark.mjs
+        env:
+          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
+          SUPERCOV_BENCHMARK_REFERENCE_BUILD: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
+          SUPERCOV_BENCHMARK_REFERENCE_BUILT: x86_64-unknown-linux-gnu/release/supercov
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure

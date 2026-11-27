@@ -1,0 +1,30 @@
+name: Flaky tests
+description: >
+  Names the tests a nextest run (`--retries 1`) passed only when it ran them
+  again: in the step summary, and as an artifact (`flaky-<id>`) the run's
+  `flaky-tests` job adds to the tracking issue (scripts/flaky-tests.mjs). The
+  job still passes; a test that failed every try still fails it. Use it after
+  the nextest step, on every outcome but a cancelled run (`!cancelled()`).
+inputs:
+  job:
+    description: The job, as the issue names it.
+    required: true
+  id:
+    description: The artifact's suffix, unique in the run.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        FLAKY_JOB: ${{ inputs.job }}
+      run: |
+        rm -f "$RUNNER_TEMP/flaky/flaky.json"
+        mkdir -p "$RUNNER_TEMP/flaky"
+        node scripts/flaky-tests.mjs collect "$RUNNER_TEMP/flaky/flaky.json" target/nextest/*/junit.xml
+    - uses: actions/upload-artifact@v4
+      with:
+        name: flaky-${{ inputs.id }}
+        path: ${{ runner.temp }}/flaky/flaky.json
+        if-no-files-found: ignore
+        retention-days: 7

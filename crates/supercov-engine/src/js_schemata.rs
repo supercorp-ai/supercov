@@ -95,7 +95,7 @@ const NEXT_SEGMENT_EXPORTS: &[&str] = &[
 /// The static exports Next.js reads from `file`: the segment config in
 /// any file (a route's, or one a route re-exports from), and `config`
 /// where Next.js reads it, in middleware or a proxy and under `pages/`.
-fn next_static_exports(file: &str) -> Vec<&'static str> {
+pub(crate) fn next_static_exports(file: &str) -> Vec<&'static str> {
     let mut names = NEXT_SEGMENT_EXPORTS.to_vec();
     let stem = file
         .rsplit('/')
@@ -1520,6 +1520,23 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
         }
         walk_mut::walk_tagged_template_expression(self, tagged);
     }
+}
+
+/// `program` with `mutant` applied in place, as StrykerJS's mutated program
+/// is: its node replaced, with no switch. Whether the node was found and
+/// replaced.
+pub(crate) fn apply_in_place<'a>(
+    allocator: &'a Allocator,
+    program: &mut oxc_ast::ast::Program<'a>,
+    mutant: &LedgerMutant,
+) -> bool {
+    let mut apply = Apply {
+        ast: AstBuilder::new(allocator),
+        mutant,
+        applied: false,
+    };
+    apply.visit_program(program);
+    apply.applied
 }
 
 /// `({ "name": value })["name"]`: `value`, named as its place names it.

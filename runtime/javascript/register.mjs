@@ -25,8 +25,24 @@ if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === 
     typeof Module.setSourceMapsSupport === "function")
     Module.setSourceMapsSupport(true, { nodeModules: false, generatedCode: true });
 // Before anything else loads: every module after this compiles from the
-// code the run's earlier processes left (atomic.mjs says why).
-enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
+// code the run's earlier processes left (atomic.mjs says why). Not in npm's
+// own process (`npm run`, `npx`, `npm exec`), which runs none of the
+// project's code: writing the compiled code of the hundreds of modules npm
+// loads cost each launcher more than the launchers after it saved, about
+// 3 ms per test on each of a measured Next.js suite's three. The commands it
+// launches have this preload, and the cache, of their own.
+// It is started through a link (`bin/npx`), so its script is looked at
+// where the link leads.
+const isNpmItself = (() => {
+    try {
+        return /[\\/]npm[\\/]bin[\\/]np[mx]-cli\.js$/.test(realpathSync(process.argv[1] ?? ""));
+    }
+    catch {
+        return false;
+    }
+})();
+if (!isNpmItself)
+    enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
 writePlaywrightCacheWhole();
@@ -628,6 +644,22 @@ else {
     return print.apply(this, [kept.join("\\n"), ...message.slice(1)]);
 })(warnOnce)); } catch {}
 `.replace(/\n\s*/g, " ");
+    // A strong pass's `next build` does not check types. The check emits
+    // nothing the server runs, and says nothing of a mutant: its worker reads
+    // the sources as their authors wrote them (`installAuthoredSourceView`
+    // above), switches and all left out, so it checks the checkout the
+    // measured run built already. It took 12 s of a 30 s build, in every job
+    // of a pass split across jobs. A measured run still checks: whether its
+    // command passes is the project's.
+    const unchecked = process.env.SUPERCOV_STRONG === "1" ? `
+;try { loadConfig = ((load) => async function loadConfig(...args) {
+    const config = await load.apply(this, args);
+    try {
+        if (config && typeof config === "object") config.typescript = { ...(config.typescript || {}), ignoreBuildErrors: true };
+    } catch {}
+    return config;
+})(loadConfig); } catch {}
+`.replace(/\n\s*/g, " ") : "";
     // A project's `turbopack.root`, set to its own directory, names the copy
     // here, while the copy's dependencies are links into the project's
     // node_modules. Turbopack resolves no package outside its root and
@@ -677,7 +709,7 @@ else {
             }
             else if (filename.endsWith("config.js") &&
                 /[\\/]next[\\/]dist[\\/]server[\\/]config\.js$/.test(filename)) {
-                content = append(content, widened);
+                content = append(content, `${widened}${unchecked}`);
             }
         }
         return Reflect.apply(compile, this, [content, filename, ...rest]);
@@ -1086,6 +1118,14 @@ if (generatedPlaywrightConfig &&
         }
     }
     process.argv.push("--config", generatedPlaywrightConfig);
+    // A strong pass spreads its serial spec files over every invocation of
+    // Playwright that names spec files (playwrightStrong.mjs).
+    if (process.env.SUPERCOV_STRONG_PLAN) {
+        const strong = await import(__rewriteRelativeImportExtension(new URL("./playwrightStrong.mjs", import.meta.url)));
+        const spread = strong.spreadSerialFiles(process.argv, projectRoot ?? process.cwd());
+        if (spread.length)
+            console.log(`[supercov] strong pass: ${spread.length} spec file(s) with a serial describe run in this invocation too, each taking its own mutants of them: ${spread.join(", ")}`);
+    }
 }
 // A process the runner marked as not a test worker skips the wrapper, unless
 // it was started from Playwright's own files: a worker Playwright starts some

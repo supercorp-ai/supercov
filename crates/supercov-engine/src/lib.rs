@@ -51,12 +51,14 @@ pub mod javascript_frontend;
 pub mod javascript_run;
 #[cfg(test)]
 mod js_babel_print;
+pub mod js_compiled_equivalence;
 pub mod js_instrumenter;
 mod js_mutant_links;
 mod js_mutants;
 mod js_regex_mutants;
 mod js_schemata;
 mod js_static_mutants;
+mod js_value_reads;
 mod js_weak_mutation;
 pub mod jvm_instrumenter;
 pub mod jvm_mutants;
@@ -106,6 +108,7 @@ mod rust_mutants;
 pub mod rust_owned_doctests;
 pub mod rust_owned_nextest;
 pub mod rust_project;
+pub mod rust_reads;
 pub mod rust_run;
 pub mod rust_runner_attempt;
 pub mod rust_runtime;
@@ -129,8 +132,12 @@ pub mod source_units;
 mod stable_ids;
 #[cfg(test)]
 mod store_shapes;
+pub mod strong_anchors;
 pub mod strong_driver;
 pub mod strong_plan;
+pub mod strong_reach;
+pub mod strong_tiers;
+pub mod strong_verdicts;
 pub mod support_reach;
 #[cfg(test)]
 mod test_directory;

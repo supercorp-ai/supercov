@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import Module from "node:module";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -748,6 +749,218 @@ test("a loopback request that loses its carrier is retained as background eviden
           .map((line) => JSON.parse(line)),
       );
     assert.ok(scoped.some((record) => record.id === "outer-scoped-hit"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// What a request sets off and leaves running after its answer -- a promise
+// no one awaits, a poller the first request started that later requests' work
+// runs in -- keeps the request's async context. It is no test's: its hits are
+// background evidence, and a strong pass's per-request switch gives it the
+// process's mutant, not the one the answered request named
+// (docs/design/strong-mutation.md, "Work a request leaves running").
+test("work a request leaves running after its answer is no test's, and runs the process's mutant", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-after-answer-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import http from "node:http";
+          const runtime = await import(${JSON.stringify(runtime)});
+          const scope = (attempt) => ({
+            version: 1,
+            runId: "run-after-answer",
+            workerId: "worker-1",
+            testId: "test-" + attempt,
+            testKey: "test-" + attempt,
+            retry: 0,
+            attemptId: "attempt-" + attempt,
+            mutant: "src/a.js#3",
+          });
+          const slot = runtime.strongSlot("src/a.js");
+          const seen = [];
+          const later = [];
+          let poller;
+          const handler = runtime.withRequestPhase((request, response) => {
+            runtime.coverageHit("in-request");
+            seen.push(["in-request", slot.a]);
+            // The first request starts a poller; the request's own work is
+            // left running after the answer.
+            poller ??= setInterval(() => later.push(slot.a), 5);
+            setTimeout(() => {
+              runtime.coverageHit("after-answer");
+              seen.push(["after-answer", slot.a]);
+            }, 30);
+            response.end("ok");
+          });
+          const server = http.createServer(handler);
+          await new Promise((done) => server.listen(0, "127.0.0.1", done));
+          const port = server.address().port;
+          const send = (attempt) => new Promise((done, fail) => {
+            const headers = runtime.withCoverageCarrier({ version: 1, scope: scope(attempt) }, () => runtime.coverageContextHeaders());
+            http.get({ host: "127.0.0.1", port, path: "/", headers }, (result) => {
+              result.resume();
+              result.on("end", done);
+            }).on("error", fail);
+          });
+          await send("one");
+          await new Promise((done) => setTimeout(done, 60));
+          later.length = 0;
+          await send("two");
+          await new Promise((done) => setTimeout(done, 60));
+          clearInterval(poller);
+          await new Promise((done) => server.close(done));
+          console.log(JSON.stringify({ seen, later: [...new Set(later)] }));
+        `,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-after-answer",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: root,
+          // The server a strong pass starts with a mutant switched on.
+          SUPERCOV_ACTIVE_MUTANT: "src/a.js#7",
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const { seen, later } = JSON.parse(child.stdout.trim());
+    // The request's own work runs its mutant; what it left running, and the
+    // poller the first request started while the second's ran, the process's.
+    assert.deepEqual(seen, [
+      ["in-request", 3],
+      ["after-answer", 7],
+      ["in-request", 3],
+      ["after-answer", 7],
+    ]);
+    assert.deepEqual(later, [7]);
+    const records = (directory) =>
+      readdirSync(directory)
+        .filter((file) => file.endsWith(".jsonl"))
+        .flatMap((file) =>
+          readFileSync(resolve(directory, file), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line)),
+        );
+    const runDirectory = resolve(root, "run-after-answer");
+    const scoped = records(resolve(runDirectory, "attempts"));
+    assert.ok(scoped.some((record) => record.id === "in-request"), JSON.stringify(scoped));
+    assert.ok(!scoped.some((record) => record.id === "after-answer"), JSON.stringify(scoped));
+    // Work no request named, and no request's number: the server's own.
+    const background = records(resolve(runDirectory, "background"));
+    const after = background.filter((record) => record.id === "after-answer");
+    assert.ok(after.length > 0, JSON.stringify(background));
+    assert.ok(after.every((record) => record.scope === undefined && record.request === undefined));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A framework that loads a route's module while serving the first request to
+// it, and calls the route's handler with a request object of its own (a web
+// `Request`, as Next.js does): the handler wrapped then is no attempt's, and
+// a later request naming no test (a webhook a mock sends) runs the process's
+// mutant, not that first attempt's. The handler's work after its answer is no
+// request's either. Each attempt's switch notes, once, that its mutant ran.
+test("a route loaded while a request is served has no owner, and its work after the answer is the server's own", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-route-loaded-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import http from "node:http";
+          const runtime = await import(${JSON.stringify(runtime)});
+          const scope = (attempt) => ({
+            version: 1,
+            runId: "run-route-loaded",
+            workerId: "worker-1",
+            testId: "test-" + attempt,
+            testKey: "test-" + attempt,
+            retry: 0,
+            attemptId: "attempt-" + attempt,
+            mutant: "src/a.js#3",
+          });
+          const slot = runtime.strongSlot("src/a.js");
+          const seen = [];
+          const evaluate = (where, name) => {
+            // The switch: its mutant's branch calls h().
+            if (slot.a === 3) slot.h();
+            seen.push([name, where, slot.a]);
+          };
+          let route;
+          const server = http.createServer(async (request, response) => {
+            // The route's module loads on its first request, and is wrapped there.
+            route ??= runtime.withRequestPhase(async (web, name) => {
+              evaluate("in-request", name);
+              setTimeout(() => evaluate("after-answer", name), 30);
+              return "ok";
+            });
+            const web = { headers: new Headers(Object.entries(request.headers).map(([key, value]) => [key, String(value)])) };
+            response.end(await route(web, request.url.slice(1)));
+          });
+          await new Promise((done) => server.listen(0, "127.0.0.1", done));
+          const port = server.address().port;
+          const send = (name, attempt) => new Promise((done, fail) => {
+            const headers = attempt ? runtime.withCoverageCarrier({ version: 1, scope: scope(attempt) }, () => runtime.coverageContextHeaders()) : {};
+            http.get({ host: "127.0.0.1", port, path: "/" + name, headers }, (result) => {
+              result.resume();
+              result.on("end", done);
+            }).on("error", fail);
+          });
+          await send("first", "one");
+          await new Promise((done) => setTimeout(done, 60));
+          await send("webhook");
+          await new Promise((done) => setTimeout(done, 60));
+          await send("again", "one");
+          await send("other", "two");
+          await new Promise((done) => setTimeout(done, 60));
+          await new Promise((done) => server.close(done));
+          console.log(JSON.stringify(seen));
+        `,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-route-loaded",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: root,
+          SUPERCOV_STRONG_RESULTS: resolve(root, "results.jsonl"),
+          // The server a strong pass starts with a mutant switched on.
+          SUPERCOV_ACTIVE_MUTANT: "src/a.js#7",
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const seen = JSON.parse(child.stdout.trim());
+    const of = (name) => seen.filter(([named]) => named === name).map(([, where, mutant]) => [where, mutant]);
+    // The first attempt's own request runs its mutant, and so does the
+    // request of each later attempt; the webhook naming no test, and what
+    // any request left running after its answer, the process's.
+    assert.deepEqual(of("first"), [["in-request", 3], ["after-answer", 7]]);
+    assert.deepEqual(of("webhook"), [["in-request", 7], ["after-answer", 7]]);
+    assert.deepEqual(of("again"), [["in-request", 3], ["after-answer", 7]]);
+    assert.deepEqual(of("other"), [["in-request", 3], ["after-answer", 7]]);
+    const reached = readFileSync(resolve(root, "results.jsonl.reached.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(reached, [
+      { attemptId: "attempt-one", mutant: "src/a.js#3" },
+      { attemptId: "attempt-two", mutant: "src/a.js#3" },
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1529,6 +1742,44 @@ test("a process compiles into the run's cache unless the command named its own",
   }
 });
 
+// npm's own process (npm, npx), started through its link, runs none of the
+// project's code: it writes nothing to the run's compile cache. A script of
+// the project does.
+test("npm's own process keeps no compiled code, a project's script does", { skip: process.platform === "win32" }, () => {
+  const registerUrl = new URL("../../runtime/javascript/register.mjs", import.meta.url).href;
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-npm-cache-"));
+  try {
+    mkdirSync(resolve(root, "lib/node_modules/npm/bin"), { recursive: true });
+    mkdirSync(resolve(root, "bin"));
+    const body = "require('node:zlib'); module.exports = Array.from({ length: 50 }, (_, i) => i * 2);\n";
+    writeFileSync(resolve(root, "lib/node_modules/npm/bin/npx-cli.js"), body);
+    symlinkSync(resolve(root, "lib/node_modules/npm/bin/npx-cli.js"), resolve(root, "bin/npx"));
+    writeFileSync(resolve(root, "script.cjs"), body);
+    const cached = (script) => {
+      const cache = resolve(root, `cache-${script.replaceAll("/", "-")}`);
+      const ran = spawnSync(process.execPath, [`--import=${registerUrl}`, resolve(root, script)], { encoding: "utf8", timeout: 15000, env: { ...process.env, NODE_COMPILE_CACHE: undefined, SUPERCOV_COMPILE_CACHE: cache } });
+      assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+      const files = [];
+      const walk = (directory) => {
+        for (const entry of readdirSync(directory, { withFileTypes: true }))
+          entry.isDirectory() ? walk(resolve(directory, entry.name)) : files.push(entry.name);
+      };
+      try {
+        walk(cache);
+      } catch {
+        // No cache directory: nothing was kept.
+      }
+      return files.length;
+    };
+    if (typeof Module.enableCompileCache !== "function")
+      return;
+    assert.equal(cached("bin/npx"), 0, "npx kept compiled code");
+    assert.ok(cached("script.cjs") > 0, "a project's script kept none");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // A test that spies on a built-in collection method counts its own code's
 // calls: a probe's first hit, a decision's end and a selection record through
 // the built-ins as the runtime found them, so the count is what it is without
@@ -1692,4 +1943,69 @@ test("a process writing records writes each value its probes see once per contex
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a module-level literal is read through a proxy that records which keys each read named, and while a module loads, its escapes", async () => {
+  const { trackV2, resumeV2, registerProbeV2 } = await import("../../runtime/javascript/runtime.mjs");
+  const hits = [];
+  const file = { hit: (place) => hits.push(place) };
+  const taken = () => hits.splice(0).sort((a, b) => a - b);
+  // A primitive comes back as it is.
+  assert.equal(trackV2(file, 0, [], "plain"), "plain");
+  assert.equal(trackV2(file, 0, [], null), null);
+  // Registering a module marks it loading until its top level ends, or the
+  // next microtask where it never does: reads then hit the escapes (any + 1,
+  // a key's + 1).
+  const registered = registerProbeV2({ key: "values", points: 10, decisionWidths: [], defaultCount: 0, selectionPoints: [0, 0], selectionTrees: [] });
+  const words = trackV2(file, 0, ["en"], { en: trackV2(file, 4, ["hi"], { hi: "Hello", bye: "Bye" }), fr: "Bonjour" });
+  assert.equal(words.en.hi, "Hello");
+  assert.deepEqual(taken(), [1, 3, 5, 7]);
+  registered.loaded();
+  assert.equal(words.fr, "Bonjour");
+  assert.deepEqual(taken(), [0]);
+  registerProbeV2({ key: "throws", points: 1, decisionWidths: [], defaultCount: 0, selectionPoints: [0, 0], selectionTrees: [] });
+  words.fr;
+  assert.deepEqual(taken(), [1]);
+  await Promise.resolve();
+  // Later, reads: any read of a literal, and its key's where it has one.
+  assert.equal(words.fr, "Bonjour");
+  assert.deepEqual(taken(), [0]);
+  assert.equal(words.en.bye, "Bye");
+  assert.deepEqual(taken(), [0, 2, 4]);
+  assert.equal("hi" in words.en, true);
+  assert.deepEqual(Object.keys(words.en), ["hi", "bye"]);
+  assert.equal(Object.getOwnPropertyDescriptor(words.en, "hi").value, "Hello");
+  // `in`, Object.keys (which reads each key's descriptor) and the descriptor.
+  assert.equal(taken().filter((place) => place === 6).length, 3);
+  // Writes, definitions and deletions reach the literal.
+  words.en.hi = "Hi";
+  Object.defineProperty(words.en, "new", { value: 1, configurable: true });
+  delete words.en.new;
+  assert.equal(words.en.hi, "Hi");
+  assert.equal(Object.hasOwn(words.en, "new"), false);
+  // A proxy behaves as its target.
+  const list = trackV2(file, 8, ["0"], ["a", "b"]);
+  assert.equal(Array.isArray(list), true);
+  assert.deepEqual([...list], ["a", "b"]);
+  assert.equal(JSON.stringify(words), '{"en":{"hi":"Hi","bye":"Bye"},"fr":"Bonjour"}');
+  // structuredClone copies a value holding one through its traps.
+  taken();
+  const cloned = structuredClone({ words, list, kept: new Map([["k", list]]), set: new Set([words.en]), at: new Date(0) });
+  assert.deepEqual(cloned.words, { en: { hi: "Hi", bye: "Bye" }, fr: "Bonjour" });
+  assert.deepEqual(cloned.kept.get("k"), ["a", "b"]);
+  assert.equal(cloned.at.getTime(), 0);
+  assert.ok(taken().includes(8));
+  assert.deepEqual(structuredClone({ a: 1 }), { a: 1 });
+  assert.deepEqual(structuredClone({ a: 1 }, {}), { a: 1 });
+  assert.throws(() => structuredClone(() => 1), { name: "DataCloneError" });
+  assert.deepEqual(structuredClone(words, {}).en, { hi: "Hi", bye: "Bye" });
+  // A module's top level resumes loading after an await.
+  taken();
+  assert.equal(resumeV2(registered, 7), 7);
+  words.fr;
+  assert.deepEqual(taken(), [1]);
+  await Promise.resolve();
+  // A hit that throws reads on.
+  const failing = trackV2({ hit: () => { throw new Error("no"); } }, 0, [], { a: 1 });
+  assert.equal(failing.a, 1);
 });

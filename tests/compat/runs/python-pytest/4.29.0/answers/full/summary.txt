@@ -1,11 +1,11 @@
-run run_520321999cc65095
+run run_ea616926b382874a
 command: python3 -m pytest -q
 
 Coverage
   Lines      71.43% (10/14)
   Branches   58.33% (7/12)
   MC/DC      40.00% (2/5)
-Assertions   not assessed — npx supercov runs run_520321999cc65095 assertions assess
+Assertions   not assessed — npx supercov runs run_ea616926b382874a assertions assess
 
 By test kind
   unit            3 test(s)  lines  64.29%  branches  58.33%  MC/DC  40.00%
@@ -26,9 +26,9 @@ Remaining
   Files with measurement limits     0
 
 Commands
-  npx supercov runs 'run_520321999cc65095' files
-  npx supercov runs 'run_520321999cc65095' gaps
-  npx supercov runs 'run_520321999cc65095' kinds
-  npx supercov runs 'run_520321999cc65095' runners
-  npx supercov runs 'run_520321999cc65095' scope
-  npx supercov runs run_520321999cc65095 --help
+  npx supercov runs 'run_ea616926b382874a' files
+  npx supercov runs 'run_ea616926b382874a' gaps
+  npx supercov runs 'run_ea616926b382874a' kinds
+  npx supercov runs 'run_ea616926b382874a' runners
+  npx supercov runs 'run_ea616926b382874a' scope
+  npx supercov runs run_ea616926b382874a --help

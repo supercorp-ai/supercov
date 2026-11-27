@@ -157,9 +157,12 @@ function redirected(specifier, context) {
         if (REPLACEMENT.startsWith("file:")) {
             return { url: REPLACEMENT, shortCircuit: true };
         }
+        // Relative to the project's root, not the process's directory: a
+        // server Playwright starts from its config's folder imports
+        // Playwright too.
         if (REPLACEMENT.startsWith(".")) {
             return {
-                url: pathToFileURL(resolvePath(process.cwd(), REPLACEMENT)).href,
+                url: pathToFileURL(resolvePath(PROJECT_ROOT ?? process.cwd(), REPLACEMENT)).href,
                 shortCircuit: true,
             };
         }
@@ -240,8 +243,12 @@ export async function load(url, context, nextLoad) {
 }
 export function loadSync(url, context, nextLoad) {
     // Every module this process loads, required or imported: a server's
-    // runtime rescans the module cache for new ones only when this moved.
-    globalThis.__SUPERCOV_MODULE_LOADS__ = (globalThis.__SUPERCOV_MODULE_LOADS__ ?? 0) + 1;
+    // runtime rescans the module cache for new ones only when this moved. A
+    // built-in (`node:path`) is never an entry of that cache, so it does not
+    // move it: a Next server requires `path` on nearly every request, and
+    // every request rescanned hundreds of keys for nothing.
+    if (!url.startsWith("node:"))
+        globalThis.__SUPERCOV_MODULE_LOADS__ = (globalThis.__SUPERCOV_MODULE_LOADS__ ?? 0) + 1;
     if (context.conditions?.includes("require"))
         return nextLoad(url, context);
     return loaded(url, nextLoad(url, context));

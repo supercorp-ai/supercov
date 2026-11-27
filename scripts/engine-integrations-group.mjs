@@ -21,15 +21,20 @@ if (!(groups >= 1 && group >= 1 && group <= groups)) {
 }
 
 const scripts = JSON.parse(readFileSync(resolve(repository, 'package.json'), 'utf8')).scripts;
+// On a pull request, CI's plan may name the scripts its change can affect
+// (scripts/ci-affected.mjs): those alone are dealt.
+const affected = process.env.AFFECTED_SCRIPTS ? new Set(process.env.AFFECTED_SCRIPTS.split(',')) : null;
 const commands = scripts['test:engine-integrations']
   .split(' && ')
   .filter((command) => command.startsWith('node scripts/'))
-  .map((command) => command.slice('node '.length).split(' '));
+  .map((command) => command.slice('node '.length))
+  .filter((command) => !affected || affected.has(command))
+  .map((command) => command.split(' '));
 
 const gates = new Map();
 for (const [, name, script, args] of readFileSync(resolve(repository, 'crates/supercov-cli/tests/e2e_gates.rs'), 'utf8').matchAll(/^ {4}([a-z0-9_]+) => "([^"]+)"(?: \[([^\]]*)\])?/gmu)) {
   const words = (args ?? '').split(',').map((word) => word.trim().replace(/^"|"$/gu, '')).filter(Boolean);
-  gates.set([`scripts/${script}`, ...words].join(' '), name);
+  gates.set([script, ...words].join(' '), name);
 }
 const seconds = new Map(
   readFileSync(resolve(repository, '.github/gate-seconds.tsv'), 'utf8')

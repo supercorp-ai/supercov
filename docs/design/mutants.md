@@ -60,7 +60,9 @@ Each probe's runtime helper (`compareV2`, `arithV2`, `assignV2`, `methodV2`,
 after every other name the file's allocator gives. A file with no site of a
 kind imports nothing for it, and the names of everything else in it are those
 it has with the probes off: a file with no site at all is instrumented byte
-for byte as with the probes off.
+for byte as with the probes off, but for one call that ends its top level
+(`__supercovFile.loaded()`), which tells reads of module-level values made
+as modules load from later ones (`strong-mutation.md`, Module-level values).
 
 ### Ids and descriptors
 
@@ -499,6 +501,60 @@ the comparison inside the block (or function body: a parameter's default does
 not see it) that declares it, and the file must hold no `with` and no
 reference to `eval`, which can bind a name no declaration shows.
 
+### `compiles-to-original`: compiled the same
+
+A strong pass decides it, not the listing (`js_compiled_equivalence`). Before
+the pass runs a JavaScript or TypeScript mutant the plan has not decided, it
+compiles the mutant's file twice with one pinned compiler: once as measured,
+once with the mutant applied in place (StrykerJS's mutated program, no
+switch). Each compile parses the file, rejects it on any parse or early
+error, erases TypeScript keeping every import as written
+(`onlyRemoveTypeImports`), turns JSX into calls, then runs oxc's minifier
+(`oxc_minifier`, the version in `Cargo.lock`) and prints the result
+minified. Where the two outputs are byte for byte the same, the mutant is
+`equivalent` (strong verdict `equivalent`, reason `compiles-to-original`)
+and is not run.
+
+Why it is sound: each step preserves what the program does, so a program
+and its output behave alike; two programs with one output behave alike for
+every input (Papadakis et al., "Trivial Compiler Equivalence", ICSE 2015).
+The minifier runs with every option that trades exactness for size off:
+`@__PURE__` annotations are not trusted, property reads and writes, global
+reads and imports are taken to have effects, nothing unreferenced is
+dropped, function and class names are kept (`f.name`), `debugger` is kept,
+and nothing is renamed. What it still assumes is what any optimising
+JavaScript compiler assumes: the built-ins behave as the language defines
+them (`"a".trim()` is `"a"`), and the program does not read its own source
+text. A function that reads its source (`f.toString()`) is the one place
+the two differ, and there the strong build places no switch at all
+(`function-source`); a stack trace's columns, the other way to see the
+text, differ under the strong build's switches anyway. The source compared
+is the source the run measured: a file whose bytes differ from the run's
+source manifest is not compared, and its mutants run.
+
+Anything short of an exact match runs as before: a file that does not
+parse or compile (named on the standard error), a mutant whose node is not
+found, a transform that reports an error.
+
+Each compile is of the whole file, so the work is a file's size times its
+mutants. A pass compiles at most 512 MiB of source, the cheapest files
+first: a few seconds on a few cores. A file past that (a generated one,
+thousands of mutants in a hundred kilobytes) is named on the standard error
+and its mutants run as before.
+
+#### Duplicates
+
+Two mutants of one file whose compiled outputs are the same are one
+program, by the same argument. The pass keeps the first in its plan and
+takes the others out before sharding, so every shard takes out the same
+ones; once the kept mutant has a verdict a run decides -- `killed`,
+`survived` or `timeout` -- each duplicate gets that verdict, with no test of
+its own run (`tests: 0`) and the reason `same-code-as:<id>`. A kill by the
+kept one is a kill of the same program; a survival is the same program
+surviving every test that could kill it. An `error`, or no verdict (a
+budget spent), gives the duplicates nothing, and the next pass compares
+them again.
+
 ### Untestable boundaries: a hint
 
 Some mutants are not equivalent but no test can practically tell them apart. A
@@ -553,6 +609,98 @@ as one without values.
 `statement-exclusions.json` is still kept once per run under `shards/<n>/`;
 the reader requires every copy to be the same, which runs of one source are.
 
+### Strong verdicts
+
+Each run's `strong-mutation.json` holds the verdicts of a strong pass over it,
+whole or a `--shard` of it. The merge keeps them in one for the merged run,
+keyed by mutant id, for the mutants of the merged run's plan alone (the
+mutants of the merged list, with their candidates over the merged suite). A
+run lends verdicts only where its file of verdicts reads and is of the merged
+list's mutant set; a run of another set is named in the merge's output and
+lends none. A run some of whose tests another run measured again after a
+support file changed lends none: a kill there may be its old test's. A
+verdict of a file the run recorded with other bytes than the run whose list of
+it the merge took is of other code, and is not read.
+
+What a verdict claims decides how it merges:
+
+- A mutant the merged plan decides without running it (no test reached it, no
+  test infected it, or a static rule shows it equivalent) takes the plan's
+  verdict, as a pass over the merged run would.
+- `killed` and `timeout` say a test of that run told the mutant apart. That
+  test is a test of the merged suite, so a kill in any run is a kill (killed
+  before timeout). `unviable` says the mutant does not compile, whatever runs
+  it.
+- `survived` says no test of that run could tell it apart: the run ran it
+  against each of its candidates, and its other tests did not infect it. For
+  the merged suite that holds only if every test that could kill it there
+  (its candidates in the merged plan, and the tests of the files it runs
+  whole) is a test some run that let it survive measured, by test id. Shards
+  of one suite each measure every test, so a survival in one stands. A unit
+  run and an end-to-end run do not: where an end-to-end test infects the
+  mutant and that run has no verdict, survived is not known for the merged
+  suite, and the mutant is left without a verdict for a later pass to run. A
+  test a run recorded without an id lends no survival.
+- `error` says the mutant could not be run there: it stands only where no run
+  holds anything else, and never outranks a definite verdict or an undecided
+  survival.
+- `no-coverage` and `equivalent` from one run, where the merged plan does not
+  decide the mutant, say only that run's tests could not reach it: they claim
+  nothing for the merged suite.
+
+Runs whose mutant lists differ are refused before this (above); runs whose
+verdicts are of a set the merged run does not list are skipped, not refused,
+since their coverage still merges and a pass over the merged run runs what
+they would have lent.
+
+The merge says how many verdicts it took from each run. A verdict is counted
+for the run it was taken from: of the runs that hold the winning status, the
+first in the order the runs are merged (newest first when none is named). A
+verdict the merged plan decides is counted apart. Shards of a later round each
+hold the earlier rounds' verdicts alike, so the first run counts those and
+each other run what its own share added.
+
+A shard never saves into a run another job may also save into. A run's
+verdicts are one file in its directory, keyed by the run's id, so copies of one
+run that several jobs wrote land on one path when their stores are put
+together, and all but one are lost; the merge refuses a run named twice
+rather than guess. `supercov mutants --shard` therefore saves into a run of
+its own even where the checkout is unchanged since the latest run (a run
+restored from an earlier round, which every job of the round holds).
+
+On an unchanged checkout that run is made, not measured
+(`lifecycle::derive_run`): the newest run with the latest run's fingerprint,
+not a merge, that recorded its mutants' values and whose command passed (or,
+where none did, failed only in tests that failed: see
+`docs/design/strong-mutation.md`, "Continuing a run whose tests failed") is
+copied under a new id and start, without its verdicts and its query index.
+Its evidence and every record published from it stand for the new run,
+which differs only in its id. The evidence still names the run it was
+recorded under as its scope, which the new run's `measuredAs` gives, and
+every analysis of it reads that id; it supersedes the runs of its command a run
+measured now would, keeps every verdict the restored runs hold (they were
+measured on the same files), and the round's runs merge as shards of one
+suite. Where no such run is restored (none recorded the values, or each one's
+command failed for a reason other than its tests) the shard measures, as
+after an edit, and says what kept the newest such run out.
+
+4.29.6 measured a run of its own in every job of every round. On a large
+application's e2e suite that was about 100 s of each 10-minute job, and the
+measurements differed: one job's had four tests fail at random, and the next
+round dropped what that run alone had decided for every mutant whose
+candidates shared a test file with them. Copying a run costs a reflink or a
+copy of its files (about 25 MB there) and records exactly what the restored
+run records. Merging copies of one run by unioning their verdicts was the
+other way out, and was rejected in 4.29.6: it needs every job's copy
+downloaded apart and named by path, which the documented flow does not do.
+
+`--budget` is the command's: it counts from its start, so measuring and
+planning spend it too, and the pass gets what is left. A measurement is never
+cut short (a measurement stopped halfway records nothing), so one that
+outlasts the budget leaves the pass none; the summary says what measuring
+took where it took half the budget or more.
+`--plan` writes nothing, and reads the latest run as it is.
+
 ## What stays out
 
 - A weak verdict that compares what the original and the mutated regex
@@ -566,6 +714,7 @@ the reader requires every copy to be the same, which runs of one source are.
   turn's records, values among them, as it loses its hits. A statement whose
   hit was written in an earlier turn and whose comparison ran in the lost one
   reads as if the comparison never ran there.
-- Equivalent mutants beyond the static rules above are not detected. They show
+- Equivalent mutants beyond the static rules above and what compiles to
+  the original are not detected. They show
   up as `not-infected` with their reason, which is often what makes them
   recognisable.

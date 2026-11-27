@@ -224,6 +224,10 @@ fn mutation_card(section: &Section) -> String {
                 (strong.unviable, "unviable: does not compile".into()),
                 (strong.error, "error: no verdict".into()),
                 (strong.not_run, format!("not run: no driver for {undriven}")),
+                (
+                    strong.survived_so_far,
+                    "survived so far: the rest of their candidates not run yet".into(),
+                ),
                 (strong.pending, "without a strong verdict yet".into()),
             ]),
         );
@@ -238,6 +242,7 @@ fn mutation_card(section: &Section) -> String {
                         mutant.outcome,
                         crate::mutation_report::Outcome::Error
                             | crate::mutation_report::Outcome::NotRun
+                            | crate::mutation_report::Outcome::SurvivedSoFar
                             | crate::mutation_report::Outcome::Pending
                     )
             })
@@ -314,6 +319,22 @@ fn mutation_card(section: &Section) -> String {
             card,
             "<details><summary>and {} more</summary><ul>{listed}</ul></details>",
             rest.len()
+        );
+    }
+    // Those proven equivalent, folded apart from the survivors: nothing to
+    // triage.
+    let equivalent = section
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.outcome == crate::mutation_report::Outcome::Equivalent)
+        .map(survivor)
+        .collect::<Vec<_>>();
+    if !equivalent.is_empty() {
+        let _ = write!(
+            card,
+            "<details><summary>{} proven equivalent: not run, not survivors, and not in the score</summary><ul>{}</ul></details>",
+            equivalent.len(),
+            equivalent.concat()
         );
     }
     card.push_str("</section>");
@@ -895,6 +916,7 @@ mod tests {
             commit: None,
             changed_lines: 4,
             lines_with_mutants: 1,
+            unrun_lines: BTreeMap::new(),
         });
         let page = html(&view(), &BTreeMap::new(), "", Some(&weak));
         for expected in [
@@ -904,6 +926,13 @@ mod tests {
         ] {
             assert!(page.contains(expected), "{expected} in {page}");
         }
+        // Mutants proven equivalent, folded apart from the survivors.
+        let proven = section(vec![mutant("src/a.js", 7, false, Equivalent)], true);
+        let page = html(&view(), &BTreeMap::new(), "", Some(&proven));
+        assert!(
+            page.contains("<details><summary>1 proven equivalent: not run, not survivors, and not in the score</summary><ul><li><a href=\"#src/a.js:7\">src/a.js:7</a>"),
+            "{page}"
+        );
         // A pass with no verdict a score counts; a change with no mutants.
         let mut unscored = section(vec![mutant("src/a.js", 1, false, Error)], true);
         unscored.tally.mutation_score = None;
@@ -921,6 +950,16 @@ mod tests {
             page.contains("No mutant is on a line this change added or changed."),
             "{page}"
         );
+        // Survived so far: no verdict, and why is given.
+        let mut open = section(vec![mutant("src/a.js", 1, false, SurvivedSoFar)], true);
+        open.tally.strong.survived_so_far = 1;
+        let page = html(&view(), &BTreeMap::new(), "", Some(&open));
+        for expected in [
+            "<strong>1</strong> survived so far: the rest of their candidates not run yet</li>",
+            "Why some have no verdict:",
+        ] {
+            assert!(page.contains(expected), "{expected} in {page}");
+        }
         // Every verdict one a score counts: no reasons to give.
         let settled = section(vec![mutant("src/a.js", 1, false, Killed)], true);
         let page = html(&view(), &BTreeMap::new(), "", Some(&settled));

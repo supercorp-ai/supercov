@@ -1,17 +1,32 @@
 name: CI
 
+# The fast tier: every push to a pull request, drafts included, says in about
+# ten minutes whether its build, lint and affected tests pass, as the `Fast
+# tier` status. The slow tier (slow-tier.yml: Self Coverage, Compatibility,
+# React, Next.js and the release gates) runs once the pull request is ready.
+# CONTRIBUTING.md says how each is asked for.
 on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated jobs to run (check, bun-bootstrap, launch-arguments, lint, engine-integrations, release-gates, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm). Empty runs them all."
+        description: "Comma-separated jobs to run (check, bun-bootstrap, launch-arguments, lint, engine-integrations, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm). Empty runs them all."
         default: ""
         type: string
   # The gate every change is expected to pass, on the change itself. It ran
   # only when someone remembered to ask for it, which meant a pull request's
   # green tick said the React jobs had passed and nothing
   # about `cargo fmt`, clippy, the workspace tests or the packaged assets.
+  # A pull request runs on Linux alone, the tests its change can affect; the
+  # `full-ci` label, or a release pull request, runs every job on every
+  # platform (scripts/ci-affected.mjs).
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  # The fast tier each night on main, every job on every platform: a gate
+  # whose own pull requests are rare goes stale where nothing runs it, and a
+  # release then finds it broken. Its `Fast tier` status on main's commit is
+  # what a release of that commit reads (publish.yml).
+  schedule:
+    - cron: "0 1 * * *"
 
 permissions:
   contents: read
@@ -21,13 +36,36 @@ permissions:
 # A newer push to a pull request, or a newer run started by hand on the same
 # branch for the same jobs, replaces the one before: an iteration that asked
 # again no longer waits behind its own stale run.
+# A label other than `full-ci` is a run of its own that runs nothing, so it
+# cancels nothing.
 concurrency:
-  group: ci-${{ github.ref }}-${{ inputs.only }}
+  group: ci-${{ github.ref }}-${{ inputs.only }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: true
 
 jobs:
+  # Which jobs this change can affect (scripts/ci-affected.mjs): on a pull
+  # request, the jobs whose tests Self Coverage's map of main says the change
+  # can reach, and only those tests; everything on a run by hand, a release
+  # pull request, a change to CI itself, or when the map cannot answer. The
+  # step summary says why each job runs in full, in part, or not at all.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+      mode: ${{ steps.affected.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: ci
+
   check:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',check,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',check,')) && fromJSON(needs.plan.outputs.jobs)['check'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -35,12 +73,17 @@ jobs:
       matrix:
         # Every supported Node, here only: the Compatibility workflow's Node
         # jobs ran the same check again on 22 and 24.
-        node: [22, 24, 25]
-        # The workspace's tests in two halves, each a share of every test
-        # binary by name, run under nextest with the binaries side by side:
-        # `cargo test` ran them one after another, six of the job's seven
-        # minutes.
-        part: [1, 2]
+        node: ${{ fromJSON(needs.plan.outputs.jobs).check.matrix.node }}
+        # The tests in parts that take about as long, dealt by the seconds
+        # each took in main's newest Self Coverage run (scripts/ci-affected.mjs
+        # nextest): the affected ones in as many parts as keep each to a few
+        # minutes, or every test in three. Split by a hash of their names,
+        # the affected tests' one part took fifteen minutes and a half of
+        # every test eighteen, the other half eight.
+        part: ${{ fromJSON(needs.plan.outputs.jobs).check.matrix.part }}
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).check.mode == 'partial' }}
+      PARTS: ${{ fromJSON(needs.plan.outputs.jobs).check.parts || 1 }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -50,33 +93,55 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
-      # Dependencies and the build kept between runs: each job compiled the
-      # workspace and every crate it uses from nothing.
+      # One Rust cache for every job on this toolchain, kept by main
+      # (dependency-caches.yml), never saved by a pull request: each job
+      # saving its own, per pull request, filled the 10 GB the repository
+      # has and evicted main's caches.
       - uses: Swatinem/rust-cache@v2
         with:
-          # The three Node versions build the same Rust: one cache.
-          shared-key: check
-          save-if: ${{ matrix.node == 24 && matrix.part == 1 }}
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
       # What the JVM tests' Maven and Gradle fetch, kept: fetched every run, a
-      # plugin Maven Central did not serve failed a test on 2026-11-05.
-      - uses: actions/cache@v4
+      # plugin Maven Central did not serve failed a test on 2026-11-05. And
+      # their own retries turned up for what is still fetched.
+      - uses: ./.github/actions/jvm-dependencies
         with:
-          path: |
-            ~/.m2/repository
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: jvm-check-${{ runner.os }}-${{ hashFiles('crates/supercov-cli/tests/*.rs', 'crates/supercov-engine/tests/jvm_*.rs') }}
-          restore-keys: jvm-check-${{ runner.os }}-
+          step: restore
       - run: npm ci
+      # This part's share of the affected tests and every test of a file the
+      # change touched (a test new since the map is in one), or of every
+      # test: a nextest profile of them alone, named by --profile, as
+      # NEXTEST_PROFILE would reach the nextest a test starts in its own
+      # fixture, which has no such profile.
+      - uses: actions/download-artifact@v5
+        with:
+          name: affected-selection-ci
+      - run: |
+          cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
+          CI_TEST_SECONDS="$PWD/test-seconds.tsv" node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" ${{ matrix.part }} "$PARTS" ${{ env.AFFECTED != 'true' && '--all' || '' }} | tee -a "$GITHUB_STEP_SUMMARY"
       # Formatting and clippy are the same on every Node: the lint job's.
-      - run: cargo nextest run --workspace --no-fail-fast --partition hash:${{ matrix.part }}/2
+      # A test that fails runs once more: one that then passes is flaky, and
+      # is named (below, and on the tracking issue) rather than failing the
+      # job; one that fails twice fails it, on a release as anywhere.
+      - run: cargo nextest run --workspace --profile affected --retries 1 --no-fail-fast --no-tests=pass
+      - if: ${{ !cancelled() }}
+        uses: ./.github/actions/flaky-tests
+        with:
+          job: check (${{ matrix.node }}, ${{ matrix.part }})
+          id: check-${{ matrix.node }}-${{ matrix.part }}
       # Doctests, which nextest does not run, and the tooling checks: with
-      # the first half.
+      # the first part, which is dealt that much less of the tests.
       - if: matrix.part == 1
         run: cargo test --workspace --doc && npm run check:tooling
+      # What this run fetched, kept for the next, even after a failure; by
+      # one Node of the three, which fetch the same.
+      - if: ${{ !cancelled() && matrix.node == 24 }}
+        uses: ./.github/actions/jvm-dependencies
+        with:
+          step: save
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -84,13 +149,15 @@ jobs:
   # Bun ignores the Node preload, so verify source bootstrapping with the
   # reported version and an older Bun release on both host platforms.
   bun-bootstrap:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',bun-bootstrap,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',bun-bootstrap,')) && fromJSON(needs.plan.outputs.jobs)['bun-bootstrap'].run }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Linux on a pull request; macOS too on a release, main and `full-ci`.
+        os: ${{ fromJSON(needs.plan.outputs.jobs)['bun-bootstrap'].os }}
         bun: [1.2.17, 1.4.4]
     steps:
       - uses: actions/checkout@v6
@@ -101,9 +168,11 @@ jobs:
         with:
           bun-version: ${{ matrix.bun }}
       - uses: dtolnay/rust-toolchain@1.95.0
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: bun-bootstrap
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p supercov --test cli bun_
         env:
           SUPERCOV_REQUIRE_BUN: "1"
@@ -117,13 +186,16 @@ jobs:
   # and PowerShell each drop a `--` on the way (#209); real suites are
   # measured through them end to end.
   launch-arguments:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',launch-arguments,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',launch-arguments,')) && fromJSON(needs.plan.outputs.jobs)['launch-arguments'].run }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux on a pull request; every platform on a release, main and
+        # `full-ci`.
+        os: ${{ fromJSON(needs.plan.outputs.jobs)['launch-arguments'].os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -132,16 +204,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: launch-arguments
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      # A version, not the latest: asking GitHub's API for the latest
+      # release timed out on 2026-11-24 and failed the job before its tests.
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.9"
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -156,7 +234,8 @@ jobs:
 
   # `cargo fmt` and clippy, once: each Node's check job ran them again.
   lint:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',lint,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',lint,')) && fromJSON(needs.plan.outputs.jobs)['lint'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -168,7 +247,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm run check:lint
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
@@ -184,14 +267,15 @@ jobs:
   # (scripts/engine-integrations-group.mjs): one after another they took
   # twelve minutes, the longest job of a run.
   engine-integrations:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',engine-integrations,') }}
-    name: engine-integrations (${{ matrix.group }}/4)
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',engine-integrations,')) && fromJSON(needs.plan.outputs.jobs)['engine-integrations'].run }}
+    name: engine-integrations (${{ matrix.group }}/${{ matrix.groups }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        group: [1, 2, 3, 4]
+      # Four groups of every script, or as few as hold the affected ones.
+      matrix: ${{ fromJSON(needs.plan.outputs.jobs)['engine-integrations'].matrix }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -202,11 +286,11 @@ jobs:
         with:
           # The import gate reads an LLVM profile with llvm-profdata and llvm-cov.
           components: llvm-tools
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
-          # The four groups build the same Rust: one cache.
-          shared-key: engine-integrations
-          save-if: ${{ matrix.group == 1 }}
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The Ruby server gate measures a Puma app; Supercov measures Ruby 3.3
       # and newer, and the runner's own Ruby is older.
       - uses: ruby/setup-ruby@v1
@@ -233,73 +317,26 @@ jobs:
           key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
           prefix: apt-chromium-${{ runner.os }}-${{ runner.arch }}-
       - run: npx playwright install chromium
-      - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
+      # What the Java scripts' Maven builds fetch, kept; Maven Central refused
+      # a plugin with HTTP 429 on 2026-11-23 and failed a group.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
+      - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} ${{ matrix.groups }}
         env:
+          # The affected scripts alone, where the plan picked some.
+          AFFECTED_SCRIPTS: ${{ fromJSON(needs.plan.outputs.jobs)['engine-integrations'].scripts }}
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
           # mutations.xml is read by PIT's own reader, with this job's Java.
           SUPERCOV_REQUIRE_PIT_READER: "1"
-      - if: matrix.group == 1
+      - if: matrix.group == 1 && (fromJSON(needs.plan.outputs.jobs)['engine-integrations'].mode == 'full' || fromJSON(needs.plan.outputs.jobs)['engine-integrations'].browser)
         run: cargo test -p supercov --test cli a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test
         env:
           SUPERCOV_REQUIRE_BROWSER: "1"
-      # A failure here ends this commit's other runs too: no waiting on them.
-      - if: failure() && github.event_name == 'pull_request'
-        uses: ./.github/actions/stop-on-failure
-
-  # The rest of the release check: the steps no other job ran, so a pull
-  # request's green tick covers everything a release checks and a release
-  # needs no long local run. They ran only in `release:check` on a busy
-  # machine, where the timing gates (the watchdog's timeout exit) and the
-  # fixtures on fixed ports failed for reasons of their own.
-  release-gates:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',release-gates,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - if: ${{ !cancelled() }}
+        uses: ./.github/actions/jvm-dependencies
         with:
-          node-version: 24
-          cache: npm
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: x86_64-unknown-linux-gnu
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      # The packed-install check holds the binary to the glibc 2.28 floor the
-      # release promises; this runner's own glibc is 2.39, so the binary is
-      # linked the way native-artifacts.yml links it, with cargo-zigbuild.
-      - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
-      - run: npm ci
-      - run: npm run test:watchdog
-      - run: npm run test:engine-contract
-      - run: npm run test:agent
-      - run: npm run test:child-attribution
-      - run: npm run test:host-loader
-      # Thin LTO in sixteen units: the published build's fat LTO in one unit
-      # took six minutes here, and what these gates check is behaviour. The
-      # benchmark below still holds this build to the last release.
-      - run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
-        env:
-          CARGO_PROFILE_RELEASE_LTO: thin
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-      - run: node scripts/native-package-integration.mjs --target x86_64-unknown-linux-gnu --binary target/x86_64-unknown-linux-gnu/release/supercov
-      - run: node scripts/native-release-set-integration.mjs
-      # The packed install, run with the release build above rather than a
-      # second release build of the same source.
-      - run: node scripts/packed-npx-integration.mjs
-        env:
-          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
-      # The benchmark, likewise with the release build above, and held to the
-      # last release built from its tag the same way: against the published
-      # fat-LTO build, the profile alone read 1.05x.
-      - run: node scripts/rust-transform-benchmark.mjs
-        env:
-          SUPERCOV_RUST_BINARY: target/x86_64-unknown-linux-gnu/release/supercov
-          SUPERCOV_BENCHMARK_REFERENCE_BUILD: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p supercov
-          SUPERCOV_BENCHMARK_REFERENCE_BUILT: x86_64-unknown-linux-gnu/release/supercov
-          CARGO_PROFILE_RELEASE_LTO: thin
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          step: save
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -307,7 +344,8 @@ jobs:
   # clang's own MC/DC as the oracle for Supercov's: the golden file was made
   # with Apple's toolchain, which the script finds through `xcrun`.
   clang-mcdc-oracle:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',clang-mcdc-oracle,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',clang-mcdc-oracle,')) && fromJSON(needs.plan.outputs.jobs)['clang-mcdc-oracle'].run }}
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -326,7 +364,8 @@ jobs:
   # generates, and real projects' files parse with it, but for the ones
   # `scripts/kotlin-corpus-failures.txt` names.
   kotlin-grammar:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',kotlin-grammar,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',kotlin-grammar,')) && fromJSON(needs.plan.outputs.jobs)['kotlin-grammar'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -335,7 +374,11 @@ jobs:
         with:
           node-version: 24
       - uses: dtolnay/rust-toolchain@1.95.0
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: node scripts/kotlin-grammar.mjs --check
       - run: node scripts/kotlin-corpus.mjs
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -344,7 +387,8 @@ jobs:
 
   # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
   rust-worker:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-worker,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-worker,')) && fromJSON(needs.plan.outputs.jobs)['rust-worker'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -352,7 +396,7 @@ jobs:
       matrix:
         # One job per gate, side by side: one after another they were the
         # slowest job of the workflow.
-        gate: [rust-worker-playwright, rust-worker-cargo-test, rust-worker-durable-objects]
+        gate: ${{ fromJSON(needs.plan.outputs.jobs)['rust-worker'].matrix.gate }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -363,7 +407,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # install-action has no build of worker-build: compiled once per
       # version and kept, rather than compiled in every run.
       - id: worker-build
@@ -389,7 +437,8 @@ jobs:
   # Rust compiled to wasm that JavaScript tests load: node:test through the
   # nodejs glue, Playwright from a web page.
   rust-wasm-js:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm-js,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm-js,')) && fromJSON(needs.plan.outputs.jobs)['rust-wasm-js'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -402,7 +451,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Published builds, where `cargo install` compiled them in every run.
       - uses: taiki-e/install-action@v2
         with:
@@ -427,7 +480,8 @@ jobs:
   # Rust tests compiled to wasm, run where Cargo runs them: Node through
   # wasm-bindgen-test-runner, WASI through wasmtime.
   rust-wasm:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm,')) && fromJSON(needs.plan.outputs.jobs)['rust-wasm'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -440,14 +494,20 @@ jobs:
         with:
           targets: wasm32-unknown-unknown, wasm32-wasip1
           components: clippy, rustfmt
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Published builds, where `cargo install` compiled them in every run.
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0
       - name: Install wasmtime 49.0.3
         run: |
-          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          curl -q -sSfL --retry 6 --retry-all-errors --retry-delay 10 https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz -o "$RUNNER_TEMP/wasmtime.tar.xz" \
+            || { echo "SUPERCOV_INFRA_FAILURE=wasmtime could not be fetched" >> "$GITHUB_ENV"; exit 1; }
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
       - run: cargo build -p supercov
       - run: node scripts/rust-wasm-hosts.mjs
@@ -456,3 +516,56 @@ jobs:
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
+
+  # Not a gate: the tests this run passed only when it ran them again, added
+  # to the open issue labelled `flaky-tests` (scripts/flaky-tests.mjs).
+  # Nothing here fails the run.
+  flaky-tests:
+    needs: check
+    if: ${{ !cancelled() && needs.check.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: flaky-*
+          path: ${{ runner.temp }}/flaky
+      - run: node scripts/flaky-tests.mjs report "$RUNNER_TEMP/flaky"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # The fast tier's answer for this commit, as the `Fast tier` commit status
+  # that branch protection requires: every job above passed or was not
+  # affected. A status, not this job's check: a label's run of this workflow
+  # runs nothing, and a check of the same name from it would stand for the
+  # commit. "in full" when every test ran, as a release needs
+  # (publish.yml); a run of some jobs by hand (`only`) says nothing.
+  verdict:
+    name: Fast tier
+    needs: [plan, check, bun-bootstrap, launch-arguments, lint, engine-integrations, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm]
+    if: ${{ !cancelled() && inputs.only == '' && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Whether this run was cancelled, and which run set the status last.
+      actions: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - run: node scripts/ci-tiers.mjs report "Fast tier"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          FULL: ${{ needs.plan.outputs.mode == 'full' }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}

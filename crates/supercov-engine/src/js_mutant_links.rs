@@ -271,6 +271,64 @@ pub(crate) struct MutantFacts {
     effect_stack: Vec<bool>,
     /// Equivalent mutants and untestable boundaries, from the program alone.
     statics: crate::js_static_mutants::StaticFacts,
+    /// The arguments of each logging call, from the first one's start to
+    /// the last one's end: a call to `console.*`, or to a method named
+    /// `info`, `warn`, `error`, `debug`, `trace` or `log` on any receiver;
+    /// and a call that makes a logger (`is_logger_construction`).
+    log_arguments: Vec<Span>,
+}
+
+/// The method names whose calls are taken for logging, on any receiver.
+const LOG_METHODS: [&str; 6] = ["info", "warn", "error", "debug", "trace", "log"];
+
+/// The functions that make a logger, called alone or as a method: pino's
+/// `pino()`, winston's and bunyan's `createLogger`, log4js's and the standard
+/// shapes' `getLogger`.
+const LOGGER_FACTORIES: [&str; 3] = ["createLogger", "getLogger", "pino"];
+
+/// Whether a call's callee is a logging method: `console.<anything>`, or
+/// `<receiver>.info` (`warn`, `error`, `debug`, `trace`, `log`); or a call
+/// that makes a logger (`is_logger_construction`).
+fn is_log_call(callee: &Expression<'_>) -> bool {
+    if is_logger_construction(callee) {
+        return true;
+    }
+    let Expression::StaticMemberExpression(member) = callee.get_inner_expression() else {
+        return false;
+    };
+    let console = matches!(
+        member.object.get_inner_expression(),
+        Expression::Identifier(object) if object.name == "console"
+    );
+    console || LOG_METHODS.contains(&member.property.name.as_str())
+}
+
+/// Whether a call makes a logger, whose arguments -- its name, its context
+/// object (`{ domain: 'integrations' }`), its level -- reach nothing but the
+/// lines it logs: a logger factory (`LOGGER_FACTORIES`), called alone or as
+/// a method, or `.child(...)` on a logger (a receiver named like one, or a
+/// logger a factory or another `.child` made).
+fn is_logger_construction(callee: &Expression<'_>) -> bool {
+    match callee.get_inner_expression() {
+        Expression::Identifier(function) => LOGGER_FACTORIES.contains(&function.name.as_str()),
+        Expression::StaticMemberExpression(member) => {
+            let method = member.property.name.as_str();
+            LOGGER_FACTORIES.contains(&method) || method == "child" && is_logger(&member.object)
+        }
+        _ => false,
+    }
+}
+
+/// Whether an expression is a logger: a name that says so (`logger`,
+/// `this.log`, `baseLogger`), or what a call that makes one returns.
+fn is_logger(expression: &Expression<'_>) -> bool {
+    let named = |name: &str| name.to_ascii_lowercase().contains("log");
+    match expression.get_inner_expression() {
+        Expression::Identifier(name) => named(&name.name),
+        Expression::StaticMemberExpression(member) => named(&member.property.name),
+        Expression::CallExpression(call) => is_logger_construction(&call.callee),
+        _ => false,
+    }
 }
 
 struct FactCollector<'s> {
@@ -300,6 +358,14 @@ impl MutantFacts {
         let mut facts = collector.facts;
         facts.statics = crate::js_static_mutants::StaticFacts::collect(program);
         facts
+    }
+
+    /// Whether the mutated span lies wholly inside a logging call's
+    /// arguments: all the mutant can change is what is logged.
+    fn log_only(&self, span: Span) -> bool {
+        self.log_arguments
+            .iter()
+            .any(|arguments| arguments.start <= span.start && span.end <= arguments.end)
     }
 
     /// How the expression at `span` is used, through right operands.
@@ -586,6 +652,14 @@ impl<'a> Visit<'a> for FactCollector<'_> {
         if expression.optional {
             self.chain(expression.span, &expression.callee);
         }
+        if let (Some(first), Some(last)) =
+            (expression.arguments.first(), expression.arguments.last())
+            && is_log_call(&expression.callee)
+        {
+            self.facts
+                .log_arguments
+                .push(Span::new(first.span().start, last.span().end));
+        }
         walk::walk_call_expression(self, expression);
     }
 
@@ -698,6 +772,9 @@ pub(crate) struct Evidence<'e> {
     pub branches: &'e [CandidateBranch],
     pub comparisons: &'e [(Span, String)],
     pub probes: &'e [String],
+    /// The read points of module-level mutants, by the mutated span
+    /// (`js_value_reads`).
+    pub reads: &'e HashMap<SpanKey, crate::mutant_list::ReadLink>,
 }
 
 /// The mutants of `file`, each with its links.
@@ -890,8 +967,10 @@ pub(crate) fn link(
                 arrow,
                 equivalent,
                 untestable,
+                reads: evidence.reads.get(&at).cloned(),
                 is_static: false,
                 unplaceable: None,
+                log_only: facts.log_only(span),
             }
         })
         .collect()
@@ -1041,6 +1120,66 @@ mod tests {
             .unwrap();
         assert_eq!(body.statement, None);
         assert_eq!(body.function.as_deref(), Some(function));
+    }
+
+    /// A mutant wholly inside a logging call's arguments only changes a log
+    /// line: `console.*`, or a method named like a log level on any
+    /// receiver. One around the call, in its callee, or in another call's
+    /// arguments is not.
+    #[test]
+    fn a_mutant_inside_a_logging_call_s_arguments_only_changes_a_log_line() {
+        let source = concat!(
+            "export function f(a: number, logger: any, save: any) {\n",
+            "  console.log(`saved ${a + 1}`);\n",
+            "  logger?.warn(\"slow\", { took: a * 2 });\n",
+            "  this.log.error(\"failed\");\n",
+            "  save(\"kept\", a - 1);\n",
+            "  if (a > 0) console.info(\"positive\");\n",
+            "  const scoped = createLogger({ domain: \"integrations\", level: a });\n",
+            "  const child = logger.child({ request: a + 3 });\n",
+            "  const nested = pino({ name: \"root\" }).child({ job: a + 4 }).child({ step: a + 5 });\n",
+            "  const named = log4js.getLogger(\"billing\");\n",
+            "  const made = winston.createLogger({ level: \"warn\" });\n",
+            "  const tree = node.child({ index: a + 6 });\n",
+            "  const indexed = loggers[0].child({ shard: a + 7 });\n",
+            "  const picked = makers[0]({ pick: a + 8 });\n",
+            "  const own = this.log.child({ own: a + 9 });\n",
+            "  return a + scoped + child + nested + named + made + tree + indexed + picked + own;\n",
+            "}\n",
+        );
+        let output = instrumented(source, false);
+        let log_only = |original: &str, mutator: &str, replacement: &str| {
+            mutant(&output, original, mutator, replacement).log_only
+        };
+        assert!(log_only("a + 1", "ArithmeticOperator", "-"));
+        assert!(log_only("`saved ${a + 1}`", "StringLiteral", "empty"));
+        assert!(log_only("\"slow\"", "StringLiteral", "empty"));
+        assert!(log_only("a * 2", "ArithmeticOperator", "/"));
+        assert!(log_only("\"failed\"", "StringLiteral", "empty"));
+        assert!(log_only("\"positive\"", "StringLiteral", "empty"));
+        assert!(!log_only("\"kept\"", "StringLiteral", "empty"));
+        assert!(!log_only("a - 1", "ArithmeticOperator", "+"));
+        assert!(!log_only("a > 0", "ConditionalExpression", "true"));
+        // What makes a logger reaches only what it logs: a factory's
+        // arguments, and a child's of a logger.
+        assert!(log_only(
+            "{ domain: \"integrations\", level: a }",
+            "ObjectLiteral",
+            "{}"
+        ));
+        assert!(log_only("\"integrations\"", "StringLiteral", "empty"));
+        assert!(log_only("{ request: a + 3 }", "ObjectLiteral", "{}"));
+        assert!(log_only("a + 3", "ArithmeticOperator", "-"));
+        assert!(log_only("\"root\"", "StringLiteral", "empty"));
+        assert!(log_only("a + 4", "ArithmeticOperator", "-"));
+        assert!(log_only("a + 5", "ArithmeticOperator", "-"));
+        assert!(log_only("\"billing\"", "StringLiteral", "empty"));
+        assert!(log_only("{ level: \"warn\" }", "ObjectLiteral", "{}"));
+        // `.child` of what is not a logger is not.
+        assert!(!log_only("{ index: a + 6 }", "ObjectLiteral", "{}"));
+        assert!(!log_only("a + 7", "ArithmeticOperator", "-"));
+        assert!(!log_only("a + 8", "ArithmeticOperator", "-"));
+        assert!(log_only("a + 9", "ArithmeticOperator", "-"));
     }
 
     #[test]
@@ -1695,6 +1834,7 @@ mod tests {
             branches: &output.branches,
             comparisons: &[],
             probes: &[],
+            reads: &HashMap::default(),
         };
         let decision_of = |linked: &[CandidateMutant], original: &str| {
             linked

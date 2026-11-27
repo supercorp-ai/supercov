@@ -86,9 +86,177 @@ candidate, whatever its verdict, when:
   all (it cannot pass as a baseline), and a mutant whose only candidates are
   such tests is recorded `survived` with that reason.
 
+**Requests no test named, sent while tests ran.** A server's work for a
+request that named no test (a webhook a mock server sends, a call from a
+client the runtime does not reach) is credited by time to the one test
+running then; where several ran at once, it stays no test's. Its mutants used
+to take every test of the run, as a server's start does. They take the tests
+running when the requests ran their code: each of the record's server hits on
+the mutant's statement and function point keeps when it ran, and a test's
+time is its attempt's span (or its phases), the time the run credits a
+request's work by, taken as widely. A test that was not running then neither
+sent the request nor saw its response, and its own evidence never ran the
+code: it runs as without the mutant, which is the rule above. What the
+request left in shared state for a later test is that test's to observe
+without a read, which a by-time credit to the one test running already
+assumes. Only a request the run marks as sent while a test of its
+server ran counts (`REQUEST_DURING_TESTS`); the tests taken are those of any
+server running then, a superset of that server's, as the record no longer
+says which server served it. Every test stays a candidate where any of the
+work was no request's (a server's start, a timer), kept no time, came while
+no test of its server ran (a readiness check, a delayed webhook: a server
+started with the mutant serves it too), or ran outside the servers (a test runner's own process, a page),
+and for a mutant with no point. Such a mutant still runs as the plan says of
+its server (`serverWide`).
+
+On a large application's e2e suite, the billing area's run measured on 4
+slots (486 tests, 450 of them candidates anywhere, 1,709 mutants to run): 515
+of its mutants had every one of the 450 as candidates, from webhooks a
+payment provider's mock sent while the slots' tests ran, and held 87% of the
+area's candidate runs. With their requests' times (that run, recorded before the
+during-tests mark, taken as if every such request came during tests where a
+test of any server was running) they have 7 to 450 (90 at
+the median; 9 still 400 or more): 264,936 candidate runs became 79,891, and
+the time a survivor costs (the sum of its candidates' measured times) 142.5 h
+became 45.8 h for the area. 505 of them are `by-time` (a request of theirs
+was credited to the one test running) and run alone with the server started
+with them, one restart of the command each, against every candidate. The 33
+module-level mutants a server's start ran keep every test.
+
 And a mutant in module-level code (no function around it) takes every test
 of each file that ran it, whole: a module loaded lazily by one test keeps the
 mutated value for the file's later tests, which never run that code again.
+Except where its value is read through a literal: see Module-level values.
+
+## Module-level values
+
+A mutant in code that runs as its module loads changes a value once, and the
+module keeps it. By the rule above every test that loaded the module is a
+candidate, and a server loads its modules as it starts, so on a browser suite
+against one server that is every test of the run: on a large application's
+e2e suite of 1,703 tests, 6,815 of 55,565 mutants to run had over a thousand
+candidates, nearly all in translation tables, option lists and table
+definitions, and a survivor among them ran every one. Yet only a test whose
+work reads the value can see it differ. Where Supercov can see every read,
+the candidates are the readers.
+
+**Which values.** A top-level `const`, `let` or `var` whose initializer is an
+object or array literal (under `as`, `satisfies`, `!` or parentheses), and
+the literals it holds as values, at any depth (`js_value_reads.rs`). Not a
+value Next.js reads from the source (`next-segment-config`), and not a value
+made by a call, a member read or anything else, wherever the literal is. A
+mutant is linked to such a literal when:
+
+- it is the literal itself (`ObjectLiteral` `{}`, `ArrayDeclaration` `[]`),
+  and every value the literal holds, at any depth, is one the next item
+  allows: replacing the literal only stops its values being made;
+- or it is in the value of one of the literal's properties or elements, and
+  that value is *inert*: literals, literals of literals, functions (made, not
+  run), and unary, binary (not `in` or `instanceof`), logical, conditional
+  and sequence operators and templates over them, with names read only where
+  no operator applies to them. Evaluating an inert value, skipping it, or
+  evaluating another part of it than before runs no code of the program's,
+  writes nothing and cannot throw: an operator over a name's value can run
+  its `valueOf` or throw (a `BigInt` mixed with a number), a call can keep
+  its arguments anywhere, a member read can run a getter.
+
+So the mutant changes nothing but the value its place in the literal holds,
+and that value is reachable only through the literal. A mutant in a call's
+argument (`pgTable("users", ...)`), in a key, or in a function stays as
+before.
+
+**Recording reads.** Where the mutants' probes are placed
+(`SUPERCOV_MUTANTS=1`, `supercov mutants`), each such literal is made through
+`trackV2(file, base, keys, literal)`, which returns a proxy of it. Its traps
+-- `get`, `has`, `getOwnPropertyDescriptor`, `ownKeys`, `set`,
+`defineProperty`, `deleteProperty` -- each hit the literal's *any* point, and
+the point of the key read where it is one a mutant is under. A hit is a
+coverage hit: it is credited to the test whose work made it, a request's
+test on a server, the page's test in a browser, as a statement's is, and it
+dedupes within a test the same way. Nested literals are proxies of their
+own, made as the outer literal is, so whatever holds one, wherever it was
+passed, reads it through its traps. A mutant is linked to the read point of
+its key, or to the literal's any point where it is the literal, or where its
+key is not known from the source (a computed key, an element after a
+spread).
+
+The points are recorded only: they are not statements, branches or anything
+coverage counts, they come after the file's other points so none moves, and
+a test's hits as queries show them leave them out (ids `read:...`).
+
+**Reads while a module loads.** A read made while a module's top level runs
+may copy the value into something no proxy watches (a lookup table built from
+it, a string taken from it). Each read point has an *escape* twin, hit
+instead while a module is loading: from a module's registration, the first
+thing its instrumented code does, until the first microtask after it, as a
+module graph evaluates without giving up the thread; and again where a
+module's top level resumes after an `await` (`resumeV2`). Where any record
+hit a mutant's escape point, its candidates are those of every test that
+loaded the module, as before.
+
+**The candidates.** For a linked module-level mutant (`reads` in
+`mutants.json`) whose escape point no record hit, a record takes tests by its
+role as an infecting record does (`strong_plan.rs`, `Selecting::select`):
+
+- a test's record that hit its read point takes the test (`read`); in a test
+  runner's own process (Vitest, Jest, Mocha, `node:test`) also every test of
+  its file, whole, as the module is shared with them;
+- a test's record that only loaded the module takes the test and its file in
+  a runner's own process, as before, and nothing in a browser suite: its
+  server's and its page's modules are not its file's;
+- a test file's module setup takes every test of the file;
+- a record no test is credited with (a server's start-up, work between
+  tests) that read the value takes every test; one that only loaded the
+  module takes none;
+- a test whose evidence is not its own (`run-wide`, `partial`) is a
+  candidate, as always.
+
+A mutant no test read is `survived` without running (`no-test-read-it`).
+
+**Why it is sound.** The argument is the one for every candidate, made for a
+value instead of an evaluation. With the mutant on, the program runs as
+without it up to the first moment the mutated value is used, since nothing
+else differs (the literal's evaluation does nothing but make the value). A
+value made at module level is used only through the binding or literal
+holding it, and every use of an object is an operation on it: a property
+read, an enumeration, a key test, a write. Each of those on a tracked literal
+is a trap, and a trap records a hit for whichever test's work made it. So a
+test whose records hit none of the mutant's points never used the value that
+differs, and runs as it did. What escapes the traps is covered: a read while
+a module loads (the escape points), a read no test was credited with (every
+test), a test whose attribution is not exact (always a candidate), and a run
+measured without the probes (no link, so every test, as before).
+
+What it assumes is what every candidate assumes: that a test's own evidence
+is its own. A value one test read and left in a cache another test reads
+later is that other test's to observe without a read; the same holds of a
+function's result kept in a cache, which the plan has always taken as the
+first test's alone.
+
+**What changes for the program.** Only where the probes are placed, and only
+for the tracked literals: a proxy behaves as its target for every operation
+of the language, `Array.isArray` and `instanceof` included. `structuredClone`
+refuses a proxy, so the runtime's own `structuredClone` copies a value
+holding one through its traps and clones the copy. A tracked literal sent
+through `postMessage`, or shown by `util.inspect` (which prints the target
+and reads nothing), is not covered. The strong pass's own copy has no proxy.
+
+**Validation.** `a_module_level_value_s_mutants_run_against_the_tests_that_read_it`
+measures a browser suite with a server's module-level table twice, with the
+probes and without, and runs both passes: every module-level mutant the
+broad pass kills, the narrowed pass kills, with the broad killer among its
+candidates. On a large application's e2e suite, the same check ran on the
+module-level mutants of its heaviest files.
+
+**What the plan says.** Each narrowed mutant carries `narrowed: { from, to }`
+(`escaped: true` where a read while loading kept every test), the plan's and
+the pass's summaries `narrowed: { mutants, candidatesBefore,
+candidatesAfter, escaped }`, and their text a line each:
+
+```text
+  narrowed      7 module-level mutant(s) to the tests that read their value: 6 candidate(s) where loading their module gave 49
+  2 module-level mutant(s) kept every test that loaded their module: their value was read while a module loaded
+```
 
 ## The continuous pass (Vitest 4 and later)
 
@@ -123,8 +291,10 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
 - **A mutant's files one after another**, the likeliest killer first (a
   file's kills over its runs so far, over its cost), and its chain stops at
   its first kill, as StrykerJS runs a mutant's covering files with `bail`.
-  Parallelism comes from many mutants at once; of the mutants ready, the one
-  with the most work left goes first, so long chains do not end the pass.
+  Parallelism comes from many mutants at once; of the mutants ready, the
+  cheapest goes first (see "The order of a pass, its shares and its
+  budget"). A worker no ready mutant takes goes to the one with the most
+  work left (below), so long chains do not end the pass.
 - **Confirmations only for left-out tests.** A kill is certain where the
   copy ran every test its file's baseline ran before the failing one (a
   copy of the whole file always does, against the whole baseline). Any
@@ -144,6 +314,25 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   once in a run that way, and stood as kills the ground truth does not
   have). Such a copy runs again, once; a failure that repeats counts, since
   the mutant may have run in a process the copy started.
+- **A hook that fails is the run failing.** A `beforeAll` (or `aroundAll`)
+  that throws makes Vitest skip its suite's tests and fail the run. The copy
+  reports the hook's error with its mutant's evaluations by the file's end,
+  and where the file's baseline ran the hook without that error and the
+  mutant ran, the mutant is killed, the error its reason (`a hook failed:
+  relation "" does not exist`). Before, such a copy had run none of its
+  tests, and its mutant was an `error`: a mutant of a database schema module
+  that a test file's `beforeAll` seeds through breaks every such file's hook.
+  A kill from a copy that left out tests is confirmed as any other.
+- **A file that does not load before its mutant ran is not the mutant's.**
+  A setup file that throws (a database that does not answer) or an import
+  that does leaves the copy's file unfinished, which counts as a kill where
+  the mutant had run. Vitest's collection of the file carries the error; the
+  copy reports it with its mutant's evaluations so far. With none, the copy
+  runs again, once, as a test that failed before the mutant ran does, and a
+  second such failure makes the mutant an `error` that says the file's error
+  (`its copy of test/a.test.ts did not load before the mutant ran, twice:
+  ...`). A copy that ran none of its tests, or fewer, says why where it can:
+  the hook's error, or the file's.
 - **A worker that lost its channel to Vitest did not finish its file.** A
   mutant that disconnects the worker (`process.disconnect()`) leaves Vitest
   unable to hear the file end, as a plain run would fail it: the copy's
@@ -180,6 +369,74 @@ StrykerJS"), with the runs bounded as above:
 Sharding cost Supercov more than its repeated baselines: hono's pass takes
 168.5 s in one job and 298.7 s over 6 (28 s of it repeated baselines), as
 each job starts and ends with workers idle.
+
+## The order of a pass, its shares and its budget
+
+A mutant's cost is estimated from the plan: each test file it would run, a
+copy's start (300 ms, the Vitest driver's guess before it has timed one)
+and the measured time of each test it runs there (its candidates, or every
+test of a file it runs whole; a test with no time, a second). It is what the
+mutant costs if it survives; a kill ends its copies sooner.
+
+**Cheapest first.** The pass runs the mutants in order of that cost, the
+plan's order between equals, and the continuous Vitest pass takes the
+cheapest ready mutant first. A pass that is cut short -- a CI job's time
+limit, `--budget` -- has then decided as many mutants as it could. On a
+large application's integration suite (2,288 tests in 168 files, 41 s to
+measure on 64 CPUs) the mutants' candidates were 7 at the median and 83 on
+average: the top 5% of mutants held 83% of the candidate runs, about 1,100
+of them with more than 500 candidates each, mostly module-level code of the
+database schema module every test loads. The pass took the mutants with the
+most work left first, so each 450 s shard of 2,460 mutants decided 29 to 40
+of them, one mutant running 760 tests for 284 s. A worker no ready mutant
+takes still goes to the mutant with the most work left, beside its copy
+running, so that the costliest chains do not start last and end the pass
+alone.
+
+**Shares.** `--shard k/n` deals the mutants to run among n shares, most
+costly first and back and forth (1, 2, ..., n, n, ..., 1, ...), and keeps the
+k-th; the decided mutants go to the first. Each share gets its part of the
+costly mutants, and their sum is about the same. Every job computes the same
+split from the same plan. The cost the split reads is the plan's alone --
+how many copies a mutant starts and how many tests they run, a copy counting
+as one test -- not the tests' times: a sharded pass's jobs each measure the
+suite (see `docs/mutation.md`, a pass split across jobs), their times differ,
+and a split that read them would leave some mutants in no share and put some
+in two. What each job's plan lists is the same where the jobs measure the
+same commit, as a merge requires.
+
+**Budget.** `--budget <seconds>` stops the pass once the time is spent, as a
+termination stops it (below), and ends it as a finished pass: the mutants it
+left have no verdict, for the next pass, and the summary says how many. A
+pass that spent its budget before deciding any mutant is not one that could
+run none.
+
+The stop is the progress loop's: once a second it checks the budget, says so
+when it is spent (`[supercov] budget spent, 452 s into the pass: stopping
+it; ...`), signals the command, and ends the process 8 s later if the pass
+has not ended. That holds only while the loop runs, and a CI job's time limit
+counts everything after it too. So a thread that does nothing else ends the
+process 45 s past the budget, whatever holds it up (the loop itself, the
+work after the pass), saying so; the verdicts were saved into the run as they
+came. A budget measuring spent already arms no such deadline: that pass runs
+nothing and says so. A sharded e2e pass on 4.29.11 ran 130 s past its
+budget on every job of an area, killed by the job's 10-minute limit with
+nothing saved, and no log line said whether the budget's stop had come. With
+the line, the same area's job said `budget spent, 396 s into the pass` and
+its pass ended 0.8 s later (`ran 95 mutant(s) in 396772 ms`): the stop
+reaches a harness that starts each slot's `playwright test` in a process
+group of its own, as the supervisor signals the command's group and the
+group of each of its descendants, then kills them 5 s later. A fixture holds
+that shape (two such slots, a spread serial file, a harness that ignores the
+termination and waits for its slots, a 25 s budget, run as a continuation
+shard): the command ends about 1 s after its budget. What held the 4.29.11
+jobs is not known; the deadline above bounds it.
+
+**The time left.** The progress line's estimate is the plan's: the estimated
+cost of the mutants left, at the pace of the cost decided so far over the
+time it took. Counting mutants, the pass above said "37 of 2460 ... about
+458m left", the estimate swinging from 158 to 1,229 minutes as a few costly
+mutants ended.
 
 ## Order and early exit
 
@@ -419,7 +676,8 @@ StrykerJS, which also runs only a mutant's covering tests, counts that kill
 
 ## Timeouts and runaway loops
 
-A mutant's test gets twice StrykerJS's limit (`factor × its measured duration
+In Vitest's pass (Playwright's limit is under "Time." below), a mutant's
+test gets twice StrykerJS's limit (`factor × its measured duration
 + constant`, 1.5× and 5 s): its slowest test's duration (as measured or as its
 baseline ran it, whichever is longer; for a copy that runs its file whole, the
 file's slowest test) × 3 and 10 s. Each copy sets its own limit (`vi.setConfig`
@@ -551,6 +809,17 @@ from the project in a handful of files, and a file the measured run could
 leave without the runtime (an edge-runtime module) does not gain it. The
 command's log says `switches in N of M source file(s)`.
 
+**No type check in a strong build.** A strong pass's `next build` does not
+check types (`typescript.ignoreBuildErrors`, set by the preload where it
+already wraps Next's `loadConfig`). The check emits nothing the server runs,
+and says nothing of a mutant: Next's type-check worker reads the sources as
+their authors wrote them (the authored view, the switches left out), the
+checkout the measured run already built. On a large application's e2e suite
+it took 12 s of a 30 s build, once in every job of a pass split across jobs
+and before any of the job's tests could start. A measured run still checks:
+whether its command passes is the project's. Next says `Skipping validation
+of types` in the strong command's log.
+
 **Static mutants.** A mutant whose switch is evaluated while the module
 loads (no function or instance field initializer around it) carries
 `"static": true` in `mutants.json`.
@@ -568,6 +837,19 @@ reason }`, where `tests` is how many ran. Statuses: `killed`, `survived`,
 `timeout`, `no-coverage`, `error`. The mutation score is
 `(killed + timeout) / (killed + timeout + survived + no-coverage)`, as
 StrykerJS's.
+
+A survivor whose mutated span lies wholly inside the arguments of a logging
+call -- `console.*`, or a method named `info`, `warn`, `error`, `debug`,
+`trace` or `log` on any receiver -- only changes a log line: equivalent for
+behaviour unless a test reads the log. It is still `survived`, and counts as
+one in the score; the listing marks it (`logOnly` in JSON, `(only changes a
+log line)` in text), the pass summary and the `Strong` line of `mutants`
+count them on their own (`survived 185 (109 only change a log line)`), and
+the pass summary lists the other survivors first. The mutant list records it
+as it lists the mutants (`logOnly` in `mutants.json`), so a run listed by an
+earlier release has none marked until it is listed again. On a large
+application's e2e areas, 109 of 169 survivors in one and about 10 of 41 in
+another were of this kind.
 
 While a pass runs, a line on stderr every 15 s says how far it got: the
 mutants with a verdict of those it runs, how many are killed, timed out,
@@ -622,6 +904,18 @@ request's async work as the scope does. A separate `x-supercov-mutant` header
 would have reached only what a header reaches: a page's first navigation
 carries cookies, not the fetch patch's header.
 
+A test that reaches the server without a page carries it too, and a fixture
+test (`mutants_test_kills_server_mutants_tests_reach_without_a_page`) holds
+each way to it: a request context the test makes itself
+(`request.newContext()`, the fixture's `playwright.request`) and the page's
+own `page.request` (the context's cookies), a request a `page.route` handler
+sends again with `route.fetch` (the browser context's cookies go with it),
+and Node's `fetch` and `http` from the test's process (the runtime's patch
+adds the header from the test's active scope). What carries no scope is a
+request from a client the runtime does not reach: `curl` or another
+language's process the test starts, a tool outside Node. Its work names no
+test; see "Run alone" below for how such a mutant still gets its verdict.
+
 **In the server**, the first scope that names a mutant turns the process's
 switches into accessors: each switch's `a` is read from the request being
 served (its scope's mutant), and outside any attempt's work from the
@@ -636,95 +930,693 @@ whose mutant passes the hit limit writes a marker to its console; a server
 appends the attempt to `<results>.timeouts.jsonl`. Either makes the verdict
 `timeout`, whether or not a test failed.
 
-**One invocation, rows of repetitions.** The generated config, on
-`SUPERCOV_STRONG_PLAN`, works out each test file's rows: row 0 is the
-baseline (every test of the file some mutant needs, no mutant), then one row
-per mutant with a candidate in the file, with canaries among them. It sets
-`repeatEach` to the most rows a file has, `retries: 0` and no failure limit,
-and keeps the project's workers; the k-th repetition of a test runs its
-file's row k if the row names the test, and skips otherwise. A row is found
-from the file and `repeatEachIndex` -- nothing is claimed at run time, so
-no two repetitions can take one job. (The Vitest driver claims because
-Vitest's copies of a file cannot be told apart; Playwright's repetitions
-can.) A row after the baseline waits for the test's own baseline: a test
-that fails without a mutant is no candidate.
+**One invocation, copies of the tests.** A Playwright test runs once per
+test case, with fresh test fixtures, and a worker runs test cases one after
+another with the browser it launched. So the pass declares each test a
+mutant needs several times over as its spec loads: Supercov's test
+declaration, on Playwright's test type, adds the test's copies after it, each
+in a describe of its own (`[supercov copy <k>]`) so that its full title is
+new; the title, the place (a `file:line` filter takes every copy) and the
+fixtures are the test's. A copy takes its work as it starts, from a queue on
+disk that every worker and every invocation of the pass share: the next
+mutant whose candidate the test is, not yet tried against it, one no other
+attempt runs first; making the claim's mark (a directory) is what takes it,
+so two copies never take one; which one it takes is the next section's. A
+test gets one copy for each mutant that may take it, one for each control a
+kill may call for (below), one for each mutant with a candidate before it (a
+sweep it may wait out, below), and its first run; the generated config sets
+`repeatEach` to 1, `retries: 0` and no failure limit, and keeps the project's
+workers.
 
-Playwright gives every repetition index its own worker (worker fixtures are
-per repetition), so each row of a file starts a worker and, for page tests,
-a browser. That is the price of rows; the server is not restarted.
+This replaces rows of repetitions (`repeatEach`). Playwright gives every
+repetition index a worker of its own, so each row started a worker and a
+browser, and each later stage (the survivors' other candidates, the kills to
+confirm) started the command again. On a large application's e2e suite
+(Next.js production build, a harness that starts a server and a database for
+each of several `playwright test` processes) a mutant took about 50 s, and an
+area of 1,688 mutants decided none in a CI job's ten minutes: every kill there
+ran beside another process's attempt and waited for a confirmation the budget
+never reached, and verdicts were decided only once the command had ended.
+With copies, on the same suite and machines (8 jobs of 32 CPUs, 6 slots each,
+about 6 minutes of each job's 10 for the pass): the area decided 440 mutants
+(417 killed) where it decided no kill, about 3 s of a slot a test run, and one
+file's 12 mutants took 4 minutes where they took more than 5 for 6 of them,
+the rest of the 4 one mutant that holds each test until its own timeout.
 
-**Concurrency as the project runs it.** Repetitions of one file are separate
-groups, which Playwright runs side by side where the project ran the file's
-tests one after another. A suite whose tests share a server's state (a
-harness's fault rules for one server slot, rewritten by each test) then
-fails for reasons no mutant made. So a file runs one test at a time here
-when its tests are known not to run at once: two or more of them ran in the
-measured run and their spans never overlapped, or, where the spans tell
-nothing (one test, none spanned), the project does not run files
-`fullyParallel`. Each such attempt holds the file's lock from its start to
-its end, across workers. A file whose tests overlapped runs side by side.
-(Each Playwright attempt has two records, the reporter's, with its status,
-and the fixture's, with its span; the plan takes the span from whichever
-carries it.) The workers are the project's own.
+**A mutant from candidate to candidate in one invocation.** A copy that
+takes a mutant runs it; a test that passes moves the mutant on, and the next
+copy of another candidate that starts takes it there, in whichever worker or
+invocation runs that test; a kill marks the mutant, and no copy takes it
+again. A mutant every candidate let live has survived. A test's copies
+outnumber what its queue can ask of it, so its mutants are all tried by the
+time its copies are spent, whatever order the tests run in, and a mutant
+never waits for a stage. Where every mutant left in a test's queue runs
+elsewhere at that moment, the copy takes one of those too rather than leave
+the test's copies unused: its verdict is the same either way.
 
-**Kills are confirmed.** A test that fails beside another mutant's attempt
-(their times overlap) may have failed for the other's doing. Such a kill is
-not recorded: the mutant goes to a **serial pass** (one worker, one test at
-a time), which runs its killing test alone first and its other candidates
-only if that test lets it live. What a serial pass kills, nothing beside it
-did. On the fixture of the CLI test, 14 of 15 per-request kills ran beside
-another mutant and were confirmed: the serial pass took about as long as
-the main pass (30 s against 33 s), most of it two page kills waiting out an
-8 s `expect`; a project with one worker confirms nothing. A failing
-attempt's error (its first line, ANSI stripped) is the verdict's reason.
+**Which candidate first.** A mutant's candidates are ordered cheapest to a
+kill first: each test's measured time (a second where the run timed none)
+over how likely it is to kill the mutant, a test whose own evidence infected
+it taken as four times likelier than one that only reached it (a module its
+page loaded, a request no test named). So a test that infected it goes
+first unless it is more than four times slower, and a slow test goes last:
+a test that polls for ten seconds until a purchase is active is tried after
+the half-second tests that merely load its page, though it infected the
+mutant and they did not. The order has to be kept by the copies, since
+Playwright fixes what a worker runs when it loads a file, so it is kept in
+three places:
 
-**Likeliest killer first.** The main pass runs each mutant against one test:
-its candidate whose own evidence infected it, cheapest first (the plan's
-order). A mutant it lets live goes to a **stage pass** with its other
-candidates, side by side; a kill stops a mutant at its first test.
+- *Sweeps.* A worker runs a file's tests in the order they are declared,
+  and Supercov's declaration arranges them as it declares them: after the
+  tests themselves (each test's first run), the first copy of every test,
+  cheapest test first, then every test's second copy, and so on, each beside
+  the tests of its own describe (a describe's hooks stay its tests'). A file
+  whose tests all reach one module (a page's) used to run its first test with
+  each of the mutants, then its second test with each: a mutant there was
+  decided only once the file's last test ran it, and a pass its budget cut
+  short decided none of those. In sweeps, its tests take one mutant each in
+  turn, so mutants are decided one after another.
+- *Which mutant a copy takes.* Of the mutants waiting for its test, a copy
+  takes the one with the fewest candidates before this test still to try
+  (none: its cheaper or likelier candidates let it live, and this test is the
+  next that may kill it), then one this test infected, then the one whose
+  candidates still to try take the least time (the closest to a verdict),
+  then the test's queue order. A candidate that failed without any mutant
+  holds nothing back.
+- *Waiting a sweep.* Where even that mutant has a candidate before this test
+  still to try, the copy takes none, while the test's copies after it still
+  cover every mutant waiting for it and a control for each: its next copy, a
+  sweep later, looks again. So a slow test's copies go to the mutants its
+  cheaper candidates let live, while those candidates run (in this file, or
+  in another invocation); and once its copies are short, it takes what is
+  left all the same. Each test gets a copy for each mutant with a candidate
+  before it, for these waits; a copy that takes nothing is skipped, which
+  costs Playwright a test's start and end.
 
-**Time.** A mutant's test gets `1.5 × its measured duration + 5 s` (the
-duration from the attempt's span), plus the project's `expect` timeout
-(default 5 s) and `actionTimeout`, and never less than the test's own
-timeout (the project's, default 30 s, with `test.slow()` and
-`describe.configure`): an assertion that fails waits out its own timeout
-first (a spec's `{ timeout: 15_000 }`), Playwright ends the test at its own
-timeout anyway, and the budget must not cut either short. A mutant that
-makes a test hang costs up to the test's timeout. A test that fails
-on an assertion or an action, even as its time runs out, is a kill; one
-that only ran out of time is run again in a serial pass with twice the
-budget before it counts as `timeout`.
+Verdicts stay what they were: a kill is any candidate's, a survivor ran every
+candidate, and a test's copies still cover every mutant waiting for it. What
+changes is when: a mutant a cheap test kills never waits for a slow one, and a
+slow test holds a mutant to its time limit only when no cheaper test could
+kill it first.
+
+Measured on a large application's e2e suite, its billing area's tail: the
+572 mutants four passes had left (most survivors-to-be, each with a median of
+12 candidates and 119 at the 90th percentile; 403 of them reached by one file
+of 15 tests whose 4 slowest poll 8-11 s until a purchase is active, a file
+the harness runs whole in one of a job's 6 slots). With 8 jobs of 32 CPUs and
+about 6 minutes of a pass each, from the same state, 4.29.5 decided 57: that
+file's first test ran each of a job's 70 or so mutants before its second test
+began, so a mutant there was decided only after the file's last test ran it,
+and no pass reached it. In sweeps the pass decided 147 for the same machines
+($0.60). Its slowest test, which 4.29.5 ran 210 times in that pass (each
+job's first test of the file, so nearly all its slot's time), ran 16 times,
+once its cheaper candidates had let each mutant live, and the file's other
+slow tests, which 4.29.5 never reached, ran 73 times. That slot still bounds the tail (each of its mutants takes
+about a minute there), and the progress lines say so: the costliest tests
+left are that file's, and the time left in the round is the slot's.
+
+**Controls: a run with no mutant after a failure.** A kill's next run of its
+test in the invocation has no mutant: a control. Passing, it confirms the
+kills before it on the same server; failing, it puts them in doubt, and they
+run again one test at a time. A test whose control fails twice in an
+invocation is not run there again, and one whose control failed takes no
+mutant there until one passes. The first control of a test in a main round
+is its baseline: a test that fails without a mutant is no candidate (a
+second control that passes makes it one again). Controls stand in for the
+canaries rows had (rows with no mutant, planted among the mutated ones):
+each kill is followed by one, at the cost of a run of the test.
+
+A test's first run in an invocation takes a mutant. It used to have none: a
+baseline on each invocation's server before the test took any mutant there,
+so that a kill was judged on a server where the test passed. An attempt that
+passes needs no such run (the test passed with the mutant), and a failure is
+judged by the control after it. What the run before was also for is a cold
+server: a first request to a page can be slow or fail where the next is not
+(a route compiled on first use, a cache), and a control after a failure
+that coldness caused passes, warm, and would confirm a false kill. So an
+attempt that started before any run of its test passed on its server (with
+a mutant or without) is *cold*, and a cold failure (a kill or a timeout)
+decides nothing: its mutant
+is held (no other copy takes it), the next copy of the test runs a control,
+and after it the test runs the mutant again, once, now warm (or where the
+test fails without any mutant, which makes it no candidate as before); a
+round that ends first leaves the candidate for the next. A timeout's limit
+is then also set by a control on that server, as every decisive attempt's
+was. Each test gets two more copies for this. A test whose mutants all live
+costs no run without a mutant at all; a test's first failure in an
+invocation costs one more run than before (the attempt again).
+
+A cold test whose next mutant no candidate let live yet (in this pass or,
+by the plan's `passedBefore`, an earlier one) runs without it first, as it
+used to, and takes it next: such a mutant is as likely as not to fail its
+first candidate, its likeliest killer, and a cold failure there would run it
+twice (a timeout twice its whole limit). A mutant that lived through a
+candidate is not: it is taken at once. On the same suite's area, of a job's
+first runs of a test in an invocation, those that took a fresh mutant failed
+35 to 47% of the time, those that took one that had lived 2 to 10%; and of
+107 cold failures run again, every one failed again, each timeout costing
+its limit twice.
+
+On a large application's e2e suite, the billing area's late rounds (8 jobs
+of 4 slots, about 7.5 minutes of each job's pass): of one job's runs, 81
+baselines and 8 controls beside 458 mutant attempts in round 3, and 163 and
+57 beside 341 in round 4, where 9 and 6 attempts failed; at about 2.9 s a
+run, that was 11% and 31% of the job's slot time, which now goes to
+attempts. The `fails` line of a cold failure says so: `<mutant>: "<test>"
+fails (2.1s, before any control here: runs again after one)`.
+
+A failed test gives Playwright's next test a new worker, and the first run of
+each test in each worker used to be a control too. With a file's copies in
+sweeps that would follow every kill with a control of each test of the file;
+a control is the invocation's, as its server is, so only the killing test runs
+one. A test that leans on what an earlier test of its file left in the worker
+(a serial describe, a `beforeAll`) is caught as before: a kill it makes for
+that reason is followed by its control, which fails the same way and puts the
+kill in doubt.
+
+**Serial describes run in order but go on.** A `describe.serial` (or
+`describe.configure({ mode: 'serial' })`) runs as a default describe: in
+order, in one worker, but a failed test (a kill) does not skip the rest of
+the describe, which would leave their mutants for another invocation.
+
+**A worker a mutant ran in is not used again.** Requests carry their
+attempt's mutant to the server, which serves many attempts at once; the
+Playwright worker's own process runs a mutant only where it serves a request
+itself. An attempt whose mutant ran in the worker's process fails as it ends
+(after its outcome is kept), so that the next test gets a new worker.
+
+**Verdicts as they come.** A kill confirmed by its control, a survivor's last
+candidate, and a page's hit limit write the mutant's verdict into the results
+as they happen (a mark per mutant, so once), and the progress line counts
+them. Once the command has ended, with every invocation it started, the
+engine runs the strong reporter's `judge`, which gives the rest theirs: a kill
+no control came after (the round ended first) stands, as any kill did before;
+a candidate that failed without the mutant is left out; what did not run is
+unfinished, and runs in a `rest` round. A pass the budget stopped is judged
+too, and keeps what it finished, but nothing that ended after the pass began
+to stop: the stop takes the app's servers down under the tests still
+running, and a test that failed then failed for that (a fixture's survivor
+failed so, its page's script never served, and stood as a kill). The CLI
+writes when it began to stop (`stopped-at`, beside the results, a poll early
+for a signal the supervisor heard first), and the judge trusts no attempt
+that ended after it, as it trusts none after an error outside any test. Such
+a mutant runs that candidate again in the next pass; an attempt Playwright
+reports as interrupted settles nothing. A kill that ended before the stop,
+waiting only for its control, still stands.
+
+The drivers that judge as they go, Vitest's (`vitestStrongReporter.mjs`) and
+the one of jobs (`strongJobs.mjs`), write no verdict once `stopped-at` is
+there: what they judge then comes from copies and jobs being stopped under
+their tests. A copy whose process the stop ended before the pass's own did
+not finish its file, and the mutant of a test that waits five minutes was
+saved as `killed` on a macOS runner the budget stopped. Its mutant is left
+for the next pass, as one the stop found running is.
+
+**What the pass says as it goes.** Each invocation's runner writes a status
+file (its round, the baselines, attempts and controls so far, the tests
+running and since when, and the work its tests have left), and prints a line
+on the command's output for each attempt with a mutant (`<mutant>: "<test>"
+lives (1.4s)`), so a harness that watches its processes' last lines sees them
+work. `mutants test` adds to its progress line what the round does, the
+costliest tests left, what runs and for how long, and where nothing has ended
+for two minutes what it waits on: a test running up to its time, or, with no
+test running, the command's last line. Before any Playwright invocation began,
+it says the command's last line. The command's process tree is listed after
+ten minutes, not every minute.
+
+The work left is counted from the queues every five seconds: for each test
+the invocation runs, how many mutants wait for it (not decided, not yet tried
+against it) at its baseline. The three tests whose runs left take longest are
+named, with how many mutants wait for each, its baseline and its limit:
+
+    [supercov]   costliest test left: "Social Media is added on the saved card, yearly or monthly, and the page waits until it is active", 38 mutant(s) wait for it, 7s a run (its limit 16s)
+
+The time left is each invocation's work left at its own pace (the baseline
+time of the runs it ended, over the time they took, which counts the skipped
+copies and new workers too), the slowest invocation's: `about 12m40s left in
+this round`. It is counted from what each mutant has left to try, so it
+follows the order: kills that come early do not make the survivors' runs look
+cheap, and a slow test that many mutants still wait for in one invocation is
+what the estimate waits on, as the round does. Where no driver counts its work
+(Vitest), the estimate is the plan's cost of the mutants left at the pace
+since the first mutant ran, as before.
+
+**Memory: copies in invocations of a bounded size.** Playwright makes every
+test case of every file it loads before the first test runs, in the runner.
+A large application's e2e suite, 77 tests and 15,603 mutants to run, ran out of
+a 4 GB heap that way before its first test, with rows. So an invocation holds
+at most about 20,000 copies (`SUPERCOV_PLAYWRIGHT_COPIES` sets it): the main
+round takes the mutants in the plan's order while they fit, and asks for
+another invocation (a `restart` record of kind `main`) for the rest. Each
+process reads only what it needs: the runner reads the plan once and writes
+the round's work; a worker reads `worker.json` (the tests, their copies, how
+they run side by side), the queue of each test it runs and each mutant it
+takes, and finds a copy's test by its project and title path in `originals/`
+(one small file a test), never the plan.
+
+**`--list` reads no plan.** A harness that shares tests out across processes
+lists them first (`playwright test --list --reporter=json`). The generated
+config sees `--list` and returns the project's own config, and the test
+declaration adds no copies: the list shows each test once, and nothing of the
+pass is read or written.
+
+**Several invocations at once.** A harness may start several `playwright test`
+processes in one command (slots, each with a share of the tests and a server
+of its own), a few seconds apart. They share the round's directory: each
+works out the same work from the same plan and writes it alike, and none
+removes what another wrote. A test's baseline, a mutant's claims and its kill
+are the pass's; a file's lock (one test of the file at a time), a kill's
+control and what ran beside what are the invocation's, as its server is.
+
+**A spread file in an invocation the harness did not give it to.** A
+worker runs its spec files in Playwright's order, one after another, so a
+spread file that sorts first is where every slot starts. On the same area's
+first round after measuring, every slot of a job spent 87 to 94% of its
+attempt time on the 23 spread files, the same alphabetically first ones in
+each slot, on mutants that had already lived through a candidate there (a
+survivor-to-be with 300 candidates ran 69 of them in one slot), and its own
+files' mutants, most of them killed by their first candidate, waited for a
+later round: the round decided 263 mutants by running them where the round
+before spreading decided about 460. So where an invocation's own files (those
+its command names) have a mutant no candidate let live yet, a spread file it
+was not given takes there only mutants no copy of any test has taken yet in
+the round (and no earlier pass ran): each at most once, likely its kill. The
+rest wait for the invocation that runs the file as its own, which takes every
+mutant of it. A first version took any mutant no candidate had let live yet;
+but a cold test runs without its mutant first, so a mutant taken by one test
+stayed "not yet lived" while that ran, and the next test of the spread file
+took it too: on a slower CI machine the same invocation ran one mutant on
+several tests of a file it was not given. A claim is made as a copy takes the
+mutant, so no later copy misses it.
+Once no fresh mutant waits for an invocation's own files (a later round's
+survivors-to-be), every invocation takes every mutant of every spread file,
+as spreading intends. Which mutants a test may take changes, never what an
+attempt decides: a mutant one invocation leaves waits for a copy of another.
+Replayed on that round's logs, the attempts it moves off the spread files to
+the invocations' own were 54 to 60% of a job's attempt time.
+
+**Serial files and slots.** A harness that shares tests out to slots keeps
+a file with a serial describe in one slot: its tests may lean on one
+another. The strong pass runs a serial describe as a default one, so a file
+has no order its copies must keep beyond the sweeps, and the queue its
+copies take mutants from is the pass's, shared by every invocation. Running
+the file in several slots is then exact as it stands: a mutant's claim on a
+candidate is pass-wide, so no two slots run the same test with the same
+mutant; each slot's first run of each test is its own control on its own
+server and database; and a kill is confirmed by the next control of its test
+in the slot that made it. What it costs is each slot's baseline of the
+file's tests.
+
+So the pass spreads such files itself. A config cannot do it: `playwright
+test` reads its file filters from the command line before it loads any
+config, and a config can narrow the run but not widen it. And it cannot start
+invocations of its own: a slot's server and database belong to the slot's
+process, and a second invocation against them would run beside the slot's
+tests on state they do not expect. But Supercov's preload runs in each
+invocation's process before Playwright parses its command line, as it
+already does to put Supercov's config in place of the project's. In a strong
+pass it adds a filter for each spread file to `argv`. A spread file is a spec
+file whose text declares a serial describe (`describe.serial`, or `mode:
+'serial'`) and whose tests some mutant still to run is a candidate of,
+worked out once a pass from its plan.
+
+- **Only where the command names spec files.** Playwright's file filters are
+  the arguments after `test` that are not an option's value: `--project`
+  takes every argument up to the next option, `--debug`, `--only-changed`
+  and `-u` take the next unless it is an option, the rest of the valued
+  options take one, and nothing after `--` counts. A command that names none
+  runs every file already, and a filter added there would narrow it.
+- **`--list` is left as it is**, as 4.29.3 left it: a harness shares its tests
+  out from the list, and sees each test once.
+- **A filter matches the file alone**, by its path from the project root, with
+  either separator, its characters escaped: `/(?:^|[\\/])tests[\\/]e2e[\\/]buy\.spec\.ts$/`.
+  `--grep`, `--project` and a config's own `testDir` and `testMatch` still
+  apply. An invocation whose config does not reach the file runs nothing more.
+  A project another depends on runs as it does without the file.
+- **The invocation says so** on its output: `[supercov] strong pass: 1 spec
+  file(s) with a serial describe run in this invocation too, each taking its
+  own mutants of them: tests/e2e/buy.spec.ts`.
+
+A file that sets its serial mode some other way (a helper of its own) is not
+seen as serial. It stays where the harness put it, and the line below says
+what that costs.
+
+Measured on the same area, from the state the partial-progress rounds below
+left (1,866 of 2,160 decided, 294 open), with the harness unchanged and the
+same 8 jobs of 32 CPUs: each job's six slots ran the serial files, and two
+rounds took it to 2,078 and then 2,156, 4 open, where the rounds before had
+added 50 and 52 without spreading. Counting no `error` as decided, 1,863
+became 2,051 and 2,124. The errors grew from 3 to 32: with the serial files
+spread, a job's main round now ends before its budget, and its `rest` round
+runs, where a mutant whose last candidates fail without it (each job had 4 to
+22 such runs, as before) decides nothing and is an `error` ("its tests did
+not finish, in two rounds") rather than left open by the budget. A later
+round runs an `error` again, keeping its progress.
+
+Where it does not, the progress lines say so. The runner records the spec
+files it loaded with a serial describe (in `playwright test`'s runner
+process, which loads every file before the first test); each invocation's
+status counts the mutants waiting for such a file's tests; and where only one
+of a round's invocations runs the file and it has more time left than any
+other, the line names the file, its mutants, and the two times:
+
+    [supercov]   "tests/e2e/buy.spec.ts" has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; the pass spreads such a file only over invocations whose command names spec files
+
+**A process that runs out of heap is named.** Every Node process of a strong
+pass runs with `--report-on-fatalerror` into the pass's directory. A process
+that dies out of heap writes Node's diagnostic report first; the pass reads
+it, says which process it was (its command line and pid) and its heap, and,
+for a test runner's process, that the plan was too large for its heap; each
+mutant left without a verdict says so in its reason. The reports, which hold
+the process's environment, are removed once read.
+
+**Concurrency as the project runs it.** Copies of a file's tests in a
+`fullyParallel` project are separate groups, which Playwright runs side by
+side. A suite whose tests share a server's state (a harness's fault rules for
+one server slot, rewritten by each test) then fails for reasons no mutant
+made. So a file runs one test at a time here when its tests are known not to
+run at once: two or more of them ran in the measured run and their spans
+never overlapped, or, where the spans tell nothing (one test, none spanned),
+the project does not run files `fullyParallel`. Each such attempt holds the
+file's lock from its start to its end, across workers. A file whose tests
+overlapped runs side by side. The workers are the project's own.
+
+**Kills beside another mutant are confirmed.** A test that fails while
+another mutant's attempt runs on the same server (the same invocation) may
+have failed for the other's doing. Each attempt, as it starts, looks at the
+invocation's attempts running and marks those with another mutant, and
+itself; so of two that overlap one sees the other. Such a kill goes to a
+**serial round** (one worker, one test at a time), which runs its killing
+test first and its other candidates only if that test lets it live. An
+invocation with one worker (a harness's slot) confirms nothing this way.
+Attempts in different invocations are not beside one another: each drives a
+server of its own, as the file locks already assume. A failing attempt's
+error (its first line, ANSI stripped) is the verdict's reason.
+
+**Projects others start from run as they are.** The tests of a project
+another project depends on (`dependencies`, `teardown`: a login that stores
+the session the others start from) run in every invocation with no mutant.
+Such a test is no candidate this pass can run, as a test of another runner
+is not: a mutant no other test kills is an `error` that names the project,
+never a `survived` it has not earned. It used to wait for that candidate, as
+`unfinished`, pass after pass: on a large application's e2e suite, 99 of the
+572 mutants its billing area had left after four passes had the login among
+their candidates.
+
+**Time.** A test run with a mutant gets StrykerJS's limit,
+`timeoutFactor × baseline + 5 s` (`timeoutFactor` 1.5 by default;
+`--timeout-factor` or `SUPERCOV_STRONG_TIMEOUT_FACTOR` sets it), or the test's
+own timeout where that is shorter (the project's, `test.slow()`,
+`describe.configure`: Playwright would end it there anyway). The baseline is
+the longest of the test's measured duration and every run of it without a
+mutant that passed in this pass, in any worker, invocation or round (each
+control records its time), with a second at least: a test whose time varies
+is judged by its slowest run under the pass's own load, the cold first run of
+each worker among them. A baseline and a control run with the test's own
+timeout, never this limit.
+
+The limit is Playwright's test timeout for the attempt, from the moment its
+copy takes the mutant, so it interrupts whatever the test waits on: an action
+with no timeout (Playwright's default) is cut by the test's timeout, and an
+`expect` with a timeout of its own ends 250 ms before the test's deadline,
+saying `Test timeout of N ms exceeded`. Neither Playwright's action and
+navigation timeouts nor the expect timeout need changing. A
+`test.setTimeout()` or `test.slow()` in the test's body or hooks may shorten
+the limit, never lengthen it: the baseline ran with them, so its time already
+says how long they let the test take. An attempt whose first error is the
+test's timeout (any error after it failed because of it: a page closed under
+a waiting click) ran out of its limit; one that failed first is a kill, as
+before, even where it then ran out of time.
+
+An attempt that ran out of its limit makes its mutant a `timeout`, detected,
+as in StrykerJS. It is confirmed as a kill is: by the test's next control on
+the same server, and one that ran beside another mutant's attempt, or whose
+control failed, runs again in a serial round. A mutant whose evaluations pass
+the hit limit is a `timeout` at once. The verdict says the limit: `ran past
+its time limit of 9.5 s (1.5 × its 3.0 s baseline + 5 s)`; the summary counts
+such timeouts and states the factor, and the progress lines show each running
+attempt's limit and when it is near it.
+
+**An attempt that stalls ends there.** Most of a timeout's limit is the 5 s
+constant: a 1 s test's limit is 6.5 s, though no run of it that passed took
+much over 1 s. A mutant attempt is watched from its *window*,
+`timeoutFactor × baseline + 1 s`, counted from the first call the test's own
+code makes (a spec or its helpers, not a Playwright fixture setting up a
+page), and ends at once, a `timeout`, at the first moment (looked at every
+100 ms) that it has stalled:
+
+- the newest call the test made on Playwright's objects (an action, a
+  navigation, a wait, a request, the `_expect` a locator assertion sends, an
+  `expect.poll` or a `toPass`) has not returned, and the test's own code made
+  it;
+- no call still running can end by its own timeout before the limit: a click
+  with no timeout (Playwright's default) or an `expect` given 15 s, not one
+  whose 5 s run out first. A call's own timeout is the one it was given, else
+  the test's default for its kind (`actionTimeout`, `navigationTimeout`, the
+  expect and `toPass` timeouts, and any `setDefaultTimeout` the test called);
+  an API request's is 30 s;
+- the test's pages have sent and answered no request for a second;
+- nothing the pages have yet to do can end the wait before the limit: no
+  request of theirs is unanswered, no WebSocket is open, no worker runs, and
+  no timer, animation frame, idle callback or ending animation is due before
+  the limit in any frame, and every frame answers within a second. An init
+  script keeps each document's timers, frames and sockets from before its own
+  scripts run (`watchPageWork`); the fixture asks every frame at once
+  (`pendingBefore`). A page that could still end the wait is looked at again
+  once what it has yet to do is due, and its attempt goes on meanwhile;
+- the test's body is still running: once it has failed, run out of time or
+  ended (Playwright then sets its duration), what its fixtures' teardown
+  closes is nothing the test waited on.
+
+Each rule keeps a verdict the limit would give. A test that passes is past
+its window only if the mutant slowed it by half its baseline and a second:
+5,831 attempts that passed on a large application's e2e suite took at most
+0.5 s past their baseline (the slowest of the test's runs without a mutant),
+the median 0.8 of it. A test whose waits can end before the limit (an
+`expect` that gives up after 5 s, a poll, a sleep) is left to fail by itself:
+a kill stays a kill. One that is still asking its server (a page that polls)
+is not stalled, and runs to its limit as before. Nor is one quiet between
+polls on a timer: on a large application's e2e suite, a page that polled
+every 5 s was quiet from its first poll, and an attempt waiting on
+`Page.waitForResponse` was stopped at 12.4 s, past its 12.25 s window, where
+the poll at 12.5 s would have answered the wait and the test passed before
+its 16.3 s limit; another run of the same mutant said `survived`. The window
+and the quiet second do not make a stall sound where the page's own timers
+can still act: what the page has yet to do does. With nothing due before the
+limit, no request in flight, no socket open and no worker, no event can reach
+the page before the limit but one the test itself causes, and the test is
+waiting. An attempt that stalled where its page could still end the wait runs
+to its limit, and its verdict is what that run gives: a survivor where a later
+poll answered it, a `timeout` at the limit where none did (`ran past its time
+limit of 6.6 s (...), waiting on Page.waitForResponse at ...; it stalled at
+2.6 s, with a timer due in 1.4 s that could still end the wait, so it ran to
+its limit to confirm`), counted apart in the summary (`2 of them confirmed by
+running to the limit`; `timeLimit.confirmedAtLimit`). A page that keeps a
+timer going for good (a clock, an analytics heartbeat) or a socket open never
+stalls, and its timeouts cost their whole limit, as they did before 4.29.15.
+
+**An attempt whose waits end by themselves runs to their end.** Where every
+call the test is waiting on started before the limit and ends by a timeout of
+its own after it, with a second to spare before the test's own timeout (an
+`expect` given 5 s or 12 s, a sleep), the attempt is not stopped at the limit
+or as a stall: it runs until those calls end, and the test's own outcome
+decides, a kill where the assertion fails. Where they all end before the
+limit, it holds again. An assertion that started late on a loaded machine ran
+past the limit there and was stopped as a `timeout`, where on an idle machine
+it failed inside the limit and killed the mutant: on CI, a mutant whose
+route's page `expect` started late was a `timeout` on one run and a kill on
+another. A call with no timeout of its own (a click, a navigation, a
+`waitForResponse` under Playwright's defaults), or one that would outlast the
+test's own timeout, still ends at the limit or at a stall, as before.
+
+The verdict of a stall says so: `stopped at 2.6 s of its 6.5 s time limit,
+past every run of the test that passed (1.5 × its 1.0 s baseline + 1 s), its
+pages quiet with nothing due before the limit, waiting on Locator.click
+(#save), which cannot end before the limit`, and where the test made that
+call (`at tests/save.spec.ts:12:20`). A timeout at the limit says what it last
+waited on too; the summary counts the two apart and says what ending them
+early saved (`32 timeout(s) ended early once they stalled, saving about
+6m05s`).
+
+Counting the window from the attempt's claim cut a kill short on a loaded CI
+machine: a new worker took 2.6 s to open the test's page, past the 2.5 s
+window of a 1 s test, and the attempt ended as a timeout waiting on the page
+fixture's `newPage` where the test would have failed a moment later. A
+fixture's call is no wait of the test's, and the test's own time starts with
+its first call.
+
+Measured on 8 shards of a large application's e2e suite (4.29.14, 9,137 s of
+mutant attempts, 1,456 mutants): attempts that passed took 81% of the time
+(5,831, 1.3 s each), timeouts 16% (176, 8.3 s each, against a 2.2 s
+baseline), kills 3% (189, 1.6 s each). Ending each timeout at its window
+instead of its limit saves up to 709 s of the 1,465 s timeouts cost, 8% of
+the attempts' time; 15 kills (8%) came from an `expect`'s own 5 s timeout
+after the window, which the rules above leave to fail. Before this, an
+attempt that went quiet waited for its limit, for those two reasons.
+
+This replaces a limit that was never shorter than the test's own timeout,
+plus the expect and action timeouts, with a second attempt, one test at a
+time and twice the time, for a test that only ran out of it. A mutant that
+broke the page then cost the test's whole timeout: on a large application's
+e2e suite (billing area, 742 kills in 8 jobs × 6 slots) the median kill took
+6.2 s but the 90th percentile 60.7 s, 7.4 hours of slot time in all, nearly
+all of it clicks and `expect`s with timeouts of 30 and 60 s waiting for an
+element that never came. One attempt at the limit, final, is what Vitest's
+pass does too (a stage's straggler rule aside), and StrykerJS's factor keeps
+its convention; a Vitest copy gets twice it because its limit covers a whole
+test file. The two-step retry is gone: under the old floor it decided nearly
+nothing (1 timeout in that area), and at the new limit a real hang would cost
+three times the limit, one test at a time.
+
+Measured on the same suite's billing area, round 1 of 8 jobs with the same
+10-minute budget each: 787 mutants decided where 611 were (645 detected: 360
+killed and 285 timeouts, where 480 and 1), the 90th percentile kill 7.1 s
+where it was 60.7 s, and a timeout's median 7.3 s (most tests there take about
+a second, so their limit is 6.5 s). A detection by one test took 5.9 s of slot
+time on average where it took 10.3 s; the rest of a pass's time is its
+survivors' runs, its baselines and controls, and the mutants run alone with
+the server. Of the mutants both passes ran, none that survived became a
+timeout; 130 kills became timeouts, 253 stayed kills.
 
 **Run alone, the server started with the mutant.** That per-request
 switching is exact only where nothing one request does reaches another, and
 a server keeps what its top level made. So the plan marks a mutant
-`serverWide` where a server ran its code in work no request named (start-up,
-timers: `background`), at a server module's top level (`module-level`), or
+`serverWide` where a server ran its code in work no request named or waited
+for (start-up, timers, what a request left running after its answer:
+`background`), at a server module's top level (`module-level`), or
 for a request that named no test, credited by time (`by-time`). Such a
-mutant gets no row: the engine starts the command again for it, alone, with
-`SUPERCOV_ACTIVE_MUTANT` set in every process and only its candidate tests,
-and its verdict's reason says so; a mutant that keeps the server from
-starting is `killed`. Work for a request that named no test while no test
-ran (a web server's readiness check) is not such work: it ran with no mutant,
-as every request runs with its own, and leaving it out keeps every handler's
-mutant from running alone. That is the one place the pass trusts that a
-request's work does not reach the tests' through shared state without a
-canary to check it.
+mutant is not queued: the engine starts the command again for it, alone, with
+`SUPERCOV_ACTIVE_MUTANT` set in every process, and its verdict's reason says
+so; a mutant that keeps the server from starting is `killed`. Work for a
+request that named no test while no test ran (a web server's readiness
+check) is not such work: it ran with no mutant, as every request runs with
+its own, and leaving it out keeps every handler's mutant from running alone.
+That is the one place the pass trusts that a request's work does not reach
+the tests' through shared state; the controls after each kill check the rest.
 
-Each further pass a driver asks for (a `restart` record in the results: one
-mutant alone, a stage pass, a serial pass) is a new invocation of the
-command, its output in a log beside the results, run in turn until none
-asks for more. A serial pass also takes every mutant whose rows did not all
-run or ended after an error outside any test (a shared server that exited).
+A request that named no test while tests ran is such work, though by time it
+is no test's: with several tests running at once it is credited to none of
+them, and one of them may have sent it from a client that carries no scope
+(`curl` from the test). Each request runs with the mutant its own scope
+names, so a mutant switched on per request never reached it, and its
+candidates all passing proved nothing: before 4.29.10 such a mutant was
+`survived`. The run keeps, for work no test was credited with, whether a
+test was running when its request came (from each test's span, its first to
+its last moment, or its phases where it has none), and the plan marks the
+mutant `by-time`, so it runs alone with the server started with it. The
+tests that count are those the server served a request of, and those no
+server did (a test that only sends what carries no name): a harness that
+starts a server a slot checks each new one for readiness while the earlier
+slots' tests run, and counting those tests sent 9,002 of a 10,503-mutant
+plan to run alone, where its own server's tests send none.
 
-**Canaries.** Every pass puts rows with no mutant among the mutated ones (in
-the middle and at the end of the busiest files' rows). A canary is a test
-that passed its baseline, run again after other attempts' mutants used the
-server: one that fails means state leaked between attempts (or the test is
-flaky), and every mutant that started before it ended is run again, one
-mutant per server start. (A planted mutant no test can reach would tell the
-same, at the cost of a switch.) The pass's summary line says how many ran
-and which failed.
+So does a mutant whose switch a server evaluates as it loads a module,
+though its code is in a function: an arrow mutated whole (`() => undefined`)
+where the module defines it at its top level (`export const GET = async ()
+=> ...`, a handler in an object literal). The switch picks the arrow once, as
+the server loads the module, under whatever request loaded it, and every
+later request gets that arrow whatever mutant it names: such a mutant also
+survived before 4.29.10. The strong build already marks such a switch
+(`static` in the copy's list); the plan marks a mutant whose code a server
+ran (`serverRan`), and the driver runs a `static` one of those alone
+(`module-level`). A `static` mutant only a page ran stays per attempt: a
+page loads its modules after the attempt's init script has named the mutant.
+
+**Work a request leaves running.** A request's scope stays with its async
+work, and its mutant with it. That is exact for what the request does before
+its answer. But a server may answer first and go on: a cron route that
+answers `202` and leaves its pipeline running (a promise no one awaits,
+`after()`, a timer), or a coordinator whose one poller the process's first
+request started, in which every later request's batches are polled and read.
+Such work kept the context of the request that set it off: the poller ran as
+the first request's test, with that attempt's mutant, for as long as the
+server lived. A later test that waited for its own batch there never had its
+mutant reach the poller's code, and the measured run credited that code to
+the first test alone; its first runs in a pass have no mutant, so the poller
+ran none, and the mutant survived though every test that waits for a batch
+kills it. A fixture test
+(`mutants_test_kills_server_mutants_work_after_a_response_reaches`) holds
+both: a job read after its response, in its request's own continuation, and
+jobs a poller reads that an earlier request started.
+
+So a request's work ends with its answer: once its response has finished (or
+its connection closed) and the listeners of that event have run, what it left
+running is no request's. The runtime keeps the request's lifetime in each
+context made for it, which spreads and carriers copy and no header or
+environment variable serializes. Work under an answered context is recorded
+as the server's own (no scope, no request's number: background, as a timer's
+is), every test is its candidate, and the plan marks the mutant `background`:
+it runs alone with the server started with it, where every attempt names that
+mutant and the process runs it in work no request names. In a main round, a
+request's switch gives such work the process's mutant, none. What a request
+does before its answer is unchanged, a body read and a page streamed as the
+response goes out among it, and so is what a response's own `finish`
+listeners do in their turn.
+
+What it costs: a mutant in code that runs only after an answer (a pipeline a
+route leaves running, a job a webhook starts) runs alone against every test
+of the run, where per request it ran against the tests that reached it. What
+a request awaits before it answers costs nothing more.
+
+**A route a framework loads, and calls with its own request.** Next.js loads a
+route's module while it serves the first request to the route, and calls the
+route's handler with a web `Request` of its own. The handler is wrapped as
+its module loads (`withRequestPhase`), and the wrapper kept the context it
+was wrapped in as the handler's owner, for a server a test starts in its own
+process, whose untagged requests are that test's. Wrapped while a request was
+served, that owner was the loading request's attempt: every later request
+that named no test (a webhook a mock payment provider sends) ran as that
+attempt's, and in a strong pass with its mutant, in a main round the one of
+the test's first run, none. And the web `Request` carries no lifetime, so
+what the handler left running after its answer (`after()`) stayed the
+request's. A webhook route that reports a sale in `after()`, and a test that
+waits for the report, had every mutant of the report survive though the test
+fails with each: the measured run credited the work to the test, and no
+attempt's switch reached it. Now a handler wrapped while a request is served
+(its context carries a lifetime) has no owner, and a handler called with a
+framework's own request takes the lifetime of the request being served, when
+its context names the same attempt (or both name none): the webhook is a
+request no test named, and the work after its answer is the server's own.
+`scripts/next-after-webhook.mjs` holds it, on a Next.js build.
+
+**A survivor no attempt ran.** Each of these was a way for a request's work to
+run with another attempt's mutant, or none, where the plan said the test's
+own requests reached the mutant; a long-lived worker process the first
+request starts, which carries that request's attempt as a child does, is
+another. So a pass checks what it can: a server's switch notes, once an
+attempt, that the attempt's mutant ran (`noteRequestHit`, in
+`<results>.reached.jsonl`). A mutant whose candidates' servers ran its code
+when measured, which lived through every candidate on the shared server and
+which no attempt ran, is not a survivor: the requests that reached its code
+did not carry its mutant. It runs again alone, with the server started with
+it switched on (`unreached`), where every process runs it, and that verdict is
+its own. The pass says so on its output, and again for each such mutant that
+alone kills: a Supercov fault to report, which other survivors may share.
+Its passes on the shared server passed without it, so they are not its
+progress (Partial progress, below): a pass whose budget stops its round alone
+leaves it with no verdict and nothing passed, and the next pass runs it again
+from its first candidate, on the shared server and then alone. Kept as
+progress, they made the next pass call it `survived` without running it once
+(`tests: 1, durationMs: 0` on a large application's suite, where a pass that
+ran it killed it). A mutant left unfinished that no attempt has run yet is
+treated alike: its next round runs every candidate, not only those left, so
+that what it sends alone is every candidate. A
+mutant its tests run in the browser alone is not checked (a page notes
+nothing); a survivor whose code a candidate's server ran, but which also runs
+where the attempt's switch reaches it, is not either. The check costs an
+alone run for each such survivor, and nothing for the others.
+`mutants_test_runs_alone_a_survivor_no_attempt_ran` holds the worker case.
+
+Each further round a driver asks for (a `restart` record in the results: one
+mutant alone, a serial round, the rest of what did not finish, the main
+round's mutants past one invocation's copies) is a new invocation of the
+command, its output in a log beside the results, run in turn until none asks
+for more. A `rest` round that decides nothing runs what it left one test at a
+time (a `serial` round): side by side, a worker with nothing it could take yet
+ran through a test's copies while another worker's attempt ran, and on a
+loaded runner a round ended with a mutant every candidate kills still waiting
+for its tests, twice, and it was an `error`. What a later round that decides
+nothing leaves is an `error`.
 
 A mutant's candidates are the attempts its weak verdict names, as in Vitest.
 Candidates under another runner (a Vitest test of the same run) are not run
@@ -736,8 +1628,9 @@ Validated on playwright-test-coverage (`910da570`, a Vite app served by
 Supercov's own config from `.supercov/` used to find "No tests"): its 9
 mutants run are 7 `timeout` and 2 `survived`, and each applied by hand to
 the source with `npx playwright test` as written agrees: the 7 fail (their
-tests wait out Playwright's 30 s), the 2 pass. The pass takes 400 s, nearly
-all of it those tests' own waits and their retry with twice the budget.
+tests wait out Playwright's 30 s), the 2 pass. The pass took 400 s, nearly
+all of it those tests' own waits and their retry with twice the budget,
+before the time limit above.
 
 ## Runners that start a process per test file (jobs)
 
@@ -807,6 +1700,14 @@ time per mutant and its files cheapest first:
   mutant runs again with its file whole (`overturned`).
 - A job's limit is 3× its baseline and 10 s; past it the job's process group
   is stopped, and the mutant is a `timeout` unless a test had already failed.
+  A stopped job may only have waited: on the jobs beside it (the CPU,
+  Cargo's lock on the build directory every job of Rust compiled to wasm
+  builds in), or on a machine busier than when its baseline ran (other work
+  on it). So it runs again alone, after its tests ran alone without the
+  mutant, with a limit of 3× the slower of that run and its baseline, and
+  10 s; only one past that is a `timeout`. Judged by the baseline alone, a
+  kill and a survivor of a pass over Rust compiled to wasm came back as
+  `timeout`s on a loaded machine.
   A mutant that passed its hit limit (`<results>.timeouts.jsonl`; under
   Browser Mode, sent to node) is a `timeout`.
 - A job that ended without reporting a test its baseline reported (a module
@@ -977,30 +1878,475 @@ Jest or Mocha: ms took 21.8 s, cron-parser 37.3 s, negotiator 5.9 s. Under
 tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
 13.6 s against 8.1 s.
 
+## Partial progress across passes and rounds
+
+A pass its budget stops, or a CI job's time limit, used to leave a mutant
+open with nothing to show for the candidates it had already passed: the next
+pass ran it from its first candidate. On a large application's e2e area
+(about 1,600 of 2,160 mutants decided in a first round of 8 jobs), the
+mutants left were mostly survivors-to-be with many candidates, a few of them
+slow, and each further round decided only about 100: each one ran the same
+cheap candidates again before it reached the ones it had not tried.
+
+So a mutant's progress is kept: **the candidate tests that passed with it
+switched on.** The argument is the plan's own. A kill needs one candidate
+that fails with the mutant; a survivor needs every candidate to pass. A
+candidate that passed with the mutant can make neither a kill nor a survivor
+of it by running again with the same code and the same test, so a later pass
+runs the mutant only against the rest, and a mutant every candidate of which
+passed survived. Three conditions keep the fact the same fact:
+
+- **What it applies to.** A mutant whose candidates run one at a time with
+  the request's own switch: not one that runs a test file whole (Vitest's
+  module-level mutants, where the file's run, not a test's, is the unit) and
+  not one a server must start with (`serverWide`: a pass with a per-request
+  switch says nothing of it; the alone rounds record no progress).
+- **Which passes count.** The Playwright judge records, for each mutant its
+  round leaves without a verdict, the candidates whose attempt passed before
+  any error outside a test (the same set it would count toward a survivor),
+  as a `progress` record in the results; in a stopped round, those before
+  it began to stop. A mutant no attempt ran on its server (a survivor sent
+  alone as `unreached`, one whose invocation's server never ran it, one left
+  unfinished that no request carried yet) records none: what passed, passed
+  without it. An attempt Playwright interrupted (the budget's
+  termination) neither passed nor failed: it settles nothing.
+- **When it stops holding.** It is invalidated as a verdict is, candidate by
+  candidate: carried to a later run (`supercov mutants` after an edit, a
+  later round's jobs) only where the mutant is found by its code and the
+  candidate runs as it did with the mutant switched on (After an edit,
+  below); merged (`supercov merge`) as the union of every run's
+  candidates, a run lending only tests it measured, for a file it recorded
+  with the merged run's bytes. A candidate that is no longer a candidate
+  lends nothing.
+
+It is saved in `strong-mutation.json` beside the verdicts, as `progress`
+(mutant id to test ids), an optional field older releases ignore; a verdict
+that settles a mutant drops its progress, and an `error` (which runs again)
+keeps it. The engine takes the candidates off the plan before it shares the
+mutants out, so the shares, the order and the driver see the work that is
+left; a survivor's verdict counts the candidates it passed before.
+
+**Measured** on that area, from the state 4.29.6 left after its four rounds
+(1,764 of 2,160 decided; its rounds had added 309, 108 and 73), with two more
+rounds of the same 8 jobs of 32 CPUs (a pass of about 350 s each): 1,814
+(+50) and 1,866 (+52), against 4.29.6's 73 in its last round. Those 73
+included kills a stopped round made as its servers went down, which this
+pass no longer counts (above), and these jobs had about 20 s less of a pass. Each job of the second round resumed about 187 mutants and did
+not run again about 3,600 candidate runs they had passed; what it decided
+was mostly survivors (39 of 52, against 24 of 78 in 4.29.6's fourth round),
+the mutants that need every candidate. The serial file still bounds each
+job: the progress lines named it in every job, 6 to 14 mutants waiting
+about 6 to 13 minutes in one slot while the others had 30 s to 2 min left.
+
+**Why the slow tail was bounded, and what this does to it.** Within a
+Playwright pass the order already ran cheap candidates first; across passes
+the same cheap candidates ran again, and a mutant reached its slow ones only
+in a pass long enough for all of them. With progress kept, each pass adds to
+what the last reached: a mutant with 15 candidates, four of which poll for
+10 s, runs its cheap ones once and the slow ones in whichever later passes
+reach them.
+
+## Continuing a run whose tests failed
+
+A shard saves its verdicts into a run of its own, made on an unchanged
+checkout from a restored run rather than measured again
+(`docs/design/mutants.md`, "Strong verdicts" under "Merged runs"). Until this
+release that run had to be one whose command passed. On a large application's
+e2e area, the measuring job's 1,456 Playwright tests had one timing-sensitive
+test fail, unrelated to the mutated files; its command exited 1, and each of
+the 8 shard jobs that restored the run measured the whole area again (about 8
+minutes each), spent its budget on it, and decided nothing.
+
+A failed test's evidence is already not trusted: a test is a candidate only
+where every attempt of it passed in the measured run (`runnable`), in any run
+a pass plans from, whether it was measured by the job or restored. So the
+verdicts a shard reaches from such a run are the passing tests' alone, as
+they would be had the shard measured it itself with the same test failing,
+and measuring again would record the same evidence for every test that
+passed. What the exit status cannot say is whether something other than the
+failed tests also went wrong. A command can fail outside its tests -- a crash
+before or between them, a global setup or teardown, a reporter, the runner
+interrupted -- and may have left tests unrun or evidence unwritten, whose
+mutants a pass would then find with fewer candidates than they have.
+
+So a run whose command did not pass is continued only where the failure is
+explained by tests that failed, read from its own records:
+
+- **It exited with a status.** A command that ended without one (a signal)
+  was cut short, whatever its tests did.
+- **It recorded tests.** No test recorded is no evidence to continue from.
+- **A test failed.** An attempt failed or timed out, or passed where it was
+  expected to fail (`test.fail()`): what a runner exits non-zero for. A
+  skipped, interrupted or unfinished test, a flaky one that passed in the end,
+  and an expected failure that failed are none: a command that exited
+  non-zero with only these failed for another reason.
+
+A run whose command passed is still taken first, where one is, since its
+plan has every test for a candidate; failing that, the newest that
+qualifies. The shard says which tests it leaves out (`continuing from run
+r4, whose command failed: 1 test failed while measuring and is not a
+candidate: checkout > pays`), `--json` gives them as
+`measurement.failedTests`, and the pass's answer still says that the run's
+command failed and that its verdicts cannot gate, as for a run the shard
+measured with a test failing. Where no run qualifies, the shard measures and
+says what kept the newest such run out (`run r4's command exited 1, though
+none of its 1456 test(s) failed: it failed for another reason, which may have
+left tests unrun`, or `run r4's command ended without an exit status (1 test
+failed while measuring and is not a candidate: checkout > pays)`).
+
+A test that failed only because it ran slowly is still no candidate in the
+rounds continued from that run, though it might pass now: its mutants are
+decided by the other tests, or left without coverage where it alone ran
+them. Measuring again to win it back would cost each shard the whole
+measurement, for one test's worth of candidates; a later measurement (after
+an edit, or a new round measured on purpose) takes it back.
+
+## A first tier, then the rest
+
+A survivor costs every candidate it has, and a kill rarely needs more than
+its first few. On a large application's e2e suite (1,703 Playwright tests,
+55,565 mutants to run, 11.9 million candidate runs), code every test runs --
+an auth middleware, a dashboard layout, a server module's top level -- gives
+a mutant hundreds to 1,600 candidates, against 14 at the median. Its
+survivors-to-be held each pass: in one late round, 89% of the attempt time
+went to mutants still undecided at its end, and areas of that code were left
+out of the pass for what they cost.
+
+**Where kills come from.** The 3,448 kills that suite's merged reports hold,
+each placed in its mutant's candidate order (the order below, read from the
+whole suite's plan):
+
+| a mutant's candidates up to | 1 | 2 | 4 | 8 | 16 | 32 | 37 | 64 | 128 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| kills there or before | 27.0% | 43.9% | 62.6% | 78.1% | 88.5% | 93.5% | 95.0% | 97.8% | 98.7% |
+
+A candidate's chance to kill a mutant still alive falls with its place: 12.5%
+at the first, 7% at the fourth, about 2% from the 10th to the 20th, under 1%
+from the 50th, 0.16% past the 100th. And it falls with whose evidence made it a
+candidate: of the 3,448 kills, 3,434 came from a test whose own evidence ran
+the mutant's code (it infected it, could not tell, read its value) and 14 from
+one that only may have caused it to run (work no test was credited with, a
+module its file loaded), though those were 62% of the suite's candidate runs.
+
+**The order.** A Playwright mutant's candidates are taken in that order:
+those with their own evidence first, then the others; within each, the tests
+that killed most of the run's other mutants of its file first, then cheapest
+to a kill, as the driver orders them (a test's time over how likely it is to
+kill, one that infected it four times likelier).
+
+A page component's or a shared service's first tier used to fill with the
+tests that only render or pass through its file -- a layout's, every
+dashboard test's, cheap and infecting -- while the tests that exercise it
+came later. On a dashboard page's component of the same suite (572 mutants,
+about 187 candidates each), a first round left 251 `survived so far`, and
+triage found most of them killed by the page's own spec files, past the
+first 32; every kill the round made there came from three spec files. A test
+that killed one mutant of a file exercises that file: its kills are the run's
+evidence of it. So the run's kills, saved verdicts with the test that made
+each, say for each file which tests killed its mutants and how many, and a
+mutant's tier takes those first, the most kills first. The first round of a
+run has none; each later pass over the run, and each round of a pass split
+across jobs and merged, has the kills before it.
+
+Measured on the suite's kills (3,878, each with the test that made it): of
+the 255 a first tier of 32 would leave to its rest, with the kills inside
+the first tiers as the run's history, 58% have their killer among the next
+32 candidates in this order (the median killer 10th), against none before
+(the median 53rd). Over every kill, with the run's other kills of the file
+as its history, 98.8% fall in a tier of 32 against 93.4%, and those of
+mutants with 100 or more candidates 89.5% against 56.0%. The tier's size is
+still read from the order without killers, where a kill's own count would put
+it first. The tests' coverage of the mutant's file was measured too, as the
+points of the file each test ran in the record that says which test ran which
+file: no better than the order before (94.0% against 93.4%), as most tests
+of a page run the same few points there.
+
+**The first tier.** Where a mutant has more candidates than a first tier
+holds, a pass runs it first against its first tier alone, in a round of its
+own, every such mutant with the rest of the pass's mutants, the cheapest
+first by what that round costs them. A first tier holds 32 candidates, or
+more where the run's own kills say: each kill of the run is placed in its
+mutant's order, and the tier holds 95% of them. A first tier's kills are
+never past its end, so the size only grows, from kills the rest made (or an
+earlier release's passes); fewer than 20 kills say nothing. A mutant that
+needs a server started with it (`serverWide`) has a first tier too: its
+round alone runs the tier, not every candidate.
+
+**By time as well as count.** A first tier also ends once its candidates'
+measured time reaches 60 s, holding four candidates however slow they are,
+whichever of its count and its time comes first. In an area of the same suite
+whose tests take 6 to 14 s each (an integration's publishing and a site's
+analysis, 1,743 mutants), two rounds of 8 jobs of about 400 s decided 367
+mutants: 852 more were resuming, each having passed about 6 candidates (5,252
+in all), and none had reached a 32-candidate tier, three or four rounds more
+just to say `survived so far` of them. Kills come from the cheap and likely
+candidates first: of 3,972 kills of the suite, each placed in its mutant's
+order with the time of its candidates up to and with its killer, half came
+within 2.8 s, 75% within 10 s, 90% within 26 s and 95% within 61 s. A tier of
+32 candidates holds 93.7% of them; 32 candidates or 60 s holds 93.4% (and 30 s,
+91.4%), and costs a mutant 34 s of its tests where 32 candidates cost 40 s,
+over every mutant of the suite to run (420 hours where 498). Where a test
+takes 10 s, the tier is 6 candidates, not 32. The time grows with the run's
+kills as the count does: the tier holds 95% of them by their candidates' time
+too, never less than 60 s.
+
+A tier ended by its time holds fewer than 32 candidates, so `survived so far`
+can no longer be read from how many candidates a mutant passed. The run marks
+each mutant whose progress holds a whole first tier, in `strong-mutation.json`
+as `lived`, an optional field older releases ignore; the mark goes with the
+mutant's progress, and a merge keeps it where the merged progress keeps the
+mutant open. A pass its budget stopped partway through a tier marks nothing.
+A run saved by 4.29.12 or 4.29.13, which kept no marks, reads a mutant that
+passed 32 candidates or more as one that lived through its tier.
+
+**Survived so far.** A mutant its first tier lets live has not survived: the
+driver's `survived` for it is read as the tier's tests having passed with it,
+its progress (Partial progress, above), and it has no verdict. Where the pass
+has the time, the next round runs it against the rest, from there, and it
+ends `killed` or `survived` as before. Where the pass stops first (its
+budget, a job's limit), the run keeps it so, and the next pass resumes it.
+A mutant that needs a server started with it resumes too, in the same run:
+its progress comes only from its rounds alone, where its server started with
+it, so a candidate that passed there passes again. Another run's plan may
+not start a server with it, so that progress is not carried after an edit or
+merged.
+
+A run's listings show such a mutant as `survived-so-far`, with how many
+candidates it passed (`tests`): `mutants --status survived` lists it beside
+the survivors, said as such, `--status survived-so-far` lists those alone,
+and the summary counts them apart. It is not in the mutation score, which
+counts verdicts, and `--fail-on survived` does not count it: it is undecided,
+as a mutant a budget left is. Only a mutant that passed a first tier's worth
+of candidates (32) is `survived-so-far`: a pass its budget stops partway
+through a tier records the few candidates each open mutant passed, and 4.29.12
+listed those too. On a settings page's component of that suite, every
+`survived-so-far` mutant had passed 1 to 4 of its 135 candidates, never
+meeting the page's own spec files, which killed 176 of the 317 later. Such a
+mutant is open, as before, and the next pass resumes it. The pass's summary
+says how many there are:
+
+    survived so far 212: lived through a first tier (32 candidates or 60 s of their tests' time, whichever comes first), the rest not run with yet; not survivors, and not in the score: the next pass runs the rest (supercov runs <run> mutants --status survived-so-far)
+
+**What it saves.** Read from that suite's plan, a survivor's cost (the time of
+every candidate) against its first tier's, summed over every mutant to run:
+
+| mutants | every candidate | a first tier of 32 |
+| --- | --- | --- |
+| run with a request's switch | 2,849 h | 441 h |
+| a server module's top level | 3,261 h | 62 h |
+| for requests no test named | 746 h | 8 h |
+| in a server's background work | 397 h | 3 h |
+| all | 7,253 h | 513 h |
+
+So a pass decides every kill within the first 32 candidates (93.5% of them),
+and gives every other mutant `survived so far`, for about a fourteenth of
+what deciding every survivor costs. A mutant of the auth middleware (66
+mutants, about 1,170 candidates each) costs about 39 minutes of test time to
+survive, and its first tier about 7 seconds; a dashboard layout's and an
+onboarding checklist's, 46 and 43 minutes against 11 and 16 seconds. What waits is the 6.5% of kills
+past the tier (5% of them past a tier sized to the run's kills): mostly
+mutants of code every test runs, and webhook code that only requests no test
+named reach (13 kills, 1,153rd to 1,549th in their order). Triage can start on
+the `survived-so-far` mutants: they are the survivors of the likeliest
+killers.
+
+**Not built, from the same data.** Taking one candidate of each spec file
+before a second of any (diversity by file) placed the same kills later, not
+earlier: at most 34.9% by the second candidate against 43.9%, and 31.7 h of
+test time to the kills against 20.0 h (an upper bound: an earlier candidate in
+that order might kill too, which the data cannot say). Grouping by the route a
+test enters by and the points it hit in the mutant's function needs each
+test's hits beside the plan, which a plan does not hold. Infection already
+decides each candidate (a test whose recorded values could not differ is
+none); the candidates of most cost are those with no evidence of their own,
+which have no values to compare.
+
 ## After an edit: verdicts no change could move
 
-`supercov mutants` measures the checkout again once it changed, and that
-run has no verdicts. It keeps those of the latest earlier run of the same
+A team that passed every mutant of commit A should not pay for it again on
+commit B. `supercov mutants` measures the checkout again once it changed, and
+that run has no verdicts. It keeps those of the earlier runs of the same
 command, dependencies and configuration (and mutant set), mutant by mutant,
-where nothing the verdict depends on changed; the rest run. `tests affected`
+where nothing the verdict depends on changed; the rest run. Nothing is asked
+for: the earlier runs are those in `.supercov/runs`, a baseline restored
+there among them. They are read newest first, and each gives the mutants
+still without a verdict the ones it can keep: a pass split across machines
+leaves each share's verdicts in its own run, and they are kept together.
+Reading stops once every mutant has one. A run whose record of what each
+test ran is gone lends nothing, and the next older run is read. A change to
+the configuration or the dependencies keeps nothing: they set what every
+test does.
+
+**Which mutant a verdict was.** A mutant's id holds its lines, so a line added
+above a function gives each of its mutants a new id though none changed. A
+pass saves each verdict's *anchor* beside it (`anchors` in
+`strong-mutation.json`, `strong_anchors.rs`): the text of the innermost
+declaration the mutant sits in (a function, a method, a class; the file for a
+module's top level), byte for byte with its comments, its name path, where
+in that text the mutant is, and what it does. A mutant now finds its earlier
+verdict by its anchor, wherever its declaration moved. Any change to the
+declaration's own lines, a comment or a space, is another anchor and runs it
+again: an anchor can lose a match, never make a wrong one. A run saved
+before anchors finds a verdict by the mutant's id, where its file is byte for
+byte as it was.
+
+**What a test runs with a mutant switched on.** `tests affected`
 (`source_manifest::affected_tests`) says, from each test's recorded
-execution, which tests a change since that run could have reached: a test
-file's edit reaches its tests, a source edit the tests that ran the changed
-code (a file no parser reads, any test that ran it), a helper the tests load
-the tests whose files load it, and a test that ran with others and recorded
-nothing of its own is undetermined wherever the change is inside what the run
-covered. A mutant keeps its verdict (killed, survived or timeout; an error
-runs again) where
+execution, which tests a change since a run could have reached. That record
+is of the test without a mutant. With one, the test may run code it never
+ran: the mutant changes a value, a branch goes the other way, and a function
+the test never called is called. In the fixture below, `refund(20)` never
+calls `audit`, and a mutant that makes `sum > 1000` true sends it there;
+`audit` returned what it was given, so the refund test passed and the mutant
+survived. Once `audit` returns `-sum`, that mutant is killed, though no
+test's record names `audit` and `tests affected` reaches no test. 4.29.15
+kept the survivor (two mutants of that condition, of the five it kept there).
 
-- its file is as it was, byte for byte (a comment appended counts as a
-  change: a mutant's id holds its lines);
-- every candidate test it has now is one the earlier run had, unaffected, and
-  so is every test of their test files (they share the file's state), and so
-  is every test of the files it runs whole.
+So a test *runs as it did* with a mutant switched on only where no code the
+mutant could lead it into changed, and the bound is what the test's process
+can run:
 
-A new test that could kill it is a candidate the earlier run did not have, so
-it runs. `runs <id> mutants test` keeps nothing of another run: it tests the
-run it names.
+- **A test that runs the mutant's code in its own process from what its
+  imports load** -- a Jest, Vitest, Mocha or `node:test` test, a pytest or
+  RSpec one; not a Playwright test, not a mutant a server starts with, not a
+  test a process serving it answered, and only where every import of its
+  file, its runner's setup files and what they import in turn is followed
+  (`test_loads`) and reaches the mutant's file. A JavaScript or TypeScript module runs its top
+  level as it loads; a declaration nested in code that runs runs where that
+  code puts it; a top-level declaration runs only where some code that runs
+  names it, or where it is a value in an expression (an argument, a binding,
+  `export default`). So the declarations the test can run are found by names
+  (`strong_reach.rs`): from the test's file, whole, and every top level of
+  every file it loads, each declaration they name, and what that names in
+  turn, until nothing new is named. A name is any identifier, in strings too
+  (comments are not code), so a declaration named alike anywhere counts: the
+  bound only grows. The test runs as it did where no declaration found so
+  changed since the earlier run (a declaration's comments and layout aside;
+  a function added alone changes nothing written before) and the earlier run
+  recorded every file it loads. What names cannot follow gives the bound
+  up: a module object read other than by a property name (`import * as all`
+  read as `all[name]`, or passed on), a module exported whole
+  (`export * as`), a top-level code change, a changed file no parser reads,
+  a Python or Ruby file whose code changed (a decorator registers a function
+  no code names), a directory a test loads whole.
+- **A Rust test** (libtest or nextest; a doctest, whose code is a comment
+  of a source file, keeps its verdict only where no code changed): its test binary links every crate it depends on, so every
+  Rust file of the checkout counts, and any other file that changed is
+  read whole. It runs from its own function, not its file, and reaches what
+  that names, and what that names in turn, as above, with what Rust calls
+  unnamed: a method of a trait implementation is reached by its trait's or
+  its type's name too (an operator, `Drop`, `Display` through `format!`,
+  `Iterator` through `for`); an implementation's or a trait's header names
+  nothing; an item that carries an attribute other than the compiler's own
+  (`#[no_mangle]`, a procedural macro's) is reached with what holds it; a
+  file whose macros build names (`paste!`, `concat_idents!`) gives the bound
+  up; and so does any change to a file's top level, a new file, or a
+  function added (it may shadow what a glob import brought in). The details
+  and the fixture are in `docs/design/rust-mutation.md` ("After an edit").
+- **Any other test**: the earlier run found it unaffected, and every test of
+  its file (they share the file's state), and no code changed but tests'.
+
+**The rules.** A mutant keeps its verdict where its anchor finds it, no file
+it runs whole was reached (a Vitest module-level mutant), and:
+
+- **killed**: the test that killed it is one of its candidates now (it still
+  reaches the mutated code in the new run's measurement), the earlier run had
+  it, and it runs as it did. A kill needs one test: that test fails again.
+  A kill whose run did not say which test made it runs again.
+- **survived**: every candidate it has now was a candidate then, so ran with
+  it and passed, and runs as it did. A new test, a changed one, or one the
+  earlier run did not run with it runs it again. Every other test cannot
+  kill it in the new run's own plan.
+- **timeout**: runs again. A timeout rests on its time limit, which is the
+  new run's (each test's baseline in the measurement, times the factor), and
+  on how loaded the machine is; a mutant that runs slowly rather than
+  forever ends near its limit, either side of it. Keeping one with a kill's
+  evidence would keep what a fresh pass may not reach. It costs a timeout's
+  limit again, and on the open-source library below, 11 of 979 mutants.
+- **error** and a mutant that did not compile run again.
+
+A test that failed in the earlier run is affected in `tests affected` (its
+record was cut short, and an agent should run it again), but for keeping a
+verdict its failing is what varies from run to run: where its process is not
+bounded by its imports, it counts as reached only where the change reaches
+code the run covered (`beyondTheRun`), the bound a test with no record of its
+own gets. A pass's progress (Partial progress, above) is kept by the same
+rules, candidate by candidate. `runs <id> mutants test` keeps nothing of
+another run: it tests the run it names.
+
+**Soundness.** A kept verdict is the one a fresh pass reaches wherever the
+tests are deterministic, as a pass assumes of every test it runs, and the
+bound holds: no test runs code its process cannot name or load. What a name
+cannot follow -- `eval`, a module read by a computed name through an object
+other than its own, code another process runs for a test (a worker thread
+started from a file path) -- is not seen; every case Supercov can see gives
+the bound up instead. Everything uncertain runs again: a timeout, a mutant
+whose code moved within its declaration, a kill no record names a test for,
+a test no import bounds where any code changed.
+
+**What the pass says.** How many verdicts it kept, from which runs, the
+commit each measured, and what reaching them took; and how many earlier
+verdicts it did not keep, by why:
+
+    26 verdict(s) kept from run r5 (commit 1a2b3c4), which took 25 test run(s) to reach: nothing they depend on changed
+    13 earlier verdict(s) not kept, so run again: 13 a test that could kill them loads code that changed, which they could lead it into
+
+`--json` gives `carried.runs` (each run, its commit and how many it gave),
+`carried.testRuns` and `carried.notKept`. The verdicts kept are saved into the
+new run with where each was reached (`carried` in `strong-mutation.json`, the
+first run of a chain of keeps), and `runs <id> mutants` says so beside each
+(`killed  carried from run r5 (commit 1a2b3c4)`; `strong.carriedFrom` with
+`--json`).
+
+**Measured.** A fixture repository (Vitest: four sources, three test files
+and a helper; `verdicts_carried_across_commits_are_those_a_fresh_pass_reaches`
+in `crates/supercov-cli/tests/cli.rs`) passed whole on its first commit, then
+one commit at a time, each carried forward from the one before and compared
+with a pass from nothing on the same commit: every verdict the same, each
+time. 4.29.15's rules, on the same commits, kept two wrong verdicts.
+
+| commit | kept | ran | 4.29.15 kept, ran | a pass from nothing ran |
+| --- | --- | --- | --- | --- |
+| comments and blank lines above two files' functions | 25 | 0 | 5, 19 | 24 |
+| a test file: an assertion added | 18 | 8 | 18, 8 | 25 |
+| a helper one test file loads | 21 | 5 | 21, 5 | 25 |
+| one function of a source | 18 | 8 | 18, 8 | 25 |
+| `audit`, which only a mutant reaches | 13 | 12 | 26, 0 (2 wrong) | 25 |
+| a function of the mutants' file no test runs | 26 | 0 | 13, 12 | 25 |
+| a test added to a file | 13 | 13 | 13, 13 | 26 |
+| the runner's configuration | 0 | 26 | 0, 26 | 26 |
+| all | 134 | 72 | 114, 91 | 201 |
+
+On ufo (unjs/ufo, Vitest, 979 mutants), two pairs of consecutive commits of
+its history, each passed whole on the first and carried forward to the
+second, against a pass from nothing on the second: `4d024df` to `7959de5` (a
+fix to `parseFilename` and its test) kept 684 verdicts and ran 226 mutants
+where a pass from nothing ran 878, the kept verdicts having taken 4,501 test
+runs; `7959de5` to `3c4b43d` (`filterQuery` added, with its tests) kept 560
+and ran 353 of 886 (4,880 test runs). All 979 and 987 verdicts are the same,
+status for status. The command took 16.7 s and 20.2 s against 29.2 s and
+37.9 s, measuring included.
+
+### On the files as they are
+
+An earlier run measured on the same files, byte for byte (every file its
+source manifest names, the sources, the tests and what they load, with the
+same digests, `source_manifest::same_files`), keeps every verdict a pass
+reached: killed, survived, timeout, or unviable. Nothing it rests on
+changed; what differs between two measurements of the same files is what
+varies from run to run (a test whose path depends on the time, a test that
+failed once), and a verdict is the pass's, made with its own baselines and
+controls, not the measurement's. An error runs again, and a mutant the run
+had no test for (no-coverage) is not a verdict a pass reached. A mutant the
+new run's plan decides without running is decided by that plan, as before.
+
+The pass says what it kept and what it did not, by why (`carried.notKept`):
+an error, the mutant's file changed, a file it runs whole changed, a test that
+could kill it is new or could reach a change, a mutant that did not compile
+where the code it compiles with changed, or no test could kill it in that
+run. On 4.29.6 the summary named only what it kept, so the survivors the new
+run's plan decides again, about 110 of 1,323 decided in that suite's billing
+area, read as dropped.
 
 A shadow comparison on uuid 9.0.1 (Jest 28, 567 mutants run of 682 listed),
 one edit after another, each measured and passed by `supercov mutants`: a
@@ -1011,6 +2357,19 @@ verdicts were then made again from nothing (all 567 run): every one of the
 682 is the same, status for status.
 
 ## Saving, interrupting and cleaning up
+
+A pass sent SIGINT, SIGTERM or SIGHUP stops its command's processes and ends
+within seconds, as the signal ends a command (130, 143, 129). The signal is
+recorded for the whole pass rather than obeyed at once, wherever the pass is
+when it comes: while the command runs, its supervisor sends it on to the
+command's process group and stops the group 5 s later; while the pass
+prepares its copy, or between passes, the progress thread sends it again
+each second until a supervisor hears it. Whatever the pass waits on after
+that, it is ended 8 s after the signal, the verdicts its driver wrote saved
+first. On a large application's integration suite every job's pass, sent
+SIGINT by `timeout` 450 s in, was still running 25 s later and was killed;
+the verdicts saved survived, but the jobs failed. A parent that left the
+signals ignored no longer keeps the pass from hearing them.
 
 The CLI saves each verdict a driver writes into the run within a second of it
 (`strong-mutation.json`, written whole and renamed into place), so a pass
@@ -1030,3 +2389,21 @@ directory whole, every job's evidence included, for whoever studies it.
   (`mutation-drivers.md`).
 - A mutant of Rust compiled to wasm that a switch cannot hold: `error`, as the
   command builds the wasm once.
+- One build for the measured run and the pass. A Playwright suite whose
+  command builds the app (`next build`) builds it twice: once with probes for
+  the measured run, once with switches for the pass (about 2.5 minutes of a
+  pull request's check on a large Next.js application). The two builds are
+  different programs, and neither can stand in for the other soundly. The
+  measured build carries the probes and no switch: a strong copy instruments
+  switches in place of the probes (`js_schemata.rs`), and the files it
+  switches are those holding the mutants the measured run left undecided
+  (`SUPERCOV_STRONG_FILES`), known only once it has run. A build holding both
+  would be measured as other code than the project's: each switch is an
+  expression the probes would count, so the run's coverage model, its weak
+  verdicts and its identity (what `merge` compares, a baseline's runs among
+  them) would differ from a run of the same command without the pass. And
+  every attempt of the pass would run the probes and record nothing from
+  them. Switching every file a change could hold a mutant in, before
+  measuring, would make the measured run depend on which change is checked.
+  So the pass builds its own copy; `SUPERCOV_STRONG_RESTART` lets a command
+  skip the build where its copy already has one (a restart of the same pass).

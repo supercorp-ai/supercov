@@ -26,6 +26,12 @@ use supercov_contracts::{
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How often a command told to end is looked over again for process groups
+/// its descendants made since (a web server its test runner started all the
+/// same), each of which is told too.
+#[cfg(unix)]
+const DETACHED_RESCAN_INTERVAL: Duration = Duration::from_millis(100);
+
 #[cfg(unix)]
 use std::os::{
     fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -1102,9 +1108,102 @@ static SIGNAL_HANDLER_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(unix)]
 static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
+/// The last of SIGHUP, SIGINT and SIGTERM the process was sent while a
+/// supervisor or an [`InterruptionRecorder`] listened, kept for good: a
+/// supervisor's own record ends with it, and a strong pass reads this to end
+/// in time whatever it is waiting on.
+#[cfg(unix)]
+static INTERRUPTION: AtomicI32 = AtomicI32::new(0);
+
 #[cfg(unix)]
 extern "C" fn record_signal(signal: i32) {
     RECEIVED_SIGNAL.store(signal, Ordering::SeqCst);
+    INTERRUPTION.store(signal, Ordering::SeqCst);
+}
+
+/// SIGHUP, SIGINT and SIGTERM recorded ([`interruption`]) for as long as it
+/// lives, instead of ending the process at once or, where the parent left
+/// them ignored, not at all. A supervisor listens in its stead while it
+/// runs a command, and puts it back.
+#[cfg(unix)]
+pub struct InterruptionRecorder {
+    /// SIGHUP's, SIGINT's and SIGTERM's handlers before, in that order.
+    previous: [(i32, libc::sigaction); 3],
+}
+
+#[cfg(unix)]
+impl InterruptionRecorder {
+    pub fn install() -> Self {
+        let previous = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM].map(|signal| {
+            // SAFETY: zero is a valid initial state for `sigaction`; the
+            // fields the kernel reads are set below.
+            let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+            action.sa_sigaction = record_signal as *const () as usize;
+            // SAFETY: `action.sa_mask` is a valid, writable signal set.
+            unsafe { libc::sigemptyset(&mut action.sa_mask) };
+            // SAFETY: `old` is written by the call; these three signals take
+            // a handler, so the call does not fail.
+            let mut old = unsafe { std::mem::zeroed::<libc::sigaction>() };
+            // SAFETY: both pointers are to live `sigaction` values.
+            unsafe { libc::sigaction(signal, &action, &mut old) };
+            (signal, old)
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InterruptionRecorder {
+    fn drop(&mut self) {
+        // Always the three signals `install` took, put back in reverse.
+        let restore = |(signal, previous): (i32, libc::sigaction)| {
+            // SAFETY: `previous` came from `sigaction` for the same signal.
+            unsafe { libc::sigaction(signal, &previous, std::ptr::null_mut()) };
+        };
+        let [hangup, interrupt, terminate] = self.previous;
+        restore(terminate);
+        restore(interrupt);
+        restore(hangup);
+    }
+}
+
+/// The signal the process was last sent while it listened (see
+/// [`INTERRUPTION`]), if any.
+#[cfg(unix)]
+pub fn interruption() -> Option<ForwardedSignal> {
+    match INTERRUPTION.load(Ordering::SeqCst) {
+        libc::SIGHUP => Some(ForwardedSignal::Sighup),
+        libc::SIGINT => Some(ForwardedSignal::Sigint),
+        libc::SIGTERM => Some(ForwardedSignal::Sigterm),
+        _ => None,
+    }
+}
+
+/// Sends `signal` to this process, for whatever listens for it now: a
+/// supervisor, which stops its command, or an [`InterruptionRecorder`].
+#[cfg(unix)]
+pub fn signal_self(signal: ForwardedSignal) {
+    // SAFETY: a signal to this process, which a handler takes.
+    unsafe { libc::kill(std::process::id() as i32, signal.raw()) };
+}
+
+/// Windows: a console's Ctrl-C reaches the supervisor's own handler alone.
+#[cfg(not(unix))]
+pub struct InterruptionRecorder;
+
+#[cfg(not(unix))]
+pub fn signal_self(_signal: ForwardedSignal) {}
+
+#[cfg(not(unix))]
+impl InterruptionRecorder {
+    pub fn install() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(unix))]
+pub fn interruption() -> Option<ForwardedSignal> {
+    None
 }
 
 #[cfg(windows)]
@@ -1487,6 +1586,7 @@ fn spawn_contained(
             Ok(())
         });
     }
+    // fault-site: process-supervision.spawn-contained
     let child = command.launch().map_err(|source| {
         if source.raw_os_error() == Some(WATCHDOG_ENDED) {
             SupervisionError::PlatformOperation {
@@ -1524,6 +1624,7 @@ pub fn watch_parent_process_group() -> io::Result<()> {
         } else {
             Path::new("/dev/fd")
         };
+    // fault-site: process-supervision.watch-parent-process-group
     let descriptors = crate::fault_fs::read_dir(descriptor_root)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
@@ -1612,6 +1713,7 @@ impl Keyboard {
     fn give(&mut self, group: libc::pid_t, ours_to_give: bool) -> bool {
         use std::os::fd::AsRawFd;
         if self.terminal.is_none() {
+            // fault-site: process-supervision.give
             self.terminal = crate::fault_fs::open_with(
                 fs::OpenOptions::new().read(true).write(true),
                 "/dev/tty",
@@ -1692,6 +1794,58 @@ fn signal_process_group(child: &mut Child, signal: i32) {
     if group_result != 0 {
         // SAFETY: same rationale, with the child PID as a last-resort target.
         let _ = unsafe { libc::kill(pid, signal) };
+    }
+}
+
+/// The process groups of the command's descendants other than its own (and
+/// this process's). A process that left the command's group outlives a
+/// signal to that group: Playwright starts its web server detached, in a
+/// group of its own, and stops it only as it ends itself, so a command
+/// ended before it could left the server running, its port taken for the
+/// next pass ("is already used").
+#[cfg(unix)]
+fn detached_groups(child: &Child) -> std::collections::BTreeSet<i32> {
+    groups_apart(&descendant_process_tree(child.id()), child.id() as i32)
+}
+
+/// The process groups of `processes` other than `own` and this process's
+/// own (which a signal must never reach): a process gone since the list
+/// was read has no group, and is left out.
+#[cfg(unix)]
+fn groups_apart(processes: &[ProcessSnapshot], own: i32) -> std::collections::BTreeSet<i32> {
+    // SAFETY: neither call takes a pointer; `getpgid` of a process that is
+    // gone fails (-1).
+    let ours = unsafe { libc::getpgrp() };
+    processes
+        .iter()
+        .map(|process| unsafe { libc::getpgid(process.pid as i32) })
+        .filter(|group| *group > 0 && *group != own && *group != ours)
+        .collect()
+}
+
+/// Waits until `deadline` for `groups`, told to end, to be gone, and then
+/// ends what is left of them with SIGKILL. A command that ended at once on
+/// its signal returned before them: a stopped Playwright pass's web server,
+/// whose process handles the signal (Supercov's own runtime in it writes
+/// what it measured first), outlived the pass on a loaded machine, and the
+/// next pass found its port "already used".
+#[cfg(unix)]
+fn end_groups(groups: &std::collections::BTreeSet<i32>, deadline: Instant) {
+    // SAFETY: signal 0 sends nothing; it asks whether the group has a member.
+    let alive = |group: &&i32| unsafe { libc::kill(-**group, 0) } == 0;
+    while groups.iter().any(|group| alive(&group)) && Instant::now() < deadline {
+        thread::sleep(POLL_INTERVAL);
+    }
+    let left = groups.iter().filter(alive).copied().collect();
+    signal_groups(&left, libc::SIGKILL);
+}
+
+/// Sends `signal` to each of `groups`.
+#[cfg(unix)]
+fn signal_groups(groups: &std::collections::BTreeSet<i32>, signal: i32) {
+    for group in groups {
+        // SAFETY: as `signal_process_group`; a group gone since is no error.
+        let _ = unsafe { libc::kill(-group, signal) };
     }
 }
 
@@ -1793,6 +1947,7 @@ impl ProcessSupervisor {
 
     pub fn new_crash_safe(watchdog_program: &Path) -> Result<Self, SupervisionError> {
         let watchdog_program =
+            // fault-site: process-supervision.new-crash-safe
             crate::fault_fs::canonicalize(watchdog_program).map_err(|source| {
                 SupervisionError::PlatformOperation {
                     operation: "resolve parent-death watchdog executable",
@@ -1853,6 +2008,10 @@ impl ProcessSupervisor {
         let mut next_diagnostic = started + options.diagnostic_interval;
         let timeout_at = options.timeout.map(|timeout| started + timeout);
         let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
+        // The groups of the command's descendants that left its own, as
+        // the command was told to end and while it ends: they are told too.
+        let mut detached = std::collections::BTreeSet::new();
+        let mut rescan_at = started;
         let mut timed_out = false;
         let mut interrupted_signal = None;
         let mut keyboard = Keyboard::default();
@@ -1868,6 +2027,12 @@ impl ProcessSupervisor {
                     }
                 };
             if let Some(status) = status {
+                // A command told to end may end before the groups apart
+                // from it that were told too: they still go before this
+                // returns, or a web server's port stays taken.
+                if let Some((terminated_at, _)) = termination {
+                    end_groups(&detached, terminated_at + options.termination_grace);
+                }
                 let (status, signal) = exit_parts(status);
                 // With the terminal lent, Ctrl-C went to the command alone.
                 // A command it ended is a run that was interrupted, as it
@@ -1899,7 +2064,9 @@ impl ProcessSupervisor {
                 && let Some(signal) = self.signals.received()
             {
                 interrupted_signal = Some(signal);
+                detached = detached_groups(child);
                 signal_process_group(child, signal.raw());
+                signal_groups(&detached, signal.raw());
                 termination = Some((now, Some(signal)));
             }
             if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
@@ -1911,7 +2078,9 @@ impl ProcessSupervisor {
                         options.timeout.expect("timeout deadline").as_millis()
                     ),
                 );
+                detached = detached_groups(child);
                 signal_process_group(child, libc::SIGTERM);
+                signal_groups(&detached, libc::SIGTERM);
                 termination = Some((now, None));
                 write_diagnostic(child, started, verbose, writer);
             }
@@ -1919,13 +2088,30 @@ impl ProcessSupervisor {
                 write_diagnostic(child, started, verbose, writer);
                 next_diagnostic = next_interval(next_diagnostic, now, options.diagnostic_interval);
             }
+            // A descendant that outlives the signal (a test runner that
+            // handles it) may start a process group after it: a web server
+            // its runner starts all the same is told as well, or SIGKILL
+            // would end the runner and leave the server on its port.
+            if let Some((_, signal)) = termination
+                && now >= rescan_at
+            {
+                rescan_at = now + DETACHED_RESCAN_INTERVAL;
+                let fresh = detached_groups(child)
+                    .into_iter()
+                    .filter(|group| !detached.contains(group))
+                    .collect();
+                signal_groups(&fresh, signal.map_or(libc::SIGTERM, ForwardedSignal::raw));
+                detached.extend(fresh);
+            }
             if termination.is_some_and(|(terminated_at, _)| {
                 now.duration_since(terminated_at) >= options.termination_grace
             }) {
                 // Nothing outlives SIGKILL, and the command leads the group
                 // it is sent to: wait for it to go, and the next pass returns
-                // how it ended.
+                // how it ended. A group made since the last look goes too.
+                detached.extend(detached_groups(child));
                 signal_process_group(child, libc::SIGKILL);
+                signal_groups(&detached, libc::SIGKILL);
                 let _ = child.wait();
                 continue;
             }
@@ -2671,6 +2857,219 @@ mod tests {
         assert!(diagnostics.contains("SUPERCOV_COMMAND_TIMEOUT_MS=70"));
     }
 
+    /// A descendant that left the command's process group (a web server
+    /// started detached) is ended with the command: told to end as the
+    /// command is, it does not outlive it.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_in_a_group_of_its_own_ends_with_the_command() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-detached-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                format!(
+                    "perl -e 'setpgrp(0, 0); open(my $f, \">\", \"{}\"); print $f $$; close($f); sleep 30' & while :; do sleep 1; done",
+                    pid_file.display()
+                )
+                .into(),
+            ],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let options = SupervisionOptions {
+            diagnostic_interval: Duration::from_secs(60),
+            timeout: Some(Duration::from_millis(1_500)),
+            termination_grace: Duration::from_millis(200),
+        };
+        let result = supervise_command(&spec, options, &mut Vec::new()).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // Gone, or a zombie no one has reaped yet.
+        let alive = || {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the detached process {pid} outlived the command");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A command that handles the signal and starts a process group of its
+    /// own after it (a test runner that starts its web server all the same)
+    /// is ended at the grace's end, and so is the group it started.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_started_after_the_signal_ends_with_the_command() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-detached-late-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                format!(
+                    "trap \"perl -e 'setpgrp(0, 0); \\$SIG{{TERM}} = \\\"IGNORE\\\"; open(my \\$f, \\\">\\\", \\\"{}\\\"); print \\$f \\$\\$; close(\\$f); sleep 30' &\" TERM; while :; do sleep 1; done",
+                    pid_file.display()
+                )
+                .into(),
+            ],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let options = SupervisionOptions {
+            diagnostic_interval: Duration::from_secs(60),
+            timeout: Some(Duration::from_millis(500)),
+            termination_grace: Duration::from_millis(1_500),
+        };
+        let result = supervise_command(&spec, options, &mut Vec::new()).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // Gone, or a zombie no one has reaped yet.
+        let alive = || {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !alive(),
+            "the group {pid} started after the signal outlived the command"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A command that ends at once on its signal, while a process group it
+    /// started apart from it (a web server) takes its time over the same
+    /// signal: the group is gone by the time the command's end is returned,
+    /// ended at the grace's end. Before, it outlived the command by its own
+    /// 30 s.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_that_outlasts_a_command_ended_by_its_signal_is_ended_too() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-detached-lingers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                format!(
+                    "trap 'exit 0' TERM; perl -e 'setpgrp(0, 0); $SIG{{TERM}} = \"IGNORE\"; open(my $f, \">\", \"{}\"); print $f $$; close($f); sleep 30' & while :; do sleep 0.1; done",
+                    pid_file.display()
+                )
+                .into(),
+            ],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let options = SupervisionOptions {
+            diagnostic_interval: Duration::from_secs(60),
+            timeout: Some(Duration::from_millis(1_000)),
+            termination_grace: Duration::from_millis(1_000),
+        };
+        let result = supervise_command(&spec, options, &mut Vec::new()).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // Gone, or a zombie no one has reaped yet; SIGKILL takes a moment
+        // to land.
+        let alive = || {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the group {pid} outlived the command");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Of a list of processes, the groups apart: not the command's own, not
+    /// this process's (a signal there would end Supercov), and none for a
+    /// process that is gone.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_groups_apart_from_the_command_and_supercov_are_signalled() {
+        use std::os::unix::process::CommandExt;
+        let spawn = || {
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let (mut own, mut apart) = (spawn(), spawn());
+        let snapshot = |pid: u32| ProcessSnapshot {
+            pid,
+            parent_pid: std::process::id(),
+            state: None,
+            cpu_tenths: None,
+            executable: "sleep".into(),
+        };
+        let processes = [
+            snapshot(own.id()),
+            snapshot(apart.id()),
+            snapshot(std::process::id()),
+            // No such process.
+            snapshot(0x7fff_fff0),
+        ];
+        assert_eq!(
+            groups_apart(&processes, own.id() as i32),
+            [apart.id() as i32].into()
+        );
+        for child in [&mut own, &mut apart] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn timeout_terminates_the_complete_windows_job() {
@@ -3049,6 +3448,44 @@ mod tests {
         assert_eq!(none.received(), Some(ForwardedSignal::Sighup));
         drop(none);
         assert_eq!(RECEIVED_SIGNAL.load(Ordering::SeqCst), 0);
+    }
+
+    /// While a recorder lives, a hangup, an interrupt or a termination is
+    /// recorded, and kept once it is gone; the signal's earlier handling
+    /// comes back with its end.
+    #[cfg(unix)]
+    #[test]
+    fn an_interruption_recorder_keeps_the_signal_the_process_was_sent() {
+        // No supervisor listens meanwhile: the signal is this test's alone.
+        let _exclusive = SIGNAL_HANDLER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let disposition = || {
+            // SAFETY: a null new action only reads the current one.
+            unsafe {
+                let mut current: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current);
+                current.sa_sigaction
+            }
+        };
+        let before = disposition();
+        INTERRUPTION.store(0, Ordering::SeqCst);
+        assert_eq!(interruption(), None);
+        let recorder = InterruptionRecorder::install();
+        // SAFETY: the recorder's handler takes the signal.
+        unsafe { libc::raise(libc::SIGHUP) };
+        drop(recorder);
+        assert_eq!(disposition(), before);
+        assert_eq!(interruption(), Some(ForwardedSignal::Sighup));
+        for (raw, signal) in [
+            (libc::SIGINT, ForwardedSignal::Sigint),
+            (libc::SIGTERM, ForwardedSignal::Sigterm),
+        ] {
+            INTERRUPTION.store(raw, Ordering::SeqCst);
+            assert_eq!(interruption(), Some(signal));
+        }
+        INTERRUPTION.store(0, Ordering::SeqCst);
+        RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
     }
 
     #[test]

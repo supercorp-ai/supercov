@@ -76,6 +76,7 @@ fn read_windows(directory: &Path) -> Result<Vec<ServerWindow>, String> {
     let mut windows = Vec::new();
     for file in &files {
         let text =
+            // fault-site: owned-server.read-windows
             fs::read_to_string(file).map_err(|error| format!("{}: {error}", file.display()))?;
         // A line cut short by the server being killed is the one window it
         // was writing.
@@ -292,6 +293,7 @@ pub fn publish(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let work = root.join(".supercov/work").join(&metadata.id);
+        // fault-site: owned-server.publish
         fs::create_dir_all(&work).map_err(|error| error.to_string())?;
         let archive_path = work.join(format!("{}-evidence.raw.gz", server.environment));
         let raw = write_archive(
@@ -604,19 +606,19 @@ mod tests {
             (
                 "run_read",
                 &one[..],
-                "fs.read_to_string#owned_server.rs:79",
+                "fs.read_to_string#owned-server.read-windows",
                 9,
             ),
             (
                 "run_work",
                 &one[..],
-                "fs.create_dir_all#owned_server.rs:295",
+                "fs.create_dir_all#owned-server.publish",
                 9,
             ),
             (
                 "run_archive",
                 &one[..],
-                "fs.rename#evidence_archive.rs:512",
+                "fs.rename#evidence-archive.write-entries.rename",
                 9,
             ),
         ] {

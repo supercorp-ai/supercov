@@ -1,0 +1,34 @@
+run run_eead8fc4a4aa9986
+command: supercov merge run_3b02bb1d7f639008 run_0cc836e3842e17b9
+
+Coverage
+  Lines      69.23% (9/13)
+  Branches   50.00% (5/10)
+  MC/DC      40.00% (2/5)
+Assertions   not assessed — npx supercov runs run_eead8fc4a4aa9986 assertions assess
+
+By test kind
+  unit            3 test(s)  lines  69.23%  branches  50.00%  MC/DC  40.00%
+  3 test(s) use the runner's default kind; this is not inferred from their behavior.
+  Set SUPERCOV_TEST_KIND=integration (or unit/component/e2e) when running a suite to override it.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 3 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+
+Tests
+  Total       3
+  Passed      3
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Commands
+  npx supercov runs 'run_eead8fc4a4aa9986' files
+  npx supercov runs 'run_eead8fc4a4aa9986' gaps
+  npx supercov runs 'run_eead8fc4a4aa9986' kinds
+  npx supercov runs 'run_eead8fc4a4aa9986' runners
+  npx supercov runs 'run_eead8fc4a4aa9986' scope
+  npx supercov runs run_eead8fc4a4aa9986 --help

@@ -178,7 +178,7 @@ npx supercov runs <run-id> [query] [options]
 | `runners` | Group coverage by test runner |
 | `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
 | `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
-| `mutants [path[:line]]` | See, for each mutant the language's established tool would make (StrykerJS; in preview mutmut, cargo-mutants, Gremlins and mutant), whether a test reached it and changed its value |
+| `mutants [path[:line]]` | See, for each mutant the language's established tool would make (StrykerJS, cargo-mutants; in preview mutmut, Gremlins and mutant), whether a test reached it and changed its value |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -308,9 +308,9 @@ npx supercov runs <run-id> mutants --diff origin/main --fail-on not-infected,not
 ```
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
-(JavaScript, TypeScript) would make, or in preview mutmut 3.8.1 (Python),
-cargo-mutants 27.1.0 (Rust), Gremlins 0.6.0 (Go) or mutant 0.17.1 (Ruby) would
-make (see [Mutation testing](mutation.md)), whether a test
+(JavaScript, TypeScript) or cargo-mutants 27.1.0 (Rust) would make, or in
+preview mutmut 3.8.1 (Python), Gremlins 0.6.0 (Go) or mutant 0.17.1 (Ruby)
+would make (see [Mutation testing](mutation.md)), whether a test
 ran the mutated code and whether the mutant's value would have differed there.
 Nothing runs again. A plain run does nothing for mutants and costs nothing
 more for them: a run lists its mutants from its sources the first time they are asked for (by `mutants`,
@@ -419,7 +419,9 @@ The output names the base, the merge base and how many changed lines hold a
 mutant, then lists the mutants the tests leave alive, not infected first and
 then not reached, each with the part it changes and why, and counts the rest
 in one line. `--json` lists every mutant of the change, survivors first, with
-`diff` (`base`, `mergeBase`, `commit`, `changedLines`, `linesWithMutants`).
+`diff` (`base`, `mergeBase`, `commit`, `changedLines`, `linesWithMutants`, and
+`unrunLines`: the changed lines of code no test of the run ran, by file).
+Each mutant listed has `lineTests`: how many of the run's tests ran its line.
 
 `--format markdown` writes a table for a pull request's comment: the counts in
 one line, then up to 25 not-infected and not-reached mutants (or those
@@ -428,9 +430,15 @@ their status and why, and the command that lists the rest. Once `mutants test`
 gave verdicts, a second line has the mutation score, with how many mutants it
 is over (or, with none, why there is no score), and every verdict counted
 (killed, timed out, survived, no coverage, unviable, error, not run for want
-of a driver, and those with none yet), and the table lists the survivors: the
-mutants that survived or that no test covers, then those weak mutation shows
-no test can kill, each with its weak status, its strong verdict and why.
+of a driver, survived so far, and those with none yet), and the table lists
+the survivors: the mutants that survived or that no test covers, then those
+weak mutation shows no test can kill, each with its weak status, its strong
+verdict and why. Every table says how many of the run's tests ran each
+mutant's line. A change's comment names its lines of code no test ran, file
+by file. Survivors that only change a log line (`logOnly`) are folded apart
+in a `<details>`, and so are the mutants `survived so far` (a first tier of
+their candidates passed, the rest not run yet): not survivors, and not in the
+score. A CI can post the file as it is.
 
 #### Mutation reports other tools read
 
@@ -507,7 +515,10 @@ many more). `mutants` then shows each mutant's verdict beside its weak status,
 and the mutation score with the verdicts' counts; `mutants --status survived`
 (or `killed`, `timeout`, `no-coverage`, `error`, `unviable`) lists the mutants
 with that verdict, and `--format markdown` lists the survivors under the
-mutation score.
+mutation score. A Playwright mutant with many candidates that lived through
+its first tier, with the rest of its candidates not run yet, is
+`survived-so-far`: listed by `--status survived` as such (and alone by
+`--status survived-so-far`), counted apart, and not in the score.
 
 It runs far less than StrykerJS: no dry run (the measured run is one), no
 mutant no test infected (decided `survived`) or reached (`no-coverage`), and
@@ -521,8 +532,8 @@ start-up run with the server restarted for them. Jest, node:test, Mocha, AVA,
 node-tap, bun:test and Vitest's Browser Mode run one test file per start of the
 command, with the mutant switched on in every process from its start (in the
 page, under Browser Mode) and only that file's candidate tests, stopping at
-the first failure; Jest and Mocha keep resident runners for it. Python, Rust,
-Go and Ruby are in preview. Rust mutants
+the first failure; Jest and Mocha keep resident runners for it. Python, Go
+and Ruby are in preview. Rust mutants
 run through cargo's tests, or through the JavaScript tests that load the
 crate compiled to wasm. Go mutants run each package's test binary, built once.
 Ruby mutants run in a fork of the loaded suite under RSpec, Minitest, test-unit
@@ -537,7 +548,20 @@ many in a line per runner (`12 mutant(s) not run: no strong driver for
 phpunit`). See `docs/design/strong-mutation.md`,
 `docs/design/python-mutants.md` and `docs/design/mutation-drivers.md`.
 
-- `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
+- `--shard k/n` runs one of n shares of the mutants, of about the same cost
+  (the copies and tests each mutant runs), for parallel jobs; each
+  job's run holds its share's verdicts, `merge` keeps them all in the merged
+  run, and a later `supercov mutants` keeps each verdict nothing changed could
+  move from whichever earlier run holds it (see
+  [Combine shards](#combine-shards)). `supercov mutants --shard` saves into a
+  run of its own even on an unchanged checkout, so a job never saves into a
+  run it restored, which every job of its round holds a copy of. There it
+  makes that run from the newest restored run whose command passed, without
+  measuring again, and keeps every verdict the restored runs hold. A run whose
+  command failed only because tests failed is made into one too, where none
+  passed: a failed test is no candidate, and the shard says which it leaves
+  out. A run whose command failed otherwise (no test failed, or no exit
+  status) is not, and the shard measures, saying what kept that run out.
 - `--critical <glob>` (repeatable): every mutant there must be killed or
   accepted, or the command fails.
 - `--fail-on survived,timeout,no-coverage,error`: fail on any asked mutant with
@@ -549,13 +573,27 @@ phpunit`). See `docs/design/strong-mutation.md`,
 - A second `mutants test` over the same run runs only what has no verdict yet.
   The pass saves each verdict as it comes: one that stops early (a test worker
   that never ended, Ctrl-C, a killed job) keeps what it decided, and the next
-  pass runs the rest. Ctrl-C stops every process the pass started.
+  pass runs the rest. Ctrl-C or SIGTERM stops every process the pass started,
+  and the pass ends within seconds: 8 s after the signal at the latest.
+- `--budget <seconds>` stops the pass once it is spent, counted from the
+  command's start (with `supercov mutants`, measuring included): it ends as a
+  finished pass, its verdicts saved, and says how many mutants it left for the
+  next, and what measuring took where that was half the budget or more. The
+  cheapest mutants run first, by their tests' recorded times.
+- `--timeout-factor <x>`: a Playwright test that runs with a mutant is
+  stopped past x times its baseline + 5 s (default 1.5, StrykerJS's), and the
+  mutant is a `timeout`. `SUPERCOV_STRONG_TIMEOUT_FACTOR` sets it where the
+  option is not given.
 - After an edit, `supercov mutants` measures the checkout again and keeps an
-  earlier run's verdict for each mutant whose file is as it was and whose
-  candidate tests, and their test files, nothing changed could reach (as
-  `tests affected` reads a change: a test file's edit reaches its tests, a
-  source's edit the tests that ran the changed code). The rest run; the
-  summary says how many verdicts were kept, and from which run.
+  earlier run's verdict for each mutant nothing changed could move: found by
+  its code, not its line; a kill where the test that killed it still reaches
+  it and runs as it did, a survival where every candidate now ran with it
+  then and runs as it did, a test running as it did where nothing it could
+  run with the mutant switched on changed (`docs/design/strong-mutation.md`,
+  "After an edit"). Timeouts and errors run again. The rest run; the summary
+  says how many verdicts were kept, from which runs and commits, and why the
+  others run, and `runs <id> mutants` says where each kept verdict was
+  reached (`carried from run r5 (commit 1a2b3c4)`).
 - `--diff` and `--file` answer about the mutants they ask for: the summary's
   counts and score are theirs, and its first line says how many of the run's
   mutants that is. `--format markdown` (with `--output <file>`) writes the
@@ -1000,7 +1038,9 @@ pass in the run is listed regardless.
 per line, for a runner's filter. A Vitest, Playwright or node:test test inside
 `describe` blocks is printed as the blocks and the test joined by spaces
 (`small charges`), which is what `vitest -t`, `--grep` and
-`--test-name-pattern` match. `--kind`, `--runner`, `--tag`, `--title` and
+`--test-name-pattern` match. A Rust test is printed as its path in its crate
+(`tests::it_works`), which `cargo test -- --exact` and nextest's `test(=...)`
+match. `--kind`, `--runner`, `--tag`, `--title` and
 `--test-file` list only the affected tests they pick: from a run that merged two
 runners' suites, `tests affected --names --runner playwright` gives Playwright
 only its own tests. A helper beside the tests, or source outside what is
@@ -1009,9 +1049,27 @@ TypeScript helper that only gained functions affects none), and every test
 where Supercov cannot read the imports. A dependency,
 lockfile, configuration or toolchain change affects every test and is reported
 as such; a test runner's settings affect only the runs that used that runner.
-A source file
-added since the run is outside every test's record; the working-tree check
-says so, and the suite should run in full.
+A JavaScript or TypeScript source file added since the run, under the roots it
+measured, is outside every test's record: it affects the tests whose own file,
+or a file they ran code in, imports it now, directly or through other files
+(`src/new.ts added since the run (imported by src/app.ts, which this test ran
+code in)`). One that nothing of theirs imports is named as `unknown, new file`;
+run what can reach it in full. `--json` lists each under `newFiles`, with
+`importedBy` or `"reach": "unknown, new file"`.
+
+A Rust test loads what it names by path: a fixture, a data file or a script
+named in its own function (or in its entry of a macro that declares a test
+per entry), or anywhere in its file outside another test, and what a script it
+names imports and names in turn. A path that goes on in a placeholder
+(`tests/fixtures/{name}`) names the directory before it. So a change to one
+fixture affects the tests that name it, and a file no test names, as before,
+affects every test. A file measured Rust source embeds with `include_str!` or
+`include_bytes!` is part of the declaration embedding it: a template or a
+script compiled into the binary affects the tests that ran that code. Changed
+code no probe of the run measured -- code for another platform, a feature the
+run's build left off -- is listed under `unmeasured` (`--json`) and named in
+the text: no test's record says what it reaches, so run the suite in full
+where that code is compiled.
 
 A server the suite starts is recorded too: a mock server `webServer` starts,
 or the application's own. Each Node process of a Playwright run notes the
@@ -1022,6 +1080,15 @@ helper it imports or the data it reads, affects the tests it served and no
 others. A mock keeps its state between tests, so a mock's files count whole,
 not route by route; a file the application's server loaded, a preload of its
 own, affects every test it served.
+
+A changed file no test's import places -- a fixture another program reads, a
+file a command names, or another runner's test or helper -- is one any test
+may load. A Playwright run keeps what each of its Node processes (the
+runner, its workers, the servers) loaded and read, and then such a file
+affects its tests only where one of them did, or where it is in the tree of
+a configuration of a runner the run used (`tests/e2e/` for
+`tests/e2e/playwright.config.ts`): a changed integration test or its helper
+selects none of an e2e run's tests.
 
 ### Which affected tests check the change
 
@@ -1104,6 +1171,29 @@ project replaces its earlier runs there and is not merged with them. Runs of
 one command measured on different machines and copied into one
 `.supercov/runs` replace none of each other: each is a share of the suite, and
 all are merged.
+
+A test whose records two runs hold byte for byte alike, once each run's id is
+the merge's, is kept once, from the first run, and so are an entry's records
+of no test (a server's background): a run made from another without measuring
+(a continuation round's shard) adds nothing to them, and the merge says how
+many copies it kept once (`3402 copy(ies) of records that an earlier run held
+byte for byte kept once, from that run`). A copy that differs in anything, a
+timestamp, a path the test took, an outcome, is kept beside the others, so
+nothing any run recorded is lost. Jobs that each measured the whole suite
+record each test with times of their own, and keep a copy each.
+
+Runs made from one run without measuring whose archives are alike byte for
+byte (the jobs of a continuation round, each made from the same baseline)
+are read, merged and kept once, from the first of them: the merged run lists
+that one among its runs, keeps it alone under `parts/`, and says which runs
+were its copies (`7 run(s) hold run r1's evidence byte for byte, made from one
+run without measuring (r2; r3; r4; and 4 more): their evidence is kept once,
+from it, and their strong verdicts each`). Each copy's strong verdicts are
+kept as any run's. Eight such runs of a large e2e suite, each 232 MB with its
+baseline's archive and parts, merged in 12 s instead of 100 s and half the
+memory (a peak footprint of 12.5 GB, from 24.7 GB), into a run of 244 MB
+instead of 1 GB, which the next round's jobs each carry; its coverage and
+strong verdicts are the same.
 
 The runs may differ in their tests, the helpers beside them, and the test
 runners' settings, as long as nothing that changed reaches what an earlier
@@ -1201,10 +1291,49 @@ recorded with the same bytes are not merged. A run that listed no mutants
 adds none, and where its tests ran a mutant, a verdict that needs values they
 did not record is `unknown`.
 
+The merged run keeps the strong verdicts the runs saved (`mutants test`,
+`--shard` among them), by mutant, and `merge` prints how many, how many came
+from each run, and how many the merged run's plan decides without running
+them (`1265 strong verdict(s) kept from runs r8, r7: 1103 from r8, 150 from
+r7, 12 the merged run's plan decides`). A verdict two runs hold alike counts
+for the first run named. A kill in any run is a kill. A survival stands only where the run that
+let the mutant survive measured every test of the merged suite that could
+kill it; where another run's tests could, and it has no verdict, the mutant is
+left for a pass over the merged run to run. An error stands only where no run
+holds anything else. A run whose verdicts are of another mutant set than the
+merged run lists lends none, and `merge` names it; a run some of whose tests
+another measured again lends none either. Split a strong pass across jobs this
+way: each job measures and runs `supercov mutants --shard k/n -- <command>`,
+and the last merges (see `docs/mutation.md`, A pass split across jobs). A
+second round on the same commit restores the first round's runs and does the
+same: each job saves into a run of its own, made from a restored one without
+measuring again, which keeps the restored runs' verdicts and replaces them,
+and the last job's `merge` takes the new runs.
+
+A run named twice is refused (`Each merged run must be unique: r1 is named
+more than once`): copies of one run that several jobs saved verdicts into
+share its id, and `.supercov/runs` holds one of them. Up to 4.29.5,
+`supercov mutants --shard` on a checkout unchanged since the runs it restored
+saved into the latest of them; run such a round again.
+
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a
 merged run is answered from the runs it was merged from, which hold the record
 of what each test ran; a test in several of them is affected where any says so.
+The merged run keeps what each of them answers with (in its `parts/`
+directory: each run's metadata, its record of what each test ran, and the
+few entries of its archive that say what its tests loaded), so it answers
+alone, with its runs gone from `.supercov/runs`: a merged baseline can be
+cached and restored by itself. A merge made by a Supercov before 4.29.14 kept
+none of that, and needs its runs.
+
+A file a server of the run reads that the measured command itself wrote, and
+that git does not track -- a local stack's settings that a harness writes with
+each machine's ports and keys -- is not an input of the run: a later checkout
+cannot change it under the run, and each machine's part of a suite reads its
+own. The run leaves it out of what it records (and says so), so such parts
+merge, and a change to it affects no test. A tracked file the command
+rewrites, such as a mock's data it saves, stays an input.
 
 ## Add coverage measured elsewhere
 
@@ -1295,6 +1424,7 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
 | `SUPERCOV_MUTANTS` | Set to `1` to measure a run with the probes that record the values its mutants' verdicts read, and list its mutants as it runs (see [Mutants](#mutants)); a plain run lists none and places no probe |
 | `SUPERCOV_STRONG_WORKERS` | How many test processes a JavaScript or Python strong pass runs at once (default: about one per CPU) |
+| `SUPERCOV_STRONG_TIMEOUT_FACTOR` | A Playwright strong pass's time limit for a test run with a mutant: this many times the test's baseline, + 5 s (default `1.5`; `--timeout-factor` overrides it) |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:

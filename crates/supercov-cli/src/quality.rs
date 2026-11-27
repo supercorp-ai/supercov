@@ -1091,6 +1091,7 @@ fn discover_for(
     for path in paths {
         let input = root.join(path);
         let metadata =
+            // fault-site: quality.discover-for
             fs::symlink_metadata(&input).map_err(|e| format!("{}: {e}", path.display()))?;
         if metadata.file_type().is_symlink() {
             return Err(format!(

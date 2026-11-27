@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:677",
+                "fs.read_from#evidence-archive.read.read-from",
             )],
         )
         .exits(2);
@@ -530,9 +530,9 @@ fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
     // Clearing is best effort: a level or an entry that cannot be read
     // leaves it, and the run goes on.
     for fault in [
-        "fs.read_dir#workspace.rs:2269",
-        "fs.read_dir entry#workspace.rs:2269",
-        "fs.symlink_metadata#workspace.rs:2274",
+        "fs.read_dir#workspace.clear-around.read-dir",
+        "fs.read_dir entry#workspace.clear-around.read-dir",
+        "fs.symlink_metadata#workspace.clear-around.symlink-metadata",
     ] {
         let ran =
             project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
@@ -655,14 +655,17 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1232")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read#javascript-run.run-javascript.interrupt-run-state",
+        )],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1232"),
+        seen.contains("test fault at fs (javascript-run.run-javascript.interrupt-run-state"),
         "{seen}"
     );
 }
@@ -681,12 +684,12 @@ fn a_terminal_supercov_cannot_open_is_not_lent() {
         &["--", "node", "ask.mjs"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.open_with#process_supervision.rs:1615",
+            "fs.open_with#process-supervision.give",
         )],
     );
     terminal.wait_for("asking");
     terminal.press("first\n");
-    terminal.wait_for("test fault at fs (process_supervision.rs:1615");
+    terminal.wait_for("test fault at fs (process-supervision.give");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_eq!(code, 130, "{seen}");
@@ -1012,12 +1015,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:677",
+            "fs.read_from#evidence-archive.read.read-from",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:677"), "{said}");
+    assert!(fired_at(&said, "evidence-archive.read.read-from"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1143,23 +1146,26 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "tests", "affected"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
+    assert!(unlisted.contains("run-store.discover-runs"), "{unlisted}");
     // So is a file's source asked of a store that cannot be listed.
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "source", "src/cart.js"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
+    assert!(unlisted.contains("run-store.discover-runs"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
             &["runs"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:681")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.read_dir entry#run-store.discover-runs",
+            )],
         )
         .succeeds();
     assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
@@ -1385,11 +1391,11 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
     let second = project.measure(&["--test-name-pattern=shipping"]);
     for (fault, said) in [
         (
-            "fs.read_dir#run_store.rs:681",
+            "fs.read_dir#run-store.discover-runs",
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:677",
+            "fs.read_from#evidence-archive.read.read-from",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -1469,6 +1475,38 @@ test("discount", () => assert.equal(price({ cents: 5 }, true), 4));
     assert_eq!(lines(&e2e), 3);
     let merged = project.supercov(&["merge", &unit, &e2e]).exits(0);
     assert!(merged.contains("merged run"), "{merged}");
+}
+
+/// A merged run's mutants run under its parts' test command, not under the
+/// `supercov merge` that made it; parts of different commands name none,
+/// and the pass says to give one.
+#[test]
+fn a_merged_run_s_mutants_run_under_its_parts_command() {
+    let project = Project::cart("merge-mutants");
+    let first = project.measure(&[]);
+    let second = project.measure(&[]);
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let reply = ran.json();
+    assert_eq!(ran.code(), 0, "{reply}\n{}", ran.stderr());
+    assert!(!ran.stderr().contains("supercov merge"), "{}", ran.stderr());
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
+
+    let parts = Project::cart("merge-mutants-parts");
+    let total = parts.measure(&["--test-name-pattern=total"]);
+    let shipping = parts.measure(&["--test-name-pattern=shipping"]);
+    parts.supercov(&["merge", &total, &shipping]).succeeds();
+    let refused = parts.supercov(&["runs", "latest", "mutants", "test"]);
+    assert_ne!(refused.code(), 0, "{}", refused.stderr());
+    contains_all(
+        &refused.stderr(),
+        &[
+            "is a merged run",
+            "--test-name-pattern=total",
+            "mutants test -- <test command>",
+        ],
+    );
 }
 
 #[test]
@@ -5078,11 +5116,7 @@ fn a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("browser-worker-bootstrap");
     std::os::unix::fs::symlink(modules, project.root.join("node_modules")).unwrap();
     project.write(
@@ -5494,9 +5528,7 @@ fn bun_source_imports_bootstrap_before_probes_even_with_shadowed_host_names() {
         .succeeds();
     for file in ["src/leaf.mjs", "src/common.cjs", "src/middle.ts"] {
         let source = kept_workspace_source(&project, file);
-        let loader = source
-            .find("new Function(\"stack\", \"specifier\"")
-            .unwrap();
+        let loader = source.find("new Function(\"s\", \"p\"").unwrap();
         let fallback = source
             .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
             .unwrap();
@@ -5563,7 +5595,7 @@ fn bun_bootstraps_sources_with_nested_frontend_aliases_and_preloads() {
                 .chain((0..64).map(|index| format!("src/core/runtime/clock{index}.ts")))
             {
                 let code = kept_workspace_source(&project, &file);
-                let loader = code.find("new Function(\"stack\", \"specifier\"").unwrap_or_else(|| panic!("{file} has no source bootstrap (browser={browser_config}, explicit roots={explicit_roots})"));
+                let loader = code.find("new Function(\"s\", \"p\"").unwrap_or_else(|| panic!("{file} has no source bootstrap (browser={browser_config}, explicit roots={explicit_roots})"));
                 let helper = code
                     .find(" = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin")
                     .unwrap();
@@ -7322,7 +7354,10 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:697=50")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.open#evidence-archive.read-archive-each=50",
+            )],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -8637,7 +8672,10 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
     let unread = project
         .supercov_with(
             &["merge", &javascript, &python],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:697")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "fs.open#evidence-archive.read-archive-each",
+            )],
         )
         .exits(2);
     assert!(unread.contains("recorded by another build"), "{unread}");
@@ -10872,6 +10910,38 @@ fn a_changed_helper_reaches_the_tests_that_load_it_and_an_unplaced_one_reaches_a
     );
 }
 
+/// In a Rust run every project file that is neither source nor a manifest is
+/// configuration to the fingerprint; `tests affected` reads such a file as a
+/// helper, and only Cargo's own configuration as a change to every test.
+#[test]
+fn a_rust_run_reads_a_data_file_as_a_helper_and_cargo_configuration_as_every_test() {
+    let project = Project::empty("rust-helpers");
+    small_crate(&project);
+    project.write("notes/plan.txt", "plan\n");
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let run_wide = |project: &Project| {
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--json"])
+            .json()["data"]["workingTree"]["runWide"]
+            .clone()
+    };
+    project.write("notes/plan.txt", "another plan\n");
+    assert_eq!(run_wide(&project), serde_json::json!([]));
+    let names = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert!(
+        names.lines().any(|line| line == "tests::doubles"),
+        "{names}"
+    );
+    project.write(".cargo/config.toml", "[build]\n");
+    assert_eq!(
+        run_wide(&project),
+        serde_json::json!(["test/build configuration changed"])
+    );
+}
+
 #[test]
 fn tests_affected_reads_formatting_other_runners_and_dependencies_apart() {
     let project = Project::cart("affected-shapes");
@@ -11378,12 +11448,15 @@ fn comparisons_and_their_mistakes_read_as_what_they_are() {
         &["import", "gone.info", "--test", "missing"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#outside_evidence.rs:421",
+            "fs.canonicalize#outside-evidence.import-line-evidence",
         )],
     );
     let said = format!("{}{}", missing.stdout(), missing.stderr());
     assert_eq!(missing.code(), 0, "{said}");
-    assert!(fired_at(&said, "outside_evidence.rs:421"), "{said}");
+    assert!(
+        fired_at(&said, "outside-evidence.import-line-evidence"),
+        "{said}"
+    );
     assert!(
         said.contains("src/missing.js (no such file in the project)"),
         "{said}"
@@ -11581,17 +11654,52 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     // a store that cannot be listed cannot answer.
     let unlisted = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681@2")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_dir#run-store.discover-runs@2",
+        )],
     );
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
-    assert!(fired_at(&said, "run_store.rs:681"), "{said}");
-    // A run it was merged from that is no longer stored cannot answer.
+    assert!(fired_at(&said, "run-store.discover-runs"), "{said}");
+    // The merge keeps what its runs answer with: with them gone from the
+    // store, it answers as before.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
+    std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&second)).unwrap();
+    let alone = project
+        .supercov(&["runs", "latest", "tests", "affected"])
+        .succeeds();
+    assert!(
+        alone.contains("1 of 3 tests affected by changes since the run"),
+        "{alone}"
+    );
+    // A merge that kept nothing of a run no longer stored cannot answer.
+    let merged = project.latest();
+    std::fs::remove_dir_all(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&merged)
+            .join("parts")
+            .join(&first),
+    )
+    .unwrap();
     let gone = project
         .supercov(&["runs", "latest", "tests", "affected"])
         .exits(2);
     assert!(gone.contains("which is no longer stored"), "{gone}");
+    // With none of its runs kept or stored, the merge is judged against the
+    // checkout by its own command, and its coverage still answers.
+    std::fs::remove_dir_all(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&merged)
+            .join("parts"),
+    )
+    .unwrap();
+    let files = project.supercov(&["runs", "latest", "files"]).succeeds();
+    assert!(files.contains("src/cart.js"), "{files}");
 }
 
 /// Output sent to one file for both streams (`> log 2>&1`) arrives through
@@ -14069,8 +14177,8 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:697=50",
-        "fs.open#source_manifest.rs:365@2",
+        "fs.open#evidence-archive.read-archive-each=50",
+        "fs.open#source-manifest.load-optional-manifest@2",
     ] {
         let unjudged = project
             .supercov_with(
@@ -14390,12 +14498,18 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
         &["--", "npm", "test"],
         &[
             ("EDITED_PROJECT", &root),
-            ("SUPERCOV_TEST_FAULT", "fs.read#source_tools.rs:685"),
+            (
+                "SUPERCOV_TEST_FAULT",
+                "fs.read#source-tools.apply-directory.read",
+            ),
         ],
     );
     let said = unread.stderr();
     assert_eq!(unread.code(), 0, "{said}");
-    assert!(fired_at(&said, "source_tools.rs:685"), "{said}");
+    assert!(
+        fired_at(&said, "source-tools.apply-directory.read"),
+        "{said}"
+    );
     assert!(
         said.contains("the source changes the command's tools made could not be applied"),
         "{said}"
@@ -14405,19 +14519,19 @@ fn a_tools_change_to_a_file_edited_while_the_command_ran_is_kept_back() {
     // or what it wrote stays out of the workspace, and the command passes.
     for (fault, told) in [
         (
-            "fs.read_dir entry#source_tools.rs:678",
+            "fs.read_dir entry#source-tools.apply-directory.sorted-entries",
             "the source changes the command's tools made could not be applied",
         ),
         (
-            "fs.read_dir entry#source_tools.rs:403",
+            "fs.read_dir entry#source-tools.refresh-directory.sorted-entries-1",
             "reads the instrumented files",
         ),
         (
-            "fs.read_dir entry#source_tools.rs:443",
+            "fs.read_dir entry#source-tools.refresh-directory.sorted-entries-2",
             "reads the instrumented files",
         ),
         (
-            "fs.read_dir entry#source_tools.rs:493",
+            "fs.read_dir entry#source-tools.reconcile-directory",
             "could not be brought into the workspace",
         ),
     ] {
@@ -14472,13 +14586,16 @@ fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
             ("RELAYED", "0"),
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.create_dir_all#docker_proxy.rs:219",
+                "fs.create_dir_all#docker-proxy.start.create-dir-all-1",
             ),
         ],
     );
     let said = unrelayed.stderr();
     assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
-    assert!(fired_at(&said, "docker_proxy.rs:219"), "{said}");
+    assert!(
+        fired_at(&said, "docker-proxy.start.create-dir-all-1"),
+        "{said}"
+    );
     assert!(
         said.contains(
             "containers the tests start are not measured: the Docker relay could not start"
@@ -14655,25 +14772,37 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1684",
+            "coverage-query.coverage-decision-query",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2861"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2955@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2847@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3279"),
+        (
+            vec!["diff", &older, "latest"],
+            "coverage-query.diff-snapshot.hit-metadata",
+        ),
+        (
+            vec!["diff", &older, "latest"],
+            "coverage-query.coverage-diff-query@2",
+        ),
+        (
+            vec!["diff", &older, "latest"],
+            "coverage-query.diff-snapshot.summary@2",
+        ),
+        (
+            vec!["runs", "latest", "summary"],
+            "coverage-query.coverage-summary-query.dimensions",
+        ),
         // Every file's details, the scope read last of all.
         (
             vec!["runs", "latest", "gaps", "--format", "jsonl"],
-            "coverage_query.rs:2228@2",
+            "coverage-query.not-measured-files@2",
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3816",
+            "coverage-query.filtered-dimensions",
         ),
         // The dimensions read again, by runner.
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3816@2",
+            "coverage-query.filtered-dimensions@2",
         ),
         (
             vec![
@@ -14686,7 +14815,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3959",
+            "coverage-query.coverage-file-decisions-query.decision-gaps",
         ),
         (
             vec![
@@ -14699,21 +14828,21 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:4009",
+            "coverage-query.coverage-file-decisions-query.test-summaries",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3557",
+            "coverage-query.coverage-areas-query.file-gaps-1",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3565",
+            "coverage-query.coverage-areas-query.file-gaps-2",
         ),
         // A line's anchors; a file with no decisions under a kind, its gaps
         // read to tell it from a kind no test has.
         (
             vec!["runs", "latest", "line", "src/cart.js:14"],
-            "coverage_query.rs:874",
+            "coverage-query.coverage-covers-query-cached",
         ),
         (
             vec![
@@ -14726,7 +14855,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3964",
+            "coverage-query.coverage-file-decisions-query.file-gaps",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -14740,7 +14869,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "files", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(2);
     assert!(
@@ -14759,8 +14888,8 @@ fn a_run_listed_whose_index_cannot_be_read_carries_the_error() {
     for fault in [
         "coverage-index",
         "coverage-index@2",
-        "coverage-index-read#run_query.rs:72",
-        "coverage-index-read#run_query.rs:73",
+        "coverage-index-read#run-query.run-list-query.summary",
+        "coverage-index-read#run-query.run-list-query.projection",
     ] {
         let listed = project
             .supercov_with(&["runs", "--json"], &[("SUPERCOV_TEST_FAULT", fault)])
@@ -14805,12 +14934,15 @@ fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
     project.measure(&[]);
     for (fault, place) in [
-        ("fs.open#query_index.rs:337", "query_index.rs:337"),
         (
-            "fs.read_exact_from#query_index.rs:337",
-            "query_index.rs:337",
+            "fs.open#query-index.recorded-evidence",
+            "query-index.recorded-evidence",
         ),
-        ("fs.open#query_index.rs:354", "query_index.rs:354"),
+        (
+            "fs.read_exact_from#query-index.recorded-evidence",
+            "query-index.recorded-evidence",
+        ),
+        ("fs.open#query-index.open", "query-index.open"),
     ] {
         let ran = project.supercov_with(
             &["runs", "latest", "files"],
@@ -14873,7 +15005,10 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
     // Nor whose published run cannot be found again to read.
     for (fault, place) in [
         ("coverage-index@2", "coverage-index"),
-        ("fs.symlink_metadata#run_store.rs:627", "run_store.rs:627"),
+        (
+            "fs.symlink_metadata#run-store.load-run",
+            "run-store.load-run",
+        ),
     ] {
         let project = Project::cart("index-failed-run");
         project.edit("test/cart.test.js", "20);", "21);");
@@ -15101,12 +15236,15 @@ fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() 
         "unrecorded",
         &[("merged", listed), ("merged.out", a)],
         &["--test", "src/lib.rs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:931")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.write#rust-owned-doctests.rustdoc-wrapper-inner.fail-package",
+        )],
     );
     let said = ran.stderr();
     assert_ne!(ran.code(), 0, "{said}");
     assert!(
-        said.contains("test fault at fs (rust_owned_doctests.rs:931"),
+        said.contains("test fault at fs (rust-owned-doctests.rustdoc-wrapper-inner.fail-package"),
         "{said}"
     );
     // A harness that failed may have stopped short: it is not held to its
@@ -15320,11 +15458,12 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         "named",
         "bin/doctest",
         &[("doctest.out", "\nrunning 0 tests\n")],
-        "fs.write#rust_owned_doctests.rs:1265",
+        "fs.write#rust-owned-doctests.doctest-runtool-inner.write-record-2",
     );
     let output = ran.exits(101);
     assert!(
-        output.contains("test fault at fs (rust_owned_doctests.rs:1265"),
+        output
+            .contains("test fault at fs (rust-owned-doctests.doctest-runtool-inner.write-record-2"),
         "{output}"
     );
     // A merged harness whose children's records went missing reports its
@@ -15461,7 +15600,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         "watchdog-exec",
         "watchdog-read",
         "proc-fd",
-        "fs.read_dir#process_supervision.rs",
+        "fs.read_dir#process-supervision.watch-parent-process-group",
     ];
     let reached = |fault: &str, said: &str| {
         for site in fault.split(',') {
@@ -15507,7 +15646,10 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1527", watchdog),
+        (
+            "fs.read_dir#process-supervision.watch-parent-process-group",
+            watchdog,
+        ),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
@@ -15568,14 +15710,17 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
     // launcher that cannot be written.
     for (fault, place) in [
         (
-            "fs.symlink_metadata#source_tools.rs:211",
-            "source_tools.rs:211",
+            "fs.symlink_metadata#source-tools.path-with-launchers.remove",
+            "source-tools.path-with-launchers.remove",
         ),
         (
-            "fs.create_dir_all#source_tools.rs:232",
-            "source_tools.rs:232",
+            "fs.create_dir_all#source-tools.path-with-launchers.create-dir-all",
+            "source-tools.path-with-launchers.create-dir-all",
         ),
-        ("fs.write#source_tools.rs:240", "source_tools.rs:240"),
+        (
+            "fs.write#source-tools.path-with-launchers.write-launcher",
+            "source-tools.path-with-launchers.write-launcher",
+        ),
     ] {
         let kept = project.supercov_with(
             &["--", "node", "--test"],
@@ -16006,7 +16151,22 @@ fn exact_attribution_runs_the_command_after_it() {
 /// run leaves behind would change which call the next one's fault names.
 /// A fault written `fault => place` must fail the call made there.
 fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], faults: &[&str]) {
+    each_step_of_a_run_fails_in((0, 1), label, write, command, faults);
+}
+
+/// `each_step_of_a_run_fails` for one share of the faults, every `parts`th
+/// from `part`: a sweep too long for one test runs as several side by side.
+fn each_step_of_a_run_fails_in(
+    (part, parts): (usize, usize),
+    label: &str,
+    write: fn(&Project),
+    command: &[&str],
+    faults: &[&str],
+) {
     for (number, entry) in faults.iter().enumerate() {
+        if number % parts != part {
+            continue;
+        }
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty(&format!("{label}-{number}"));
         write(&project);
@@ -16039,7 +16199,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
             "fs.write@2",
-            "fs.write@10 => python_run.rs:449",
+            "fs.write@10 => python-run.run-direct-python-in.write",
             "fs.rename@2",
             "fs.rename@9",
             "fs.open@7",
@@ -16055,9 +16215,9 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.symlink_metadata@15",
             "fs.open@5",
             "fs.read@10",
-            "fs.read@6 => source_capture.rs:54",
-            "fs.read_dir entry#1 => python_project.rs:125",
-            "fs.read_dir entry#2 => python_evidence.rs:374",
+            "fs.read@6 => source-capture.capture.read",
+            "fs.read_dir entry#1 => python-project.walk",
+            "fs.read_dir entry#2 => python-evidence.read-evidence-directory-with.read-dir",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16100,15 +16260,15 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "fs.rename@1",
             "fs.rename@2",
             "fs.copy@1",
-            "fs.read_dir@36 => workspace.rs:1157",
-            "fs.read_dir@37 => workspace.rs:706",
-            "fs.read_dir@51 => workspace.rs:1358",
+            "fs.read_dir@36 => workspace.recover-cached-workspace",
+            "fs.read_dir@37 => workspace.copy-tree.read-dir-1",
+            "fs.read_dir@51 => workspace.walk-output-files.read-dir",
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2675 => main.rs:2675",
+            "fs.canonicalize#main.public-coverage-run => main.public-coverage-run",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
+            "fs.read_to_string#javascript-frontend.prepare-javascript-frontend => javascript-frontend.prepare-javascript-frontend",
         ],
     );
 }
@@ -16139,9 +16299,27 @@ fn a_rust_run_that_cannot_write_its_tests_reports_says_so() {
     }
 }
 
+/// A Rust run each of whose own steps fails says so, in three shares side
+/// by side: as one test the sweep took up to nine of the ten minutes a
+/// Windows runner gives a test, and a slow one ran past them.
 #[test]
 fn a_rust_run_whose_own_step_fails_says_so() {
-    each_step_of_a_run_fails(
+    a_rust_run_whose_own_step_fails((0, 3));
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so_second_share() {
+    a_rust_run_whose_own_step_fails((1, 3));
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so_third_share() {
+    a_rust_run_whose_own_step_fails((2, 3));
+}
+
+fn a_rust_run_whose_own_step_fails(share: (usize, usize)) {
+    each_step_of_a_run_fails_in(
+        share,
         "own-step-rs",
         small_crate,
         &["--", "cargo", "test", "-q"],
@@ -16195,36 +16373,38 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // it recorded listed and read, a doctest's evidence listed.
             "fs.canonicalize#15",
             "fs.read_dir#10",
-            "fs.read#9 => rust_owned_doctests.rs:289",
+            "fs.read#9 => rust-owned-doctests.run-doctests.read-file",
             "fs.read_dir#9@2",
             // The processes the run starts: Cargo's metadata, the test
             // build, rustc's libdir and sysroot, a test binary's listing,
             // the test processes and the doctests'.
-            "spawn#rust_project.rs:182 => rust_project.rs:182",
+            "spawn#rust-project.cargo-metadata => rust-project.cargo-metadata",
             // The copy's own path, resolved to read its module tree.
-            "fs.canonicalize#rust_project.rs:320 => rust_project.rs:320",
-            "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
-            "spawn#rust_test_runner.rs:1570 => rust_test_runner.rs:1570",
-            "spawn#rust_test_runner.rs:1570@2 => rust_test_runner.rs:1570",
-            "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:255 => child_signal_guard.rs:255",
-            "spawn#child_signal_guard.rs:255@2 => child_signal_guard.rs:255",
+            "fs.canonicalize#rust-project.resolve-module-tree => rust-project.resolve-module-tree",
+            "spawn#rust-test-runner.build-test-artifacts => rust-test-runner.build-test-artifacts",
+            "spawn#rust-test-runner.rustc-print-path => rust-test-runner.rustc-print-path",
+            "spawn#rust-test-runner.rustc-print-path@2 => rust-test-runner.rustc-print-path",
+            "spawn#rust-test-runner.list-tests => rust-test-runner.list-tests",
+            "spawn#child-signal-guard.output => child-signal-guard.output",
+            "spawn#child-signal-guard.output@2 => child-signal-guard.output",
             "spawn",
             // The store of copies made.
-            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
+            "fs.create_dir_all#workspace.ensure-container => workspace.ensure-container",
         ],
     );
     // A binary none of whose tests were asked for is listed again for how
     // many it has.
-    each_step_of_a_run_fails(
+    each_step_of_a_run_fails_in(
+        share,
         "own-step-rs-unasked",
         small_crate,
         &["--", "cargo", "test", "-q", "--lib", "--", "none"],
-        &["spawn#rust_test_runner.rs:1268@2 => rust_test_runner.rs:1268"],
+        &["spawn#rust-test-runner.list-tests@2 => rust-test-runner.list-tests"],
     );
     if nextest_installed() {
         // Nextest's runner fails the attempt, and nextest exits 100.
-        each_step_of_a_run_fails(
+        each_step_of_a_run_fails_in(
+            share,
             "own-step-nextest",
             small_crate,
             &["--", "cargo", "nextest", "run"],
@@ -16241,14 +16421,14 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "fs.read_dir#10",
                 // nextest's version, rustc through Cargo's configuration,
                 // the test list, Cargo's metadata, the run.
-                "spawn#rust_owned_nextest.rs:136 => rust_owned_nextest.rs:136",
-                "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
-                "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
-                "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:328 => child_signal_guard.rs:328",
+                "spawn#rust-owned-nextest.run-nextest.launch-output-1 => rust-owned-nextest.run-nextest.launch-output-1",
+                "spawn#rust-cargo-configuration.compiler-host@3 => rust-cargo-configuration.compiler-host",
+                "spawn#rust-owned-nextest.run-nextest.launch-output-2 => rust-owned-nextest.run-nextest.launch-output-2",
+                "spawn#rust-owned-nextest.run-nextest.launch-output-3 => rust-owned-nextest.run-nextest.launch-output-3",
+                "spawn#child-signal-guard.status => child-signal-guard.status",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
-                "__nextest-runner/spawn#rust_owned_nextest.rs:604",
+                "__nextest-runner/spawn#rust-owned-nextest.nextest-runner-inner",
                 "__nextest-runner/fs.read@1",
                 "__nextest-runner/fs.create_dir_all@1",
                 "__nextest-runner/fs.create_dir_all@2",
@@ -16382,7 +16562,10 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         ("fs.canonicalize@20", "injected fault at fs"),
         // The Worker workspace's inputs walked, and a port found for its
         // inspector.
-        ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
+        (
+            "fs.read_dir#rust-run.collect-project-inputs",
+            "rust-run.collect-project-inputs",
+        ),
         ("free-port", "injected fault at free-port"),
     ] {
         let project = Project::cart("worker-server-steps");
@@ -16516,13 +16699,13 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:569",
-        "fs.read_dir@6 => python_run.rs:112",
-        "fs.read_dir@7 => python_run.rs:112",
-        "fs.file_type@9 => python_run.rs:115",
-        "fs.create_dir_all@7 => python_run.rs:119",
-        "fs.copy@1 => python_run.rs:122",
-        "fs.read_dir entry#3 => python_run.rs:112",
+        "fs.create_dir_all@6 => python-run.run-direct-python-in.create-dir-all",
+        "fs.read_dir@6 => python-run.copy-tree.read-dir",
+        "fs.read_dir@7 => python-run.copy-tree.read-dir",
+        "fs.file_type@9 => python-run.copy-tree.file-type",
+        "fs.create_dir_all@7 => python-run.copy-tree.create-dir-all",
+        "fs.copy@1 => python-run.copy-tree.copy",
+        "fs.read_dir entry#3 => python-run.copy-tree.read-dir",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("python-keep-work");
@@ -16594,11 +16777,11 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@15",
             "fs.create_dir_all@24",
             // The project's Go listed again as the run prepares it.
-            "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
+            "fs.read_dir#go-project.walk@2 => go-project.walk",
             // The harness a test package is given.
-            "fs.write#go_run.rs:527 => go_run.rs:527",
+            "fs.write#go-run.instrument-workspace => go-run.instrument-workspace",
             // The run's evidence archive.
-            "fs.create_dir_all#evidence_archive.rs:484 => evidence_archive.rs:484",
+            "fs.create_dir_all#evidence-archive.write-entries.create-dir-all => evidence-archive.write-entries.create-dir-all",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16662,7 +16845,7 @@ fn a_maven_run_whose_own_step_fails_says_so() {
             "spawn",
             // The store of copies made, and the copy released after a run
             // that passed.
-            "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
+            "fs.create_dir_all#workspace.ensure-container => workspace.ensure-container",
             "copy-release",
         ],
     );
@@ -16701,8 +16884,8 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read@7",
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
-            "fs.read_dir entry#1 => ruby_project.rs:106",
-            "fs.read_dir entry#2 => ruby_evidence.rs:343",
+            "fs.read_dir entry#1 => ruby-project.walk",
+            "fs.read_dir entry#2 => ruby-evidence.read-evidence-directory",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16721,13 +16904,13 @@ fn a_ruby_run_that_cannot_keep_its_work_says_so() {
     };
     let command = ["--", ruby.as_str(), "-Ilib", "test/w_test.rb"];
     for entry in [
-        "fs.create_dir_all@5 => ruby_run.rs:335",
-        "fs.read_dir@5 => ruby_run.rs:98",
-        "fs.read_dir@6 => ruby_run.rs:98",
-        "fs.file_type@7 => ruby_run.rs:101",
-        "fs.create_dir_all@6 => ruby_run.rs:105",
-        "fs.copy@1 => ruby_run.rs:108",
-        "fs.read_dir entry#2 => ruby_run.rs:98",
+        "fs.create_dir_all@5 => ruby-run.run-direct-ruby-in",
+        "fs.read_dir@5 => ruby-run.copy-tree.read-dir",
+        "fs.read_dir@6 => ruby-run.copy-tree.read-dir",
+        "fs.file_type@7 => ruby-run.copy-tree.file-type",
+        "fs.create_dir_all@6 => ruby-run.copy-tree.create-dir-all",
+        "fs.copy@1 => ruby-run.copy-tree.copy",
+        "fs.read_dir entry#2 => ruby-run.copy-tree.read-dir",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("ruby-keep-work");
@@ -17176,7 +17359,7 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@3",
         "fs.rename@4",
         // The store of runs listed, and the lock released after importing.
-        "fs.read_dir#run_store.rs:681",
+        "fs.read_dir#run-store.discover-runs",
         "copy-release",
     ] {
         let project = Project::cart("import-steps");
@@ -17371,6 +17554,8 @@ fn tests_affected_names_the_record_it_cannot_read() {
         project
             .root
             .join(".supercov/runs")
+            .join(&run)
+            .join("parts")
             .join(&first)
             .join("test-executions.json"),
     )
@@ -17449,7 +17634,7 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
         ("fs.read_dir@54", "workspaces"),
         ("fs.read_dir@55", "/out"),
-        ("fs.read#workspace.rs:1646", "workspaces"),
+        ("fs.read#workspace.naming-the-project.read", "workspaces"),
         ("fs.create_dir_all@18", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),
@@ -17486,108 +17671,120 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         (
             "fs.read_dir entry#6",
             "injected fault at fs",
-            "workspace.rs:706",
+            "workspace.copy-tree.read-dir-1",
         ),
         (
             "fs.read_dir entry#9",
             "injected fault at fs",
-            "workspace.rs:1053",
+            "workspace.link-node-modules.read-dir",
         ),
         (
             "fs.read_dir entry#10",
             "injected fault at fs",
-            "workspace.rs:990",
+            "workspace.link-tools.read-dir",
         ),
         (
             "fs.read_dir entry#11",
             "injected fault at fs",
-            "workspace.rs:937",
+            "workspace.link-package.read-dir",
         ),
         (
             "fs.read_dir entry#15",
             "injected fault at fs",
-            "workspace.rs:1358",
+            "workspace.walk-output-files.read-dir",
         ),
-        ("fs.read_dir@53", "injected fault at fs", "workspace.rs:706"),
+        (
+            "fs.read_dir@53",
+            "injected fault at fs",
+            "workspace.copy-tree.read-dir-1",
+        ),
         (
             "fs.read_dir@62",
             "/node_modules: injected",
-            "workspace.rs:1053",
+            "workspace.link-node-modules.read-dir",
         ),
         (
             "fs.read_dir@63",
             "node_modules/.bin: injected",
-            "workspace.rs:990",
+            "workspace.link-tools.read-dir",
         ),
         (
             "fs.read_dir@64",
             "node_modules/@scope: injected",
-            "workspace.rs:937",
+            "workspace.link-package.read-dir",
         ),
-        ("fs.create_dir_all@4", "staging", "workspace.rs:705"),
+        (
+            "fs.create_dir_all@4",
+            "staging",
+            "workspace.copy-tree.create-dir-all-1",
+        ),
         (
             "fs.create_dir_all@9",
             "/node_modules: injected",
-            "workspace.rs:1052",
+            "workspace.link-node-modules.create-dir-all",
         ),
         (
             "fs.create_dir_all@10",
             "node_modules/.bin: injected",
-            "workspace.rs:987",
+            "workspace.link-tools.create-dir-all",
         ),
         (
             "fs.create_dir_all@11",
             "node_modules/@scope: injected",
-            "workspace.rs:936",
+            "workspace.link-package.create-dir-all",
         ),
     ];
     let unlinkable = [
         (
             "fs.read_dir entry#8",
             "injected fault at fs",
-            "workspace.rs:769",
+            "workspace.copy-tree.read-dir-2",
         ),
         (
             "fs.read_dir@58",
             "packages/web/node_modules: injected",
-            "workspace.rs:769",
+            "workspace.copy-tree.read-dir-2",
         ),
         (
             "fs.read_dir@59",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:990",
+            "workspace.link-tools.read-dir",
         ),
         (
             "fs.create_dir_all@7",
             "packages/web/node_modules: injected",
-            "workspace.rs:768",
+            "workspace.copy-tree.create-dir-all-2",
         ),
         (
             "fs.create_dir_all@8",
             "packages/web/node_modules/.bin: injected",
-            "workspace.rs:987",
+            "workspace.link-tools.create-dir-all",
         ),
         (
             "fs.symlink@1",
             "packages/web/node_modules/.bin/webtool",
-            "workspace.rs:1009",
+            "workspace.link-tools.create-link",
         ),
         (
             "fs.symlink@2",
             "packages/web/node_modules/dep",
-            "workspace.rs:780",
+            "workspace.copy-tree.create-link",
         ),
         (
             "fs.symlink@3",
             "node_modules/.bin/tool",
-            "workspace.rs:1009",
+            "workspace.link-tools.create-link",
         ),
         (
             "fs.symlink@4",
             "node_modules/@scope/pkg",
-            "workspace.rs:972",
+            "workspace.link-package.create-link-2",
         ),
-        ("fs.symlink@5", "node_modules/plain", "workspace.rs:972"),
+        (
+            "fs.symlink@5",
+            "node_modules/plain",
+            "workspace.link-package.create-link-2",
+        ),
     ];
     // A directory is never cloned, so every system links the same way:
     // hard links where it can, one link per package where it cannot.
@@ -17641,12 +17838,12 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
 #[test]
 fn a_run_that_cannot_reuse_the_last_copy_says_so() {
     for entry in [
-        "fs.canonicalize@10 => workspace.rs:1286",
-        "fs.create_dir_all@6 => workspace.rs:1301",
-        "fs.copy@1 => workspace.rs:551",
-        "fs.rename@1 => workspace.rs:562",
-        "fs.rename@3 => workspace.rs:1320",
-        "fs.create_dir_all@10 => workspace.rs:1320",
+        "fs.canonicalize@10 => workspace.prepare-cached-workspace-with-operations.canonicalize-simplified",
+        "fs.create_dir_all@6 => workspace.prepare-cached-workspace-with-operations.create-dir-all",
+        "fs.copy@1 => workspace.copy-file",
+        "fs.rename@1 => workspace.rename",
+        "fs.rename@3 => workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-1",
+        "fs.create_dir_all@10 => workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-1",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::cart("reuse-copy");
@@ -17673,19 +17870,19 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1369",
-        "fs.create_dir_all#javascript_run.rs:752",
-        "fs.write#javascript_run.rs:1097",
-        "fs.canonicalize#process_supervision.rs:1796",
-        "fs.create_dir_all#javascript_run.rs:1180",
-        "fs.create_dir_all#javascript_run.rs:1370",
-        "fs.read_dir#evidence_archive.rs:263",
-        "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1648",
-        "fs.create_dir_all#javascript_run.rs:1650",
-        "fs.create_dir_all#lifecycle.rs:1060",
-        "fs.create_dir_all#javascript_run.rs:1750",
-        "fs.create_dir_all#javascript_run.rs:1752",
+        "fs.create_dir_all#lifecycle.recover-abandoned-runs",
+        "fs.create_dir_all#javascript-run.run-javascript.write-run-state",
+        "fs.write#javascript-run.run-javascript.write-2",
+        "fs.canonicalize#process-supervision.new-crash-safe",
+        "fs.create_dir_all#javascript-run.run-javascript.update-run-state-1",
+        "fs.create_dir_all#javascript-run.run-javascript.update-run-state-3",
+        "fs.read_dir#evidence-archive.collect-directory",
+        "fs.create_dir_all#evidence-archive.write-entries.create-dir-all",
+        "fs.create_dir_all#javascript-run.run-javascript.remove-stored-tree-deferred-3",
+        "fs.create_dir_all#javascript-run.run-javascript.remove-stored-tree-deferred-4",
+        "fs.create_dir_all#lifecycle.publish-run-with-fault.create-dir-all",
+        "fs.create_dir_all#javascript-run.run-javascript.update-run-state-5",
+        "fs.create_dir_all#javascript-run.run-javascript.finalize-published-run-4",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17928,9 +18125,9 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:354@2,fs.open#query_index.rs:354@3,fs.read_from#evidence_archive.rs:677",
+        "fs.open#query-index.open@2,fs.open#query-index.open@3,fs.read_from#evidence-archive.read.read-from",
         // The runs listed again for the details.
-        "fs.read_dir#run_store.rs:681@2",
+        "fs.read_dir#run-store.discover-runs@2",
     ] {
         let refused = project
             .supercov_with(
@@ -17942,7 +18139,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2301"),
+                refused.contains("coverage-query.read"),
                 "{fault}: {refused}"
             );
         }
@@ -17961,12 +18158,20 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     project.supercov(&["--", "node", "--test"]).succeeds();
     project.supercov(&["runs", "latest", "--json"]).succeeds();
     for (fault, output, place) in [
-        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:388"),
-        ("fs.read_to_string@6", "unread.html", "html_report.rs:423"),
         (
-            "fs.metadata#html_report.rs:410",
+            "fs.canonicalize@2",
+            "unresolved.html",
+            "html-report.safe-relative-source",
+        ),
+        (
+            "fs.read_to_string@6",
+            "unread.html",
+            "html-report.collect-sources.read-to-string",
+        ),
+        (
+            "fs.metadata#html-report.collect-sources.metadata",
             "unsized.html",
-            "html_report.rs:410",
+            "html-report.collect-sources.metadata",
         ),
     ] {
         let ran = project.supercov_with(
@@ -17991,11 +18196,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1356,fs.read_from#evidence_archive.rs:677",
+            "fs.read#run-store.read-statement-spans,fs.read_from#evidence-archive.read.read-from",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:677"),
+        fired_at(&spanless.stderr(), "evidence-archive.read.read-from"),
         "{}",
         spanless.stderr()
     );
@@ -18073,13 +18278,34 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:710", "python_run.rs:710"),
-        ("fs.create_dir_all#python_run.rs:711", "python_run.rs:711"),
-        ("fs.create_dir_all#ruby_run.rs:514", "ruby_run.rs:514"),
-        ("fs.create_dir_all#ruby_run.rs:515", "ruby_run.rs:515"),
-        ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
-        ("fs.create_dir_all#go_run.rs:374", "go_run.rs:374"),
-        ("fs.create_dir_all#go_run.rs:413", "go_run.rs:413"),
+        (
+            "fs.create_dir_all#python-run.prepare.write-runtime",
+            "python-run.prepare.write-runtime",
+        ),
+        (
+            "fs.create_dir_all#python-run.prepare.create-dir-all",
+            "python-run.prepare.create-dir-all",
+        ),
+        (
+            "fs.create_dir_all#ruby-run.prepare.write-runtime",
+            "ruby-run.prepare.write-runtime",
+        ),
+        (
+            "fs.create_dir_all#ruby-run.prepare.create-dir-all",
+            "ruby-run.prepare.create-dir-all",
+        ),
+        (
+            "fs.create_dir_all#go-run.instrument-sources.write-1",
+            "go-run.instrument-sources.write-1",
+        ),
+        (
+            "fs.create_dir_all#go-run.instrument-sources.write-2",
+            "go-run.instrument-sources.write-2",
+        ),
+        (
+            "fs.create_dir_all#go-run.instrument-sources.write-3",
+            "go-run.instrument-sources.write-3",
+        ),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18107,14 +18333,17 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
         return;
     }
     for (fault, place) in [
-        ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
+        ("fs.read_dir#go-project.walk", "go-project.walk"),
         (
-            "fs.canonicalize#source_capture.rs:25@2",
-            "source_capture.rs:25",
+            "fs.canonicalize#source-capture.capture.canonicalize-simplified-1@2",
+            "source-capture.capture.canonicalize-simplified-1",
         ),
-        ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1233", "go_run.rs:1233"),
-        ("fs.create_dir_all#go_run.rs:1243", "go_run.rs:1243"),
+        ("fs.open#integrity.digest-paths@4", "integrity.digest-paths"),
+        ("fs.write#go-run.prepare.write", "go-run.prepare.write"),
+        (
+            "fs.create_dir_all#go-run.prepare.create-dir-all",
+            "go-run.prepare.create-dir-all",
+        ),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18141,18 +18370,33 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
         // The project's tree walked, then the copy's: the seventh listing.
-        ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
-        ("fs.read_dir#jvm_project.rs:287@7", "jvm_project.rs:287"),
+        ("fs.read_dir#jvm-project.walk", "jvm-project.walk"),
+        ("fs.read_dir#jvm-project.walk@7", "jvm-project.walk"),
         (
-            "fs.canonicalize#source_capture.rs:25@2",
-            "source_capture.rs:25",
+            "fs.canonicalize#source-capture.capture.canonicalize-simplified-1@2",
+            "source-capture.capture.canonicalize-simplified-1",
         ),
-        ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2811", "jvm_run.rs:2811"),
-        ("fs.create_dir_all#jvm_run.rs:2827", "jvm_run.rs:2827"),
-        ("fs.create_dir_all#jvm_run.rs:2837", "jvm_run.rs:2837"),
-        ("fs.write#jvm_run.rs:2811", "jvm_run.rs:2811"),
-        ("fs.write#jvm_run.rs:2827", "jvm_run.rs:2827"),
+        ("fs.open#integrity.digest-paths@4", "integrity.digest-paths"),
+        (
+            "fs.create_dir_all#jvm-run.prepare.write-1",
+            "jvm-run.prepare.write-1",
+        ),
+        (
+            "fs.create_dir_all#jvm-run.prepare.write-2",
+            "jvm-run.prepare.write-2",
+        ),
+        (
+            "fs.create_dir_all#jvm-run.prepare.create-dir-all",
+            "jvm-run.prepare.create-dir-all",
+        ),
+        (
+            "fs.write#jvm-run.prepare.write-1",
+            "jvm-run.prepare.write-1",
+        ),
+        (
+            "fs.write#jvm-run.prepare.write-2",
+            "jvm-run.prepare.write-2",
+        ),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18182,14 +18426,17 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:363",
-            "javascript_frontend.rs:363",
+            "fs.read#javascript-frontend.load-cached-javascript-frontend.read-1",
+            "javascript-frontend.load-cached-javascript-frontend.read-1",
         ),
         (
-            "fs.read#javascript_frontend.rs:375",
-            "javascript_frontend.rs:375",
+            "fs.read#javascript-frontend.load-cached-javascript-frontend.read-2",
+            "javascript-frontend.load-cached-javascript-frontend.read-2",
         ),
-        ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
+        (
+            "fs.symlink_metadata#workspace.prepare-cached-workspace-with-operations.symlink-metadata",
+            "workspace.prepare-cached-workspace-with-operations.symlink-metadata",
+        ),
     ] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();
@@ -18217,12 +18464,18 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1839@2",
+            "fs.read_to_string#javascript-frontend.track-assertions.read-to-string@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1839"), "{stderr}");
+    assert!(
+        fired_at(
+            &stderr,
+            "javascript-frontend.track-assertions.read-to-string"
+        ),
+        "{stderr}"
+    );
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -18248,23 +18501,23 @@ fn a_javascript_run_that_cannot_write_its_diagnostics_says_so() {
 fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#python_project.rs:269@1",
-            "python_project.rs:269",
+            "fs.read#python-project.prepare@1",
+            "python-project.prepare",
             "server/app.py",
         ),
         (
-            "fs.open#integrity.rs:427@4",
-            "integrity.rs:427",
+            "fs.open#integrity.digest-paths@4",
+            "integrity.digest-paths",
             "server/app.py",
         ),
         (
-            "fs.read#source_capture.rs:54@5",
-            "source_capture.rs:54",
+            "fs.read#source-capture.capture.read@5",
+            "source-capture.capture.read",
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:717@1",
-            "python_run.rs:717",
+            "fs.write#python-run.prepare.write-file@1",
+            "python-run.prepare.write-file",
             "plan.json",
         ),
     ] {
@@ -18289,26 +18542,30 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#ruby_project.rs:233@1",
-            "ruby_project.rs:233",
+            "fs.read#ruby-project.prepare@1",
+            "ruby-project.prepare",
             "web/app.rb",
         ),
         (
-            "fs.open#integrity.rs:427@4",
-            "integrity.rs:427",
+            "fs.open#integrity.digest-paths@4",
+            "integrity.digest-paths",
             "web/app.rb",
         ),
         (
-            "fs.read#source_capture.rs:54@5",
-            "source_capture.rs:54",
+            "fs.read#source-capture.capture.read@5",
+            "source-capture.capture.read",
             "web/app.rb",
         ),
         (
-            "fs.write#ruby_run.rs:93@1",
-            "ruby_run.rs:93",
+            "fs.write#ruby-run.write-runtime@1",
+            "ruby-run.write-runtime",
             "supercov_runtime.rb",
         ),
-        ("fs.write#ruby_run.rs:519@1", "ruby_run.rs:519", "plan.rb"),
+        (
+            "fs.write#ruby-run.prepare.write-file@1",
+            "ruby-run.prepare.write-file",
+            "plan.rb",
+        ),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18415,6 +18672,10 @@ fn a_merge_whose_step_fails_says_so() {
         "fs.rename@2",
         "fs.rename@3",
         "fs.rename@4",
+        "fs.rename@5",
+        "fs.rename@6",
+        "fs.rename@7",
+        "fs.rename@8",
     ] {
         let project = Project::cart("merge-steps");
         project.supercov(&["--", "node", "--test"]).succeeds();
@@ -19243,43 +19504,43 @@ fn a_doctest_runtool_step_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1189",
-            "rust_owned_doctests.rs:1189",
+            "fs.create_dir_all#rust-owned-doctests.doctest-runtool-inner.create-dir-all",
+            "rust-owned-doctests.doctest-runtool-inner.create-dir-all",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1194",
-            "rust_owned_doctests.rs:1194",
+            "spawn#rust-owned-doctests.doctest-runtool-inner.launch-output-2",
+            "rust-owned-doctests.doctest-runtool-inner.launch-output-2",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1202",
-            "rust_owned_doctests.rs:1202",
+            "fs.read#rust-owned-doctests.doctest-runtool-inner.read-1",
+            "rust-owned-doctests.doctest-runtool-inner.read-1",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1213",
-            "rust_owned_doctests.rs:1213",
+            "fs.read#rust-owned-doctests.doctest-runtool-inner.read-2",
+            "rust-owned-doctests.doctest-runtool-inner.read-2",
         ),
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1158",
-            "rust_owned_doctests.rs:1158",
+            "fs.create_dir_all#rust-owned-doctests.doctest-runtool-inner.next-sequence",
+            "rust-owned-doctests.doctest-runtool-inner.next-sequence",
         ),
         (
             "2024",
-            "fs.write#rust_owned_doctests.rs:1248",
-            "rust_owned_doctests.rs:1248",
+            "fs.write#rust-owned-doctests.doctest-runtool-inner.write-record-1",
+            "rust-owned-doctests.doctest-runtool-inner.write-record-1",
         ),
         (
             "2021",
-            "spawn#rust_owned_doctests.rs:1258",
-            "rust_owned_doctests.rs:1258",
+            "spawn#rust-owned-doctests.doctest-runtool-inner.launch-output-3",
+            "rust-owned-doctests.doctest-runtool-inner.launch-output-3",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1171",
-            "rust_owned_doctests.rs:1171",
+            "spawn#rust-owned-doctests.doctest-runtool-inner.launch-output-1",
+            "rust-owned-doctests.doctest-runtool-inner.launch-output-1",
         ),
     ] {
         let project = Project::empty("doctest-runtool-steps");
@@ -19774,8 +20035,11 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
         std::fs::remove_file(project.root.join("linked")).unwrap();
     }
     for (fault, place) in [
-        ("fs.canonicalize#python_run.rs:213", "python_run.rs:213"),
-        ("fs.read_dir#python_project.rs:125", "python_project.rs:125"),
+        (
+            "fs.canonicalize#python-run.current-python-integrity",
+            "python-run.current-python-integrity",
+        ),
+        ("fs.read_dir#python-project.walk", "python-project.walk"),
     ] {
         let read = project.supercov_with(&["runs", "latest"], &[("SUPERCOV_TEST_FAULT", fault)]);
         let said = format!("{}{}", read.stdout(), read.stderr());
@@ -19825,10 +20089,19 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
     stale_when(
         &project,
         &[
-            ("fs.canonicalize#rust_run.rs:244", "rust_run.rs:244"),
-            ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
-            ("fs.read_dir entry#rust_run.rs:88", "rust_run.rs:88"),
-            ("fs.open#integrity.rs:427", "integrity.rs:427"),
+            (
+                "fs.canonicalize#rust-run.current-rust-integrity",
+                "rust-run.current-rust-integrity",
+            ),
+            (
+                "fs.read_dir#rust-run.collect-project-inputs",
+                "rust-run.collect-project-inputs",
+            ),
+            (
+                "fs.read_dir entry#rust-run.collect-project-inputs",
+                "rust-run.collect-project-inputs",
+            ),
+            ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
         ],
     );
     #[cfg(unix)]
@@ -19838,9 +20111,12 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:746", "go_run.rs:746"),
-                ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
-                ("fs.open#integrity.rs:427", "integrity.rs:427"),
+                (
+                    "fs.canonicalize#go-run.current-go-integrity",
+                    "go-run.current-go-integrity",
+                ),
+                ("fs.read_dir#go-project.walk", "go-project.walk"),
+                ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
             ],
         );
         #[cfg(unix)]
@@ -19859,9 +20135,12 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
-                ("fs.read_dir#ruby_project.rs:106", "ruby_project.rs:106"),
-                ("fs.open#integrity.rs:427", "integrity.rs:427"),
+                (
+                    "fs.canonicalize#ruby-run.current-ruby-integrity",
+                    "ruby-run.current-ruby-integrity",
+                ),
+                ("fs.read_dir#ruby-project.walk", "ruby-project.walk"),
+                ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
             ],
         );
         refused_under_a_link(&project, "lib", &command);
@@ -19885,9 +20164,12 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:2193", "jvm_run.rs:2193"),
-                ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
-                ("fs.open#integrity.rs:427", "integrity.rs:427"),
+                (
+                    "fs.canonicalize#jvm-run.current-jvm-integrity",
+                    "jvm-run.current-jvm-integrity",
+                ),
+                ("fs.read_dir#jvm-project.walk", "jvm-project.walk"),
+                ("fs.open#integrity.digest-paths", "integrity.digest-paths"),
             ],
         );
         // A run under a root that is a link is refused.
@@ -20375,13 +20657,13 @@ fn a_rust_run_whose_step_after_the_build_fails_says_so() {
         (&["cargo", "test"][..], "diagnostics@3", "diagnostics"),
         (
             &["cargo", "test"][..],
-            "fs.read_dir#rust_runtime.rs:391",
-            "rust_runtime.rs:391",
+            "fs.read_dir#rust-runtime.settle-under.read-dir",
+            "rust-runtime.settle-under.read-dir",
         ),
         (
             &["cargo", "nextest", "run"][..],
-            "fs.read_dir#rust_runtime.rs:391",
-            "rust_runtime.rs:391",
+            "fs.read_dir#rust-runtime.settle-under.read-dir",
+            "rust-runtime.settle-under.read-dir",
         ),
     ] {
         let project = Project::empty("rust-settlement");
@@ -20619,11 +20901,14 @@ fn a_quality_snapshot_or_scope_that_cannot_be_read_is_left_out_or_refused() {
         .succeeds();
     let scope = project.supercov_with(
         &["quality", "scope"],
-        &[("SUPERCOV_TEST_FAULT", "fs.symlink_metadata#quality.rs:1094")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.symlink_metadata#quality.discover-for",
+        )],
     );
     let said = scope.stderr();
     assert_ne!(scope.code(), 0, "{said}");
-    assert!(fired_at(&said, "quality.rs:1094"), "{said}");
+    assert!(fired_at(&said, "quality.discover-for"), "{said}");
 }
 
 /// A report names what it cannot show: a run to compare with where there is
@@ -20675,10 +20960,10 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     assert!(missing.contains("coverage run not found"), "{missing}");
     let unlisted = project.supercov_with(
         &report,
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
     );
     assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
-    assert!(fired_at(&unlisted.stderr(), "run_store.rs:681"));
+    assert!(fired_at(&unlisted.stderr(), "run-store.discover-runs"));
     snapshot(&project, "q_0000000000000001", serde_json::json!([]));
     snapshot(
         &project,
@@ -20706,21 +20991,27 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#source_manifest.rs:786",
+            "fs.canonicalize#source-manifest.affected-tests.canonicalize-simplified",
         )],
     );
     assert_ne!(unresolved.code(), 0, "{}", unresolved.stderr());
-    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:786"));
+    assert!(fired_at(
+        &unresolved.stderr(),
+        "source-manifest.affected-tests.canonicalize-simplified"
+    ));
     let unread = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#source_manifest.rs:797",
+            "fs.read_to_string#source-manifest.affected-tests.read-to-string",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert!(!said.contains("panicked"), "{said}");
-    assert!(fired_at(&said, "source_manifest.rs:797"), "{said}");
+    assert!(
+        fired_at(&said, "source-manifest.affected-tests.read-to-string"),
+        "{said}"
+    );
 }
 
 /// A JavaScript run beside a wasm library prepares the library in the copy:
@@ -20729,8 +21020,11 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
 #[test]
 fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("spawn#rust_project.rs:182", "rust_project.rs:182"),
-        ("fs.create_dir_all#rust_wasm.rs:185", "rust_wasm.rs:185"),
+        (
+            "spawn#rust-project.cargo-metadata",
+            "rust-project.cargo-metadata",
+        ),
+        ("fs.create_dir_all#rust-wasm.prepare", "rust-wasm.prepare"),
     ] {
         let project = Project::cart("wasm-library-unprepared");
         project.write(".gitignore", "out/\nnode_modules/\ntarget/\n");
@@ -20786,7 +21080,7 @@ fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.create_dir_all#source_manifest.rs:449",
+            "fs.create_dir_all#source-manifest.write-json",
         )],
     );
     assert_eq!(ran.code(), 1, "{}", ran.stderr());
@@ -20811,12 +21105,15 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:323")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.rename#query-index.write-query-index",
+        )],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (query_index.rs:323 rename)"),
+            .contains("test fault at fs (query-index.write-query-index rename)"),
         "{}",
         ran.stderr()
     );
@@ -20843,12 +21140,18 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
         &["runs", "latest"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#coverage_query.rs:3404",
+            "coverage-index-read#coverage-query.coverage-summary-query.unclassified-source",
         )],
     );
     let said = format!("{}{}", refused.stdout(), refused.stderr());
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "coverage_query.rs:3404"), "{said}");
+    assert!(
+        fired_at(
+            &said,
+            "coverage-query.coverage-summary-query.unclassified-source"
+        ),
+        "{said}"
+    );
 }
 
 /// A record the run's evidence holds that is no JSON -- a process that tore
@@ -20881,11 +21184,14 @@ fn a_stale_query_whose_record_cannot_be_read_still_answers() {
     project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
     let ran = project.supercov_with(
         &["runs", "latest", "files", "--json"],
-        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:365")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.open#source-manifest.load-optional-manifest",
+        )],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (source_manifest.rs:365 open)"),
+            .contains("test fault at fs (source-manifest.load-optional-manifest open)"),
         "{}",
         ran.stderr()
     );
@@ -20904,11 +21210,14 @@ fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
     project.supercov(&["merge", &first, &second]).succeeds();
     let ran = project.supercov_with(
         &["runs", "latest", "files"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681@2")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.read_dir#run-store.discover-runs@2",
+        )],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (run_store.rs:681 read_dir)"),
+            .contains("test fault at fs (run-store.discover-runs read_dir)"),
         "{}",
         ran.stderr()
     );
@@ -20925,23 +21234,23 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:820@1"),
-            "rust_owned_doctests.rs:820",
+            format!("{stand_in}spawn#rust-owned-doctests.rustdoc-wrapper-inner.launch-output@1"),
+            "rust-owned-doctests.rustdoc-wrapper-inner.launch-output",
         ),
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:820@2"),
-            "rust_owned_doctests.rs:820",
+            format!("{stand_in}spawn#rust-owned-doctests.rustdoc-wrapper-inner.launch-output@2"),
+            "rust-owned-doctests.rustdoc-wrapper-inner.launch-output",
         ),
         (
             "2021",
-            "fs.read#rust_owned_doctests.rs:289".to_owned(),
-            "rust_owned_doctests.rs:289",
+            "fs.read#rust-owned-doctests.run-doctests.read-file".to_owned(),
+            "rust-owned-doctests.run-doctests.read-file",
         ),
         (
             "2024",
-            format!("{stand_in}fs.read#rust_owned_doctests.rs:1104@1"),
-            "rust_owned_doctests.rs:1104",
+            format!("{stand_in}fs.read#rust-owned-doctests.read-invocations@1"),
+            "rust-owned-doctests.read-invocations",
         ),
         // The stand-in's own path, and the merged harness runner's: each
         // resolves itself first.
@@ -20958,13 +21267,13 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         // The merged harness's order, and a child's record, read back.
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1202".to_owned(),
-            "rust_owned_doctests.rs:1202",
+            "__doctest-runner/fs.read#rust-owned-doctests.doctest-runtool-inner.read-1".to_owned(),
+            "rust-owned-doctests.doctest-runtool-inner.read-1",
         ),
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1213".to_owned(),
-            "rust_owned_doctests.rs:1213",
+            "__doctest-runner/fs.read#rust-owned-doctests.doctest-runtool-inner.read-2".to_owned(),
+            "rust-owned-doctests.doctest-runtool-inner.read-2",
         ),
     ] {
         let project = Project::empty("doctest-stand-in-steps");
@@ -21006,7 +21315,7 @@ fn a_line_read_from_the_working_tree_is_stale_only_by_the_runs_record() {
     };
     assert_eq!(origin(""), "working-tree-stale");
     assert_eq!(
-        origin("fs.open#source_manifest.rs:365=10"),
+        origin("fs.open#source-manifest.load-optional-manifest=10"),
         "working-tree-current"
     );
 }
@@ -21080,14 +21389,17 @@ fn a_go_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
         &[
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.symlink_metadata#source_discovery.rs:475@3",
+                "fs.symlink_metadata#source-discovery.existing-roots@3",
             ),
             ("SUPERCOV_SOURCE_ROOTS", "src,main.go"),
         ],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "source_discovery.rs:475"), "{stderr}");
+    assert!(
+        fired_at(&stderr, "source-discovery.existing-roots"),
+        "{stderr}"
+    );
 }
 
 /// The source roots named, read again in the copy for a Java server beside
@@ -21113,14 +21425,17 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
         &[
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.symlink_metadata#source_discovery.rs:475@2",
+                "fs.symlink_metadata#source-discovery.existing-roots@2",
             ),
             ("SUPERCOV_SOURCE_ROOTS", "src"),
         ],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "source_discovery.rs:475"), "{stderr}");
+    assert!(
+        fired_at(&stderr, "source-discovery.existing-roots"),
+        "{stderr}"
+    );
 }
 
 /// A directory discovery cannot list, or whose listing breaks off, while
@@ -21128,8 +21443,8 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
 #[test]
 fn a_directory_discovery_cannot_list_holds_no_configuration() {
     for fault in [
-        "fs.read_dir#project_discovery.rs:349",
-        "fs.read_dir entry#project_discovery.rs:349",
+        "fs.read_dir#project-discovery.visit",
+        "fs.read_dir entry#project-discovery.visit",
     ] {
         let project = Project::cart("discovery-unlisted");
         let ran =
@@ -21137,7 +21452,7 @@ fn a_directory_discovery_cannot_list_holds_no_configuration() {
         let said = ran.stderr();
         assert_eq!(ran.code(), 0, "{fault}: {said}");
         assert!(
-            fired_at(&said, "project_discovery.rs:349"),
+            fired_at(&said, "project-discovery.visit"),
             "{fault}: {said}"
         );
     }
@@ -21543,8 +21858,8 @@ fn mutants_on_a_change_are_those_on_its_lines() {
         &[
             "### Mutants on this change",
             "on 4 of 4 changed lines since `base`",
-            "| Where | Mutant | Status | Why |",
-            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | `sum` never equal to `10` |",
+            "| Where | Mutant | Status | Tests on its line | Why |",
+            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | 1 | `sum` never equal to `10` |",
         ],
     );
 
@@ -21703,6 +22018,8 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
             },
             "strong": null,
             "stryker": null,
+            // How many of the run's tests ran its line.
+            "lineTests": 2,
         })
     );
 
@@ -22134,9 +22451,12 @@ fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
 #[test]
 fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
     for (fault, emptied) in [
-        ("fs.remove_file:2#lifecycle.rs:1696", true),
-        ("fs.read_dir:2#lifecycle.rs:1665", true),
-        ("fs.remove_file#lifecycle.rs:1696", false),
+        (
+            "fs.remove_file:2#lifecycle.remove-tree-on.remove-file",
+            true,
+        ),
+        ("fs.read_dir:2#lifecycle.remove-tree-on.read-dir", true),
+        ("fs.remove_file#lifecycle.remove-tree-on.remove-file", false),
     ] {
         let project = Project::cart("sweep");
         assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
@@ -22172,7 +22492,10 @@ fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
         let said = ran.stderr();
         assert_eq!(ran.code(), 0, "{said}");
         assert_eq!(
-            fired_at(&said, "workspace.rs:2226"),
+            fired_at(
+                &said,
+                "workspace.prune-cached-workspace-sources.remove-scratch-tree-deferred"
+            ),
             !fault.is_empty(),
             "{said}"
         );
@@ -22192,7 +22515,11 @@ fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
     };
     assert_eq!(left_in_copy(""), 0);
     // The prune stops there: that source and those after it stay.
-    assert!(left_in_copy("fs.rename#workspace.rs:2226") > 0);
+    assert!(
+        left_in_copy(
+            "fs.rename#workspace.prune-cached-workspace-sources.remove-scratch-tree-deferred"
+        ) > 0
+    );
 }
 
 /// `mutants test --plan`: a mutant no test infected is decided without
@@ -22315,11 +22642,12 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         "test/tax.test.js",
         "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
     );
-    // Kills each mutant it is given, noting their ids; with FAKE_HALF, half
+    // Kills each mutant it is given by its first candidate, noting their
+    // ids; with FAKE_HALF, half
     // of them and then ends as Ctrl-C ends a pass.
     project.write(
         "fake-strong.mjs",
-        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nconst kill = process.env.FAKE_HALF ? mutants.slice(0, Math.ceil(mutants.length / 2)) : mutants;\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of kill) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: \"killed\", tests: 1 }) + \"\\n\");\nif (process.env.FAKE_HALF) process.exit(130);\n",
+        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nconst kill = process.env.FAKE_HALF ? mutants.slice(0, Math.ceil(mutants.length / 2)) : mutants;\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of kill) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: \"killed\", killedBy: plan.tests[mutant.candidates[0].test].id, tests: 1 }) + \"\\n\");\nif (process.env.FAKE_HALF) process.exit(130);\n",
     );
     project.commit("tax");
     project
@@ -22443,8 +22771,10 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         kept.contains(&format!("  ran {to_run} mutant(s)")),
         "{to_run}: {kept}"
     );
-    // An edit of both sources keeps nothing; where the earlier run's
-    // record of what each test ran is gone, nothing is kept either.
+    let edited = project.latest();
+    // An edit of both sources keeps nothing; where the latest earlier run's
+    // record of what each test ran is gone, it lends nothing, and an older
+    // run of tax.js as it is again lends tax.js's verdicts.
     project.edit("src/tax.js", "sum / 5", "sum / 5.0");
     project.edit("src/cart.js", "return 5;", "return 5.0;");
     let none_kept = project.supercov(&["mutants"]).succeeds();
@@ -22458,7 +22788,11 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
     .unwrap();
     project.edit("src/tax.js", "sum / 5.0", "sum / 5");
     let unrecorded = project.supercov(&["mutants"]).succeeds();
-    assert!(!unrecorded.contains("kept from run"), "{unrecorded}");
+    assert!(
+        unrecorded.contains(&format!("verdict(s) kept from run {edited} (commit ")),
+        "{unrecorded}"
+    );
+    assert!(!unrecorded.contains(&previous), "{unrecorded}");
     // `--plan` keeps nothing and runs nothing.
     project.supercov(&["mutants", "--plan"]).succeeds();
     // As a pull request's comment, the change's, to a file or one that
@@ -22542,6 +22876,891 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
     );
 }
 
+/// A strong pass split across machines: each shard's run holds its share of
+/// the verdicts, `merge` keeps them all in the merged run, so a pass over it
+/// runs nothing, and after an edit `supercov mutants` keeps each unchanged
+/// mutant's verdict from whichever shard's run holds it, and runs the edited
+/// file's mutants again.
+#[cfg(unix)]
+#[test]
+fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
+    let project = vitest_mutants_project("strong-shards");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    // Gives each mutant it is given FAKE_STATUS (a kill by its first
+    // candidate), noting their ids.
+    project.write(
+        "fake-strong.mjs",
+        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of mutants) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: process.env.FAKE_STATUS, killedBy: plan.tests[mutant.candidates[0].test].id, tests: 1 }) + \"\\n\");\n",
+    );
+    project.commit("tax");
+    // Each shard's job measures the whole suite on its own machine.
+    let measure = || {
+        project
+            .supercov_with(
+                &["--", "npx", "vitest", "run"],
+                &[("SUPERCOV_MUTANTS", "1")],
+            )
+            .succeeds();
+        project.latest()
+    };
+    let (first, second) = (measure(), measure());
+    let asked = project.root.join("asked.txt");
+    let asked_path = asked.to_str().unwrap();
+    let take_asked = || {
+        let ids = std::fs::read_to_string(&asked).unwrap_or_default();
+        let _ = std::fs::remove_file(&asked);
+        ids.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let shard = |run: &str, shard: &str, status: &str| {
+        project
+            .supercov_with(
+                &[
+                    "runs",
+                    run,
+                    "mutants",
+                    "test",
+                    "--shard",
+                    shard,
+                    "--json",
+                    "--",
+                    "node",
+                    "fake-strong.mjs",
+                ],
+                &[("FAKE_ASKED", asked_path), ("FAKE_STATUS", status)],
+            )
+            .json()
+    };
+    shard(&first, "1/2", "killed");
+    let killed = take_asked();
+    shard(&second, "2/2", "survived");
+    let survived = take_asked();
+    assert!(!killed.is_empty() && !survived.is_empty(), "{killed:?}");
+    let merged = project.supercov(&["merge", &first, &second]).succeeds();
+    assert!(
+        merged.contains(&format!(
+            "strong verdict(s) kept from runs {first}, {second}"
+        )),
+        "{merged}"
+    );
+    // Every mutant has its verdict: a pass over the merged run runs none.
+    let pass = project
+        .supercov_with(
+            &[
+                "runs",
+                "latest",
+                "mutants",
+                "test",
+                "--json",
+                "--",
+                "node",
+                "fake-strong.mjs",
+            ],
+            &[("FAKE_ASKED", asked_path), ("FAKE_STATUS", "killed")],
+        )
+        .json();
+    assert!(take_asked().is_empty(), "{pass}");
+    assert_eq!(pass["summary"]["ran"], 0, "{pass}");
+    // And a mutant that compiles to the same code as one it ran is killed
+    // with it: `if (sum >= 50)` made `false` is its block emptied.
+    assert_eq!(pass["summary"]["killed"], killed.len() + 1, "{pass}");
+    assert!(
+        pass["summary"]["survived"].as_u64().unwrap() >= survived.len() as u64,
+        "{pass}"
+    );
+
+    // After an edit of tax.js, cart.js's mutants keep their verdicts, each
+    // from the shard's run that holds it, and tax.js's run again.
+    project.edit("src/tax.js", "sum * 0.2", "sum / 5");
+    measure();
+    let to_run = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--plan",
+            "--json",
+            "--file",
+            "src/tax.js",
+        ])
+        .json()["summary"]["toRun"]
+        .clone();
+    let kept = project
+        .supercov(&["mutants", "--json", "--", "npx", "vitest", "run"])
+        .json();
+    assert_eq!(
+        kept["carried"]["from"],
+        serde_json::json!([second, first]),
+        "{kept}"
+    );
+    let carried = killed
+        .iter()
+        .chain(&survived)
+        .filter(|id| id.starts_with("src/cart.js:"))
+        .count();
+    // With the mutant that took a verdict as it compiles alike.
+    assert_eq!(kept["carried"]["mutants"], carried + 1, "{kept}");
+    assert_eq!(kept["summary"]["ran"], to_run, "{kept}");
+    // Measured again as it is: the latest run lends every verdict, and the
+    // shards' runs are not read.
+    let whole = kept["run"].as_str().unwrap().to_owned();
+    measure();
+    let again = project
+        .supercov(&["mutants", "--json", "--", "npx", "vitest", "run"])
+        .json();
+    assert_eq!(
+        again["carried"]["from"],
+        serde_json::json!([whole]),
+        "{again}"
+    );
+    assert_eq!(again["summary"]["ran"], 0, "{again}");
+
+    // A shard of this checkout continues the newest run of it that passed
+    // with the command given: not a merge, not a run whose command failed,
+    // not one of another command, not one measured before the edit.
+    let latest_measured = again["run"].as_str().unwrap().to_owned();
+    let run_json = |run: &str| format!(".supercov/runs/{run}/run.json");
+    let mut failed =
+        serde_json::from_str::<serde_json::Value>(&project.read(&run_json(&first))).unwrap();
+    failed["testExitCode"] = serde_json::json!(1);
+    project.write(&run_json(&first), &failed.to_string());
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run", "--silent"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let shard = |command: &[&str]| {
+        let mut args = vec!["mutants", "--shard", "1/1", "--json", "--"];
+        args.extend(command);
+        let ran = project.supercov(&args);
+        (ran.json(), ran.stderr())
+    };
+    let (continued, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains(&format!(
+            "[supercov] not measuring: the checkout is unchanged since run {latest_measured}, so this shard saves its verdicts into run {}, made from it",
+            continued["run"].as_str().unwrap()
+        )),
+        "{said}"
+    );
+    // None of this command: measured.
+    let (_, said) = shard(&["npx", "vitest", "run", "--reporter=dot"]);
+    assert!(
+        said.contains("measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one): npx vitest run --reporter=dot"),
+        "{said}"
+    );
+    // Edited back as the shards measured it: no run of the command is of
+    // this checkout, and the merge of the shards' runs, each of this
+    // command, holds every test it runs: the shard is made from it.
+    project.edit("src/tax.js", "sum / 5", "sum * 0.2");
+    let (_, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains("holds the tests the command runs (4 test(s) in 2 of its 2 test file(s))"),
+        "{said}"
+    );
+    // Edited again: no run is of this checkout, and it is measured.
+    project.edit("src/tax.js", "sum * 0.2", "sum * 0.3");
+    let (_, said) = shard(&["npx", "vitest", "run"]);
+    assert!(
+        said.contains("measuring first (the checkout changed since the latest run)"),
+        "{said}"
+    );
+}
+
+/// A split strong pass continued round after round on the same commit:
+/// each job restores the earlier round's runs and runs `supercov mutants
+/// --shard k/n -- <command>`. Each job saves into a run of its own, rather
+/// than into the latest restored run, a copy of which every job held: those
+/// copies shared one id and could not be merged. On the unchanged checkout
+/// that run is made from a restored one, with no measuring, and keeps every
+/// verdict the restored runs hold, though the first round's two
+/// measurements recorded different evidence (a test whose path depends on
+/// when it runs). The last job's `supercov merge` takes the round's runs,
+/// keeps the union of their verdicts, a kill over a survival where they
+/// differ, and says how many came from each, and a third round runs
+/// nothing. A run named twice is refused, saying why and what to do.
+#[cfg(unix)]
+#[test]
+fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
+    let project = vitest_mutants_project("strong-shards-continued");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    // A test whose path depends on when it runs: here, on a variable one
+    // job's machine sets.
+    project.write(
+        "test/refund.test.js",
+        "import { expect, it } from \"vitest\";\nimport { refund } from \"../src/cart.js\";\nit(\"refunds\", () => {\n  expect(refund(50)).toBe(50);\n  if (process.env.LATE) expect(refund(200)).toBe(180);\n});\n",
+    );
+    project.commit("tax");
+    let runs = project.root.join(".supercov/runs");
+    let away = project.root.join(".supercov/elsewhere");
+    // A job on a machine of its own: the store holds what it restored and
+    // nothing another job of its round made.
+    let job_at = |shard: &str, more: &[&str], hidden: &[&str], late: bool| {
+        for (n, hidden) in hidden.iter().enumerate() {
+            std::fs::create_dir_all(&away).unwrap();
+            std::fs::rename(runs.join(hidden), away.join(n.to_string())).unwrap();
+        }
+        let mut args = vec!["mutants", "--shard", shard, "--json"];
+        args.extend(more);
+        args.extend(["--", "npx", "vitest", "run"]);
+        let ran = project.supercov_with(&args, &[("LATE", if late { "1" } else { "" })]);
+        for (n, hidden) in hidden.iter().enumerate() {
+            std::fs::rename(away.join(n.to_string()), runs.join(hidden)).unwrap();
+        }
+        (ran.json(), ran.stderr())
+    };
+    let job = |shard: &str, more: &[&str], hidden: Option<&str>| {
+        job_at(shard, more, hidden.as_slice(), false)
+    };
+    // The verdicts a pass reached that a run holds, by mutant id: not
+    // those the run's plan decides, with no test run, but those a mutant
+    // took from a twin that compiles to the same code, which a run decided.
+    let reached = |run: &str| {
+        let saved = serde_json::from_str::<serde_json::Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, verdict)| {
+                ["killed", "survived", "timeout"].contains(&verdict["status"].as_str().unwrap())
+                    && (verdict["tests"] != 0
+                        || verdict["reason"]
+                            .as_str()
+                            .is_some_and(|reason| reason.starts_with("same-code-as:")))
+            })
+            .map(|(id, verdict)| (id.clone(), verdict.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // The first round leaves tax.js's mutants for the next. Its jobs each
+    // measure, at different times: the second job's refund test takes the
+    // path the first's did not.
+    let (first_a, _) = job("1/2", &["--file", "src/cart.js"], None);
+    let a1 = first_a["run"].as_str().unwrap().to_owned();
+    let (first_b, _) = job_at("2/2", &["--file", "src/cart.js"], &[a1.as_str()], true);
+    let b1 = first_b["run"].as_str().unwrap().to_owned();
+    assert_ne!(a1, b1);
+    let decided = |reply: &serde_json::Value| reply["summary"]["ran"].as_u64().unwrap();
+    assert!(
+        decided(&first_a) > 0 && decided(&first_b) > 0,
+        "{first_a}\n{first_b}"
+    );
+    let evidence = |run: &str| std::fs::read(runs.join(run).join("test-executions.json")).unwrap();
+    // The two measurements differ: refund's discount ran in the second
+    // alone.
+    let discount = "src/cart.js:13:22-13:31:ArithmeticOperator:/";
+    let reached_in = |run: &str| {
+        project
+            .supercov(&["runs", run, "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == discount)
+            .unwrap_or_else(|| panic!("no {discount} in {run}"))["weak"]["reach"]
+            .clone()
+    };
+    assert_ne!(reached_in(&a1), reached_in(&b1));
+    // Every verdict the first round reached, the newer run's where both
+    // have one.
+    let mut first = reached(&a1);
+    first.extend(reached(&b1));
+
+    // A plan writes nothing, and reads the latest run as it is.
+    let plan = project.supercov(&[
+        "mutants", "--shard", "1/2", "--plan", "--", "npx", "vitest", "run",
+    ]);
+    assert_eq!(plan.code(), 0, "{}", plan.stderr());
+    assert!(
+        !plan.stderr().contains("measuring first"),
+        "{}",
+        plan.stderr()
+    );
+    assert_eq!(project.latest(), b1);
+
+    // The second round, on the unchanged checkout, with both runs restored:
+    // each job makes its own run from the newest, measuring nothing, and
+    // keeps every verdict both shards reached.
+    let (second_a, said) = job("1/2", &[], None);
+    let a2 = second_a["run"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{second_a}\n{said}"))
+        .to_owned();
+    assert!(
+        said.contains(&format!("[supercov] not measuring: the checkout is unchanged since run {b1}, so this shard saves its verdicts into run {a2}, made from it")) && !said.contains("measuring first"),
+        "{said}"
+    );
+    assert_eq!(
+        second_a["measurement"]["derivedFrom"],
+        b1.as_str(),
+        "{second_a}"
+    );
+    assert_eq!(evidence(&a2), evidence(&b1));
+    let (second_b, said) = job("2/2", &[], Some(a2.as_str()));
+    assert!(!said.contains("measuring first"), "{said}");
+    let b2 = second_b["run"].as_str().unwrap().to_owned();
+    let restored = [a1.as_str(), b1.as_str()];
+    assert!(
+        a2 != b2 && !restored.contains(&a2.as_str()) && !restored.contains(&b2.as_str()),
+        "{a1} {b1} {a2} {b2}"
+    );
+    let carried = |reply: &serde_json::Value| reply["carried"]["mutants"].as_u64().unwrap();
+    for (reply, run) in [(&second_a, &a2), (&second_b, &b2)] {
+        assert_eq!(
+            reply["carried"]["from"],
+            serde_json::json!([b1, a1]),
+            "{reply}"
+        );
+        assert_eq!(reply["carried"]["unchanged"], true, "{reply}");
+        assert_eq!(carried(reply), first.len() as u64, "{reply}");
+        // Kept as they were.
+        let now = reached(run);
+        assert!(
+            first
+                .iter()
+                .all(|(id, verdict)| now.get(id) == Some(verdict)),
+            "{reply}"
+        );
+    }
+    // What no pass reached is not a verdict to keep: a mutant the first
+    // job's run had no test for, which the second job's tests reach.
+    assert!(
+        second_a["carried"]["notKept"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|reason| reason == "notRunThen"),
+        "{second_a}"
+    );
+    assert!(
+        decided(&second_a) > 0 && decided(&second_b) > 0,
+        "{second_a}\n{second_b}"
+    );
+
+    // The two jobs' runs disagree on a verdict both kept from the first
+    // round: the first run the merge reads let it survive, the other
+    // killed it.
+    let verdicts_of = |run: &str| format!(".supercov/runs/{run}/strong-mutation.json");
+    let mut of_b2 =
+        serde_json::from_str::<serde_json::Value>(&project.read(&verdicts_of(&b2))).unwrap();
+    let mut of_a2 =
+        serde_json::from_str::<serde_json::Value>(&project.read(&verdicts_of(&a2))).unwrap();
+    let contested = of_b2["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(id, verdict)| {
+            id.starts_with("src/cart.js:")
+                && verdict["status"] == "killed"
+                && of_a2["mutants"][id.as_str()] == **verdict
+        })
+        .map(|(id, _)| id.clone())
+        .expect("a kill both jobs kept from the first round");
+    of_b2["mutants"][&contested]["status"] = serde_json::json!("survived");
+    project.write(&verdicts_of(&b2), &of_b2.to_string());
+    of_a2["mutants"][&contested]["status"] = serde_json::json!("killed");
+    project.write(&verdicts_of(&a2), &of_a2.to_string());
+
+    // The last job: the second round's runs replace the first's, and the
+    // merge keeps every verdict of both.
+    let merged = project.supercov(&["merge"]).succeeds();
+    contains_all(&merged, &["merging 2 runs", &a2, &b2]);
+    let merged_id = project.latest();
+    let kept =
+        serde_json::from_str::<serde_json::Value>(&project.read(&verdicts_of(&merged_id))).unwrap();
+    let kept = kept["mutants"].as_object().unwrap();
+    assert_eq!(kept[&contested]["status"], "killed", "{merged}");
+    let total = kept.len();
+    // Each run counts what was taken from it: b2, read first, the first
+    // round's verdicts and its share, a2 its share and the contested kill.
+    let from_b2 = carried(&second_b) - 1 + decided(&second_b);
+    let from_a2 = decided(&second_a) + 1;
+    let planned = total as u64 - from_b2 - from_a2;
+    assert!(
+        merged.contains(&format!(
+            "[supercov] {total} strong verdict(s) kept from runs {b2}, {a2}: {from_b2} from {b2}, {from_a2} from {a2}, {planned} the merged run's plan decides\n"
+        )),
+        "{merged}"
+    );
+    let left = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+        .json();
+    assert_eq!(left["summary"]["toRun"], 0, "{left}");
+
+    // A third round, from the second's runs alone: nothing to run, nothing
+    // measured, every verdict kept.
+    let second = reached(&a2)
+        .into_iter()
+        .chain(reached(&b2))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let (third, said) = job_at(
+        "1/2",
+        &[],
+        &[a1.as_str(), b1.as_str(), merged_id.as_str()],
+        false,
+    );
+    assert!(!said.contains("measuring first"), "{said}");
+    assert_eq!(third["summary"]["ran"], 0, "{third}");
+    assert_eq!(carried(&third), second.len() as u64, "{third}");
+    assert!(
+        third["carried"]["notKept"].as_object().unwrap().is_empty(),
+        "{third}"
+    );
+
+    // Copies of one run cannot be merged: said, with what to do instead.
+    let twice = project.supercov(&["merge", &b2, &b2]).exits(2);
+    assert!(
+        twice.contains(&format!(
+            "Each merged run must be unique: {b2} is named more than once. Copies of one run"
+        )) && twice.contains("Run that round again and merge its jobs' runs"),
+        "{twice}"
+    );
+}
+
+/// A measured run whose command failed only because a test failed (one
+/// timing-sensitive test, unrelated to the mutated code) is continued by a
+/// shard as one whose command passed is: the failed test is no candidate,
+/// so the shard saves into a run made from it, measures nothing, and says
+/// which test it leaves out. A run whose command failed for another reason
+/// is not continued: where no run can be, the shard measures and says what
+/// kept the newest one out, naming its failed tests.
+#[cfg(unix)]
+#[test]
+fn a_shard_continues_a_run_whose_command_failed_only_in_a_failed_test() {
+    let project = vitest_mutants_project("strong-shard-after-failed-test");
+    project.write(
+        "test/timing.test.js",
+        "import { expect, it } from \"vitest\";\nimport { shipping } from \"../src/cart.js\";\nit(\"settles in time\", () => {\n  expect(shipping(80)).toBe(0);\n  if (process.env.SLOW) throw new Error(\"took too long\");\n});\n",
+    );
+    project.commit("timing");
+    let command = ["npx", "vitest", "run"];
+    // The measuring job: its one slow test failed, and its command exited 1.
+    let mut args = vec!["mutants", "--file", "src/cart.js", "--budget", "30", "--"];
+    args.extend(command);
+    let measured = project.supercov_with(&args, &[("SLOW", "1")]);
+    assert_eq!(measured.code(), 2, "{}", measured.stderr());
+    let failing = project.latest();
+    let run_json = |run: &str| format!(".supercov/runs/{run}/run.json");
+    let metadata = |run: &str| {
+        serde_json::from_str::<serde_json::Value>(&project.read(&run_json(run))).unwrap()
+    };
+    assert_eq!(metadata(&failing)["testExitCode"], 1);
+    let shard = || {
+        let mut args = vec!["mutants", "--shard", "1/1", "--json", "--"];
+        args.extend(command);
+        let ran = project.supercov(&args);
+        (ran.json(), ran.stderr())
+    };
+    let slow = "settles in time";
+
+    // The shard continues it, measuring nothing, and says what it leaves out.
+    let (continued, said) = shard();
+    let own = continued["run"].as_str().unwrap().to_owned();
+    assert!(
+        said.contains(&format!(
+            "[supercov] not measuring: the checkout is unchanged since run {failing}, so this shard saves its verdicts into run {own}, made from it"
+        )) && said.contains(&format!(
+            "[supercov] continuing from run {failing}, whose command failed: 1 test failed while measuring and is not a candidate: {slow}"
+        )) && !said.contains("measuring first"),
+        "{said}"
+    );
+    assert_eq!(
+        continued["measurement"]["derivedFrom"],
+        failing.as_str(),
+        "{continued}"
+    );
+    assert_eq!(
+        continued["measurement"]["failedTests"],
+        serde_json::json!([slow]),
+        "{continued}"
+    );
+    // It keeps what the measuring job's pass decided, and no verdict is the
+    // failed test's.
+    assert_eq!(
+        continued["carried"]["from"],
+        serde_json::json!([failing]),
+        "{continued}"
+    );
+    assert!(
+        continued["summary"]["killed"].as_u64().unwrap() > 0,
+        "{continued}"
+    );
+    let verdicts = project.read(&format!(".supercov/runs/{own}/strong-mutation.json"));
+    assert!(
+        verdicts.contains("\"killed\"") && !verdicts.contains(slow),
+        "{verdicts}"
+    );
+
+    // A newer run whose command failed with no test failed (it failed
+    // outside its tests) is passed over for the one whose test failed.
+    project
+        .supercov_with(
+            &[&["--"][..], &command[..]].concat(),
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let broken = project.latest();
+    let mut edited = metadata(&broken);
+    edited["testExitCode"] = serde_json::json!(3);
+    project.write(&run_json(&broken), &edited.to_string());
+    let (again, said) = shard();
+    assert!(!said.contains("measuring first"), "{said}");
+    let from = again["measurement"]["derivedFrom"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        from != broken && metadata(&from)["testExitCode"] == 1,
+        "{again}"
+    );
+
+    // A run that ended without an exit status is not continued either:
+    // with none left, the shard measures, and says why, naming the newest
+    // such run's failed test.
+    let runs = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    for run in &runs {
+        let mut edited = metadata(run);
+        if edited["testExitCode"] == 1 {
+            edited["testExitCode"] = serde_json::Value::Null;
+            project.write(&run_json(run), &edited.to_string());
+        }
+    }
+    let newest = again["run"].as_str().unwrap();
+    let (_, said) = shard();
+    assert!(
+        said.contains(&format!(
+            "measuring first (a shard saves its verdicts into a run of its own, and no run of this checkout that recorded its mutants' values can be made into one: run {newest}'s command ended without an exit status (1 test failed while measuring and is not a candidate: {slow})): npx vitest run"
+        )),
+        "{said}"
+    );
+}
+
+/// A shard's run made from a restored one, on an unchanged checkout, that
+/// could not be made -- the store unlisted, its staging not created, the
+/// restored run's files unread or not copied, its record, its rename into
+/// place or the store's sync failing -- stops the command before any pass,
+/// saying from which run and why, and leaves no run behind.
+#[cfg(unix)]
+#[test]
+fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
+    let project = vitest_mutants_project("strong-derive-faults");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    project.commit("tax");
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let restored = project.latest();
+    for fault in [
+        "run-store-unlisted",
+        "fs.create_dir_all#lifecycle.derive-run.create-dir-all",
+        "fs.read_dir#lifecycle.derive-run.read-dir",
+        "fs.symlink_metadata#lifecycle.copy-regular-file",
+        "fs.create_dir_all#lifecycle.derive-run.atomic-write",
+        "fs.rename#lifecycle.derive-run.rename",
+        "fs.open#lifecycle.derive-run.sync-directory",
+    ] {
+        let ran = project.supercov_with(
+            &["mutants", "--shard", "1/2", "--", "npx", "vitest", "run"],
+            &[("SUPERCOV_TEST_FAULT", fault)],
+        );
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 2, "{fault}\n{said}");
+        assert!(
+            said.contains(&format!(
+                "[supercov] could not make this shard's run from {restored}: "
+            )) && !said.contains("strong pass"),
+            "{fault}\n{said}"
+        );
+        // Only the restored run and, past the rename, the one made.
+        let runs = std::fs::read_dir(project.root.join(".supercov/runs"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("run_"))
+            .count();
+        assert_eq!(
+            runs,
+            if fault.ends_with("sync-directory") {
+                2
+            } else {
+                1
+            },
+            "{fault}"
+        );
+        if runs == 2 {
+            let made = project.latest();
+            std::fs::remove_dir_all(project.root.join(".supercov/runs").join(made)).unwrap();
+        }
+    }
+    // A run made from it holds cart.js's verdicts; a shard of tax.js's
+    // mutants keeps none of them, and runs its own.
+    let job = |file: &str| {
+        project
+            .supercov(&[
+                "mutants", "--shard", "1/1", "--file", file, "--json", "--", "npx", "vitest", "run",
+            ])
+            .json()
+    };
+    let cart = job("src/cart.js");
+    assert!(cart["summary"]["ran"].as_u64() > Some(0), "{cart}");
+    let tax = job("src/tax.js");
+    assert!(
+        tax["carried"].is_null() && tax["summary"]["ran"].as_u64() > Some(0),
+        "{tax}"
+    );
+}
+
+/// Verdicts carried forward across commits are those a fresh pass reaches.
+/// A project measured and passed whole on its first commit, then one commit
+/// after another, each touching code, tests, helpers or configuration in its
+/// own way: at each, `supercov mutants` keeps what no change could move and
+/// runs the rest, and a pass from nothing on the same commit gives every
+/// mutant the same verdict. The trap: `refund`'s mutants survive while
+/// `audit`, which no test runs, returns what it is given, and a mutant that
+/// sends `refund(20)` into `audit` is killed once `audit` changes, though no
+/// test's record names `audit`. The listing says where a kept verdict was
+/// reached.
+#[cfg(unix)]
+#[test]
+fn verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
+    let project = vitest_mutants_project("strong-carried-forward");
+    project.write(
+        "vitest.config.js",
+        "export default { test: { include: [\"test/**/*.test.js\"] } };\n",
+    );
+    project.write(
+        "src/audit.js",
+        "export function audit(sum) {\n  return sum;\n}\n",
+    );
+    project.write(
+        "src/cart.js",
+        "import { audit } from \"./audit.js\";\n\nexport function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function refund(sum) {\n  if (sum > 1000) {\n    return audit(sum);\n  }\n  return sum - 1;\n}\n\nexport function wrap(text) {\n  return \"[\" + text + \"]\";\n}\n",
+    );
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n\nexport function round(value) {\n  return Math.round(value * 100) / 100;\n}\n",
+    );
+    project.write(
+        "src/format.js",
+        "export function price(cents) {\n  const whole = Math.floor(cents / 100);\n  const rest = cents % 100;\n  return whole + \".\" + String(rest).padStart(2, \"0\");\n}\n",
+    );
+    project.write(
+        "test/helpers.js",
+        "export function cents(value) {\n  return value;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label, refund } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n  it(\"refunds\", () => expect(refund(20)).toBeGreaterThan(0));\n});\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax, round } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\nit(\"rounds\", () => expect(round(1.234)).toBe(1.23));\n",
+    );
+    project.write(
+        "test/format.test.js",
+        "import { expect, it } from \"vitest\";\nimport { price } from \"../src/format.js\";\nimport { cents } from \"./helpers.js\";\nit(\"prices\", () => expect(price(cents(1234))).toBe(\"12.34\"));\n",
+    );
+    project.commit("fixture");
+    let pass = || {
+        project
+            .supercov(&["mutants", "--json", "--", "npx", "vitest", "run"])
+            .json()
+    };
+    let statuses = |run: &str| {
+        let saved = serde_json::from_str::<serde_json::Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // A pass from nothing: the store set aside while it runs.
+    let store = project.root.join(".supercov");
+    let aside = project.root.join(".supercov-aside");
+    let fresh = || {
+        std::fs::rename(&store, &aside).unwrap();
+        let reply = pass();
+        let verdicts = statuses(reply["run"].as_str().unwrap());
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::rename(&aside, &store).unwrap();
+        (reply, verdicts)
+    };
+    let first = pass();
+    let all = first["summary"]["ran"].as_u64().unwrap();
+    assert!(all > 20, "{first}");
+    // Each commit: what the carrying pass kept and ran, against a fresh
+    // pass's verdicts.
+    let mut kept_in_all = 0;
+    let mut ran_in_all = 0;
+    let mut step = |message: &str, kept: Option<u64>, why: &[&str]| {
+        project.commit(message);
+        let carried = pass();
+        let (whole, verdicts) = fresh();
+        assert_eq!(
+            statuses(carried["run"].as_str().unwrap()),
+            verdicts,
+            "{message}: {carried}"
+        );
+        let ran = carried["summary"]["ran"].as_u64().unwrap();
+        assert!(
+            ran < whole["summary"]["ran"].as_u64().unwrap() || kept.is_none(),
+            "{message}: {carried}"
+        );
+        if let Some(kept) = kept {
+            assert_eq!(carried["carried"]["mutants"], kept, "{message}: {carried}");
+        } else {
+            assert!(carried["carried"].is_null(), "{message}: {carried}");
+        }
+        let reasons = carried["carried"]["notKept"]
+            .as_object()
+            .map(|reasons| reasons.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(reasons, why, "{message}: {carried}");
+        kept_in_all += kept.unwrap_or(0);
+        ran_in_all += ran;
+        carried
+    };
+    // Comments and blank lines move every mutant of two files: each verdict
+    // is found by its code.
+    project.write(
+        "src/cart.js",
+        &format!(
+            "// The cart's rules.\n// Shipping is free from 50.\n\n{}",
+            project.read("src/cart.js")
+        ),
+    );
+    project.edit(
+        "src/tax.js",
+        "export function round",
+        "// Two decimals.\nexport function round",
+    );
+    let moved = step("comments", Some(25), &[]);
+    assert_eq!(moved["summary"]["ran"], 0, "{moved}");
+    // A test file: its tests' mutants run again, and the one a new test
+    // could kill.
+    project.write(
+        "test/tax.test.js",
+        &format!(
+            "{}it(\"no tax under 10\", () => expect(tax(5)).toBe(0));\n",
+            project.read("test/tax.test.js")
+        ),
+    );
+    step("a test", Some(18), &["newTest", "testReached"]);
+    // A helper one test file loads.
+    project.edit(
+        "test/helpers.js",
+        "  return value;",
+        "  return Number(value);",
+    );
+    step("a helper", Some(21), &["testReached"]);
+    // One function of a source: its own mutants and its tests' run again.
+    project.edit(
+        "src/tax.js",
+        "  return Math.round(value * 100) / 100;",
+        "  const scaled = value * 100;\n  return Math.round(scaled) / 100;",
+    );
+    step("a function", Some(18), &["fileChanged", "testReached"]);
+    // A function no test runs, which `refund`'s mutants lead the refund test
+    // into: they run again, and two of them are killed now.
+    project.edit("src/audit.js", "  return sum;", "  return -sum;");
+    let trap = step("audit", Some(13), &["loadsChanged"]);
+    let now = statuses(trap["run"].as_str().unwrap());
+    for id in [
+        "src/cart.js:18:7-18:17:ConditionalExpression:true",
+        "src/cart.js:18:7-18:17:EqualityOperator:<=",
+    ] {
+        assert_eq!(now[id], "killed", "{id}: {trap}");
+    }
+    // A function of the same file no test runs or names: every verdict is
+    // kept.
+    project.edit(
+        "src/cart.js",
+        "\"[\" + text + \"]\"",
+        "\"(\" + text + \")\"",
+    );
+    let unnamed = step("wrap", Some(26), &[]);
+    assert_eq!(unnamed["summary"]["ran"], 0, "{unnamed}");
+    // A test added to a file: its file's tests may run otherwise, and it may
+    // kill what survived.
+    project.edit(
+        "test/cart.test.js",
+        "  it(\"refunds\"",
+        "  it(\"ships 50 free\", () => expect(shipping(50)).toBe(0));\n  it(\"refunds\"",
+    );
+    step("a test added", Some(13), &["newTest", "testReached"]);
+    // The configuration: nothing is kept.
+    project.edit("vitest.config.js", "] } };", "], testTimeout: 5000 } };");
+    step("configuration", None, &[]);
+    assert!(
+        kept_in_all > ran_in_all,
+        "kept {kept_in_all}, ran {ran_in_all}"
+    );
+
+    // The summary and the listing say where a kept verdict was reached.
+    project.edit(
+        "test/helpers.js",
+        "  return Number(value);",
+        "  return value;",
+    );
+    project.commit("helper back");
+    let back = project.supercov(&["mutants", "--", "npx", "vitest", "run"]);
+    let said = back.stdout();
+    assert!(
+        said.contains(" verdict(s) kept from run ")
+            && said.contains(", which took ")
+            && said.contains(" test run(s) to reach: nothing they depend on changed\n"),
+        "{said}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js"])
+        .succeeds();
+    let configured = project.git(&["rev-parse", "--short=7", "HEAD~1"]);
+    assert!(
+        listed.contains(&format!("(commit {})", configured.trim())),
+        "{listed}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js:7"])
+        .succeeds();
+    assert!(
+        line.contains("  strong: killed  carried from run "),
+        "{line}"
+    );
+}
+
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -22569,6 +23788,131 @@ fn vitest_mutants_project(label: &str) -> Project {
     project.git(&["init", "-q"]);
     project.commit("mutants");
     project
+}
+
+/// A strong pass compiles each JavaScript mutant's file and the original:
+/// a mutant that compiles to the original's code is equivalent and is not
+/// run, and mutants that compile to the same code as one another run once,
+/// each taking that run's verdict. The pass, its summary, the listing and
+/// the markdown report say so in plain words.
+#[cfg(unix)]
+#[test]
+fn mutants_that_compile_to_the_same_code_are_decided_once_or_not_run() {
+    let project = vitest_mutants_project("strong-same-code");
+    project.write(
+        "src/notify.js",
+        "export function size(empty) {\n  if (empty) {\n    return \"none\";\n  }\n  return \"none\";\n}\n\nexport function notify(log) {\n  if (log) {\n    log(\"sent\");\n  }\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/notify.test.js",
+        "import { expect, it, vi } from \"vitest\";\nimport { size, notify } from \"../src/notify.js\";\nit(\"sizes\", () => {\n  expect(size(true)).toBe(\"none\");\n  expect(size(false)).toBe(\"none\");\n});\nit(\"notifies\", () => {\n  const log = vi.fn();\n  notify(log);\n  expect(log).toHaveBeenCalledWith(\"sent\");\n  expect(notify(undefined)).toBe(1);\n});\n",
+    );
+    project.commit("notify");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--json",
+        "--file",
+        "src/notify.js",
+    ]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    // `if (empty)` made `true` or `false`, or its block emptied: each
+    // returns "none" as the original does.
+    assert_eq!(
+        reply["sameCode"],
+        serde_json::json!({"equivalent": 3, "equivalentToRun": 3, "duplicates": 1,
+            "savedMs": reply["sameCode"]["savedMs"], "notCompiled": [], "tooLarge": []}),
+        "{reply}\n{said}"
+    );
+    assert!(
+        said.contains("[supercov] 3 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 3 of them would have run and did not\n")
+            && said.contains("[supercov] 1 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict\n"),
+        "{said}"
+    );
+    assert_eq!(reply["summary"]["equivalent"], 3, "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    // A pass over what has its verdicts compares nothing again, and says
+    // nothing of it; the summary still counts them.
+    let human = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--file",
+            "src/notify.js",
+        ])
+        .succeeds();
+    assert!(human.contains("  equivalent    3\n"), "{human}");
+    assert!(!human.contains("compiles to the same code"), "{human}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let strong = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {listed}"))["strong"]
+            .clone()
+    };
+    for id in [
+        "src/notify.js:2:7-2:12:ConditionalExpression:true",
+        "src/notify.js:2:7-2:12:ConditionalExpression:false",
+        "src/notify.js:2:14-4:4:BlockStatement:{}",
+    ] {
+        let verdict = strong(id);
+        assert_eq!(
+            (&verdict["status"], &verdict["reason"]),
+            (
+                &serde_json::json!("equivalent"),
+                &serde_json::json!("compiles-to-original")
+            ),
+            "{id}: {verdict}"
+        );
+    }
+    // The `if (log)` block emptied and its test made `false` are one
+    // program: the first runs, and the other takes its kill.
+    let kept = strong("src/notify.js:9:7-9:10:ConditionalExpression:false");
+    assert_eq!(kept["status"], "killed", "{kept}");
+    {
+        let id = "src/notify.js:9:12-11:4:BlockStatement:{}";
+        let verdict = strong(id);
+        assert_eq!(verdict["status"], "killed", "{id}: {verdict}");
+        assert_eq!(verdict["tests"], 0, "{id}: {verdict}");
+        assert_eq!(
+            verdict["reason"], "same-code-as:src/notify.js:9:7-9:10:ConditionalExpression:false",
+            "{id}: {verdict}"
+        );
+    }
+    // One line's mutants say why in plain words.
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/notify.js:2"])
+        .succeeds();
+    assert!(
+        line.contains("  strong: equivalent: compiles to the same code as the original: no test can tell it apart, so it was not run\n"),
+        "{line}"
+    );
+    // The comment folds them apart from the survivors.
+    let markdown = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/notify.js",
+            "--format",
+            "markdown",
+        ])
+        .succeeds();
+    assert!(
+        markdown.contains("<details><summary>3 mutants proven equivalent: no test can tell them from the original, so they are not run, not counted as survivors, and not in the score</summary>"),
+        "{markdown}"
+    );
 }
 
 /// `mutants test` over a Vitest run: each mutant the tests infected runs
@@ -22669,6 +24013,47 @@ fn job_runner_project(label: &str, module: &str, tests: &[(&str, &str)]) -> Proj
 
 /// Each mutant's strong verdict in a `mutants --json` reply, by id.
 #[cfg(unix)]
+/// Shards run one after the other against the same run, on one machine,
+/// decide every mutant between them, each its own share of the whole run:
+/// the second is not dealt from what the first left.
+#[test]
+fn shards_run_in_turn_against_one_run_decide_every_mutant() {
+    let project = Project::cart("shards-in-turn");
+    project.measure(&[]);
+    let planned = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+        .json();
+    let shares = ["1/2", "2/2"].map(|shard| {
+        project
+            .supercov(&[
+                "runs", "latest", "mutants", "test", "--shard", shard, "--plan", "--json",
+            ])
+            .json()["summary"]["mutants"]
+            .as_u64()
+            .unwrap()
+    });
+    for shard in ["1/2", "2/2"] {
+        let reply = project
+            .supercov(&[
+                "runs", "latest", "mutants", "test", "--shard", shard, "--json",
+            ])
+            .json();
+        assert_eq!(reply["summary"]["error"], 0, "{shard}: {reply}");
+    }
+    let statuses = strong_statuses(&project);
+    let total = planned["summary"]["mutants"].as_u64().unwrap();
+    assert_eq!(shares.iter().sum::<u64>(), total, "{planned}");
+    assert!(
+        statuses.values().all(|status| status != "-"),
+        "{statuses:?}"
+    );
+    // A third pass has nothing left to run.
+    let again = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(again["summary"]["ran"], 0, "{again}");
+}
+
 fn strong_statuses(project: &Project) -> std::collections::BTreeMap<String, String> {
     let listed = project
         .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
@@ -23227,16 +24612,6 @@ fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
     assert_eq!(reply["summary"]["survived"], 1, "{reply}");
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     // A pass that cannot switch the crate's mutants in ends, saying why.
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../supercov-engine/src/rust_strong.rs"),
-    )
-    .unwrap();
-    let line = source
-        .lines()
-        .position(|line| line.contains("crate::fault_fs::read(plan_path)"))
-        .unwrap()
-        + 1;
     std::fs::remove_file(
         project
             .root
@@ -23249,7 +24624,7 @@ fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
         &["runs", &rust, "mutants", "test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            &format!("fs.read#rust_strong.rs:{line}"),
+            "fs.read#rust-strong.switch-wasm.read",
         )],
     );
     assert_ne!(failed.code(), 0, "{}", failed.stderr());
@@ -23276,12 +24651,89 @@ fn inline_snapshots_and_faked_clocks_measure_and_mutate_as_the_suite_runs() {
     assert!(reply["summary"]["killed"].as_u64().unwrap() >= 8, "{reply}");
 }
 
+/// A server Playwright starts from its config's folder, which is not the
+/// project's root, and which imports `@playwright/test` itself (a mock
+/// server that drives a browser): it is given the same Playwright the tests
+/// are, found from the project's root, so it starts and the tests are
+/// recorded.
+#[cfg(unix)]
+#[test]
+fn a_web_server_started_in_the_config_s_folder_can_import_playwright() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            "await import('@playwright/test')",
+        ])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright is required"
+        );
+        eprintln!("skipping: Playwright is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("playwright-server-in-config-folder");
+    project.write(
+        "package.json",
+        r#"{ "name": "server-in-config-folder", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/greeting.js",
+        "export function greeting(name) {\n  return name ? `hello ${name}` : \"hello\";\n}\n",
+    );
+    // Started with the config's folder as its working directory.
+    project.write(
+        "tests/e2e/mocks/server.mjs",
+        "import http from \"node:http\";\nimport { chromium } from \"@playwright/test\";\nimport { greeting } from \"../../../src/greeting.js\";\nif (typeof chromium.launch !== \"function\") throw new Error(\"no chromium\");\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  response.end(greeting(url.searchParams.get(\"name\")));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "tests/e2e/playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"specs\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node mocks/server.mjs\", url: \"http://127.0.0.1:{port}/\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/e2e/specs/greeting.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"greets\", async ({ request }) => {\n  expect(await (await request.get(\"/?name=ada\")).text()).toBe(\"hello ada\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("server in the config's folder");
+    let measured = project.supercov(&[
+        "--",
+        "npx",
+        "playwright",
+        "test",
+        "-c",
+        "tests/e2e/playwright.config.js",
+    ]);
+    assert!(
+        !measured.stderr().contains("was not able to start"),
+        "{}",
+        measured.stderr()
+    );
+    measured.succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Total       1", "Passed      1"]);
+}
+
 /// `mutants test` over a Playwright run against a Node server: the workers
 /// of one Playwright invocation each test their own mutant against one
 /// server, the mutant carried with each attempt's requests and switched on
 /// in its pages; a mutant of the server's top level runs alone, with the
-/// server started with it switched on; canaries, repetitions with no
-/// mutant, pass.
+/// server started with it switched on; the controls, runs with no mutant
+/// after a kill, pass; and the pass says as it goes what it does.
 #[cfg(unix)]
 #[test]
 fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
@@ -23299,11 +24751,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         eprintln!("skipping: Playwright or Chromium is unavailable");
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright");
     project.write(
         "package.json",
@@ -23365,7 +24813,10 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         )
         .succeeds();
     let _ = std::fs::remove_file(&served);
-    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[roots[0], ("SUPERCOV_PROGRESS_INTERVAL_MS", "300")],
+    );
     let said = ran.stderr();
     let reply = ran.json();
     let listed = project
@@ -23445,23 +24896,25 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
             .is_some_and(|reason| reason.contains("Expected")),
         "{context}"
     );
-    // Killed by its likeliest killer alone: its other candidates never ran.
+    // Killed by the first test that took it: its other candidates never ran.
     let route = strong("server/app.js", 9, ":EqualityOperator:!==");
     assert_eq!(route["status"], "killed", "{context}");
     assert_eq!(route["tests"], 1, "{context}");
-    // A page-side mutant, killed by the page: its assertion waits 12 s, its
-    // own timeout, longer than its measured time and the project's expect
-    // timeout allow (1.5 x under a second, + 5 s, + 5 s); the test's own
-    // timeout (30 s) is the floor, so it is a kill, not a timeout.
+    // A page-side mutant the page shows: its assertion waits 12 s, its own
+    // timeout, longer than the attempt's limit (1.5 x its baseline + 5 s)
+    // on an idle machine and shorter on a loaded one. The attempt runs to
+    // the assertion's own end either way, and the assertion kills it: it
+    // was a timeout where the limit came first, and a kill where it did not.
     let lower = strong("public/page.js", 2, ":MethodExpression:toLowerCase");
     assert_eq!(lower["status"], "killed", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
     assert!(
-        lower["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("toHaveText")),
+        lower["reason"].as_str().is_some_and(
+            |reason| reason.contains("toHaveText") && reason.contains("Timeout: 12000ms")
+        ),
         "{context}"
     );
+    assert!(lower["durationMs"].as_u64() >= Some(12_000), "{context}");
     // Run, and no test tells: the log line. Its tests share the server's
     // fault switch with the @fault test, which the measured run never ran
     // beside them; neither does the strong pass, so nothing kills it.
@@ -23481,7 +24934,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
             .is_some_and(|reason| reason.contains("ran alone")),
         "{context}"
     );
-    // Canaries ran, and none failed.
+    // Controls ran after the kills, and none failed.
     let main = reply["passes"]
         .as_array()
         .unwrap()
@@ -23490,12 +24943,19 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         .unwrap_or_else(|| panic!("no main pass\n{context}"))
         .clone();
     assert!(
-        main["canaries"]["ran"].as_u64() > Some(0),
+        main["controls"]["ran"].as_u64() > Some(0),
         "{main}\n{context}"
     );
     assert_eq!(
-        main["canaries"]["failed"],
+        main["controls"]["failed"],
         serde_json::json!([]),
+        "{context}"
+    );
+    // The pass said what it did as it went: the round, its attempts and
+    // what ran.
+    assert!(
+        said.contains("[supercov]   main round, 1 invocation(s): ")
+            && said.contains(" mutant attempt(s), "),
         "{context}"
     );
     // The files the measured run ran one test at a time run so here too.
@@ -23523,6 +24983,2399 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     assert!(shared, "{log}\n{context}");
 }
 
+/// A module-level table a server builds as it starts, read by few of a
+/// browser suite's tests: each of its mutants has for candidates the tests
+/// that read its value, not every test of the run, and the plan says how
+/// far that narrowed them. A value read while the server's modules loaded,
+/// and a value no literal holds, keep every test. Soundness: the same suite
+/// measured without the probes plans every test for each, and every mutant
+/// that broad pass kills, the narrowed one kills, with the broad killer
+/// among its candidates.
+#[cfg(unix)]
+#[test]
+fn a_module_level_value_s_mutants_run_against_the_tests_that_read_it() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-module-values");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-module-values", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    let words = "export const WORDS = {\n  en: { hello: \"Hello\", bye: \"Bye\" },\n  fr: { hello: \"Bonjour\", bye: \"Au revoir\" },\n};\nconst LETTERS = { a: \"A\" };\nexport const COPIED = LETTERS.a;\nexport const PLAIN = \"plain\";\nexport function word(lang, key) {\n  return WORDS[lang][key];\n}\n";
+    project.write("server/words.js", words);
+    // A word the mutant took away is a 500 for the request that read it.
+    // Uncaught, it took the server down, and a test that reads no word,
+    // its request in flight on the other worker, failed first and was
+    // named the broad pass's killer.
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { word, COPIED, PLAIN } from \"../server/words.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/word\") {\n    try {\n      return response.end(word(url.searchParams.get(\"lang\"), url.searchParams.get(\"key\")));\n    } catch (error) {\n      response.statusCode = 500;\n      return response.end(String(error));\n    }\n  }\n  if (url.pathname === \"/copied\") return response.end(COPIED);\n  if (url.pathname === \"/plain\") return response.end(PLAIN);\n  response.end(\"other\");\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/words.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"greets in English\", async ({ request }) => {\n  expect(await (await request.get(\"/word?lang=en&key=hello\")).text()).toBe(\"Hello\");\n});\ntest(\"says goodbye in French\", async ({ request }) => {\n  expect(await (await request.get(\"/word?lang=fr&key=bye\")).text()).toBe(\"Au revoir\");\n});\n",
+    );
+    project.write(
+        "tests/other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nfor (const n of [1, 2, 3]) {\n  test(`answers otherwise ${n}`, async ({ request }) => {\n    expect(await (await request.get(\"/other\")).text()).toBe(\"other\");\n  });\n}\ntest(\"copies a letter\", async ({ request }) => {\n  expect(await (await request.get(\"/copied\")).text()).toBe(\"A\");\n});\ntest(\"answers plainly\", async ({ request }) => {\n  expect(await (await request.get(\"/plain\")).text()).toBe(\"plain\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("module-level values");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "server");
+    // Each run's plan, and its pass's verdicts, by mutant id.
+    let measure_and_test = |probes: bool| {
+        let mut env = vec![roots];
+        if probes {
+            env.push(("SUPERCOV_MUTANTS", "1"));
+        }
+        project
+            .supercov_with(&["--", "npx", "playwright", "test"], &env)
+            .succeeds();
+        let plan = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--plan", "--json"],
+                &[roots],
+            )
+            .json();
+        let text = project
+            .supercov_with(&["runs", "latest", "mutants", "test", "--plan"], &[roots])
+            .succeeds();
+        let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &[roots]);
+        let said = ran.stderr();
+        let reply = ran.json();
+        let verdicts = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap().to_owned(),
+                    mutant["strong"].clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (plan, text, reply, said, verdicts)
+    };
+    let (plan, text, reply, said, narrowed) = measure_and_test(true);
+    let context = format!("{plan}\n{reply}\n{said}");
+    let tests = plan["tests"].as_array().unwrap().clone();
+    // The mutant of `text` on its line, by its mutator.
+    let planned = |text: &str, mutator: &str| {
+        let (line, column) = words
+            .lines()
+            .enumerate()
+            .find_map(|(line, source)| source.find(text).map(|at| (line + 1, at + 1)))
+            .unwrap();
+        let prefix = format!(
+            "server/words.js:{line}:{column}-{line}:{}:{mutator}:",
+            column + text.len()
+        );
+        plan["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"].as_str().unwrap().starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{prefix}\n{context}"))
+            .clone()
+    };
+    let names = |mutant: &serde_json::Value| {
+        let mut names = mutant["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| {
+                tests[candidate["test"].as_u64().unwrap() as usize]["title"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    // The English greeting: the one test that read it, of the seven that
+    // ran with the server that loaded it.
+    let hello = planned("\"Hello\"", "StringLiteral");
+    assert_eq!(names(&hello), ["greets in English"], "{context}");
+    assert_eq!(
+        hello["narrowed"],
+        serde_json::json!({"from": 7, "to": 1}),
+        "{context}"
+    );
+    let goodbye = planned("\"Au revoir\"", "StringLiteral");
+    assert_eq!(names(&goodbye), ["says goodbye in French"], "{context}");
+    // Read by no test: decided without running it.
+    let bonjour = planned("\"Bonjour\"", "StringLiteral");
+    assert_eq!(bonjour["decided"], "survived", "{context}");
+    assert_eq!(bonjour["reason"], "no-test-read-it", "{context}");
+    // The English words replaced whole: what reads English.
+    let english = planned("{ hello: \"Hello\", bye: \"Bye\" }", "ObjectLiteral");
+    assert_eq!(names(&english), ["greets in English"], "{context}");
+    // Copied while the module loaded: every test stays.
+    let letter = planned("\"A\"", "StringLiteral");
+    assert_eq!(names(&letter).len(), 7, "{context}");
+    assert_eq!(letter["narrowed"]["escaped"], true, "{context}");
+    // No literal holds it: every test.
+    let plain = planned("\"plain\"", "StringLiteral");
+    assert_eq!(names(&plain).len(), 7, "{context}");
+    assert!(plain["narrowed"].is_null(), "{context}");
+    // The plan and the pass say so.
+    let summary = &plan["summary"]["narrowed"];
+    assert!(summary["mutants"].as_u64() > Some(3), "{context}");
+    assert_eq!(summary["escaped"], 2, "{context}");
+    assert!(
+        summary["candidatesAfter"].as_u64() < summary["candidatesBefore"].as_u64(),
+        "{context}"
+    );
+    assert!(
+        text.contains("module-level mutant(s) to the tests that read their value"),
+        "{text}"
+    );
+    assert_eq!(reply["summary"]["narrowed"], *summary, "{context}");
+    // The same suite measured without the probes: every module-level mutant
+    // has every test for a candidate.
+    let (broad_plan, _, broad_reply, broad_said, broad) = measure_and_test(false);
+    let broad_context = format!("{broad_plan}\n{broad_reply}\n{broad_said}\n{context}");
+    assert!(
+        broad_plan["summary"]["narrowed"].is_null(),
+        "{broad_context}"
+    );
+    let module_level = plan["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["function"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(module_level.len(), 10, "{broad_context}");
+    let mut killed = 0;
+    for mutant in module_level {
+        let id = mutant["id"].as_str().unwrap();
+        let (narrow, wide) = (&narrowed[id], &broad[id]);
+        if wide["status"] != "killed" {
+            continue;
+        }
+        killed += 1;
+        assert_eq!(narrow["status"], "killed", "{id}\n{broad_context}");
+        let killer = wide["killedBy"].as_str().unwrap();
+        let candidate = mutant["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| tests[candidate["test"].as_u64().unwrap() as usize]["id"] == killer);
+        assert!(
+            candidate,
+            "{id}: {killer} is not a candidate\n{broad_context}"
+        );
+    }
+    assert!(killed >= 6, "{broad_context}");
+}
+
+/// `mutants test` over Playwright tests that reach the server without a
+/// page navigation: a request context the test makes itself, the page's
+/// own `request`, Node's `fetch` and `http`, a routed request
+/// `route.fetch` sends again, and `curl` in a child process, which carries
+/// no test's name at all and is sent while another test runs. Each route's
+/// mutant is killed by the one test that reaches it; so is an arrow defined
+/// at the module's top level and mutated whole, whose switch the server
+/// evaluates once, as it loads the module, whatever mutant a request names.
+/// What survives only changes a log line, and is counted as such.
+#[cfg(unix)]
+#[test]
+fn mutants_test_kills_server_mutants_tests_reach_without_a_page() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    let curl = std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available || !curl {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright, Chromium and curl are required"
+        );
+        eprintln!("skipping: Playwright, Chromium or curl is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-outside-pages");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-outside-pages", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { routes } from \"../server/app.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  const route = routes[url.pathname.slice(1)];\n  if (!route) {\n    response.statusCode = 404;\n    return response.end(\"none\");\n  }\n  response.end(String(route(Number(url.searchParams.get(\"q\")))));\n}).listen(Number(process.env.PORT));\n",
+    );
+    // Each route's own arithmetic, and `context` an arrow at the module's
+    // top level; `fetch` logs what no test reads.
+    project.write(
+        "server/app.js",
+        "export const routes = {\n  context: (q) => q * 2,\n  page(q) {\n    return q * 3;\n  },\n  fetch(q) {\n    console.info(`fetched ${q}`, q + 1);\n    return q * 4;\n  },\n  http(q) {\n    return q * 5;\n  },\n  route(q) {\n    return q * 6;\n  },\n  curl(q) {\n    return q * 7;\n  },\n  ready() {\n    return \"ready\";\n  },\n};\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  fullyParallel: true,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/outside.spec.js",
+        concat!(
+            "import { test, expect, request as playwrightRequest } from \"@playwright/test\";\n",
+            "test(\"a request context of its own\", async ({ baseURL }) => {\n",
+            "  const api = await playwrightRequest.newContext({ baseURL });\n",
+            "  expect(await (await api.get(\"/context?q=5\")).text()).toBe(\"10\");\n",
+            "  await api.dispose();\n",
+            "});\n",
+            "test(\"the page's request\", async ({ page }) => {\n",
+            "  expect(await (await page.request.get(\"/page?q=5\")).text()).toBe(\"15\");\n",
+            "});\n",
+            "test(\"node fetch\", async ({ baseURL }) => {\n",
+            "  expect(await (await fetch(`${baseURL}/fetch?q=5`)).text()).toBe(\"20\");\n",
+            "});\n",
+            "test(\"node http\", async ({ baseURL }) => {\n",
+            "  const http = await import(\"node:http\");\n",
+            "  const body = await new Promise((done, fail) => http.get(`${baseURL}/http?q=5`, (response) => {\n",
+            "    let text = \"\";\n",
+            "    response.on(\"data\", (chunk) => (text += chunk)).on(\"end\", () => done(text));\n",
+            "  }).on(\"error\", fail));\n",
+            "  expect(body).toBe(\"25\");\n",
+            "});\n",
+            "test(\"a routed fetch\", async ({ page, baseURL }) => {\n",
+            "  await page.route(\"**/route*\", async (route) => {\n",
+            "    const response = await route.fetch();\n",
+            "    await route.fulfill({ response, body: `<p id=\"out\">${await response.text()}</p>`, contentType: \"text/html\" });\n",
+            "  });\n",
+            "  await page.goto(`${baseURL}/route?q=5`);\n",
+            "  await expect(page.locator(\"#out\")).toHaveText(\"30\");\n",
+            "});\n",
+        ),
+    );
+    // curl's request names no test, and the other worker's test runs all
+    // the while: it is no test's by time.
+    project.write(
+        "tests/child.spec.js",
+        concat!(
+            "import { test, expect } from \"@playwright/test\";\n",
+            "import { execFileSync } from \"node:child_process\";\n",
+            "test(\"a child process\", async ({ baseURL }) => {\n",
+            "  await new Promise((done) => setTimeout(done, 500));\n",
+            "  expect(execFileSync(\"curl\", [\"-s\", `${baseURL}/curl?q=5`], { encoding: \"utf8\" })).toBe(\"35\");\n",
+            "});\n",
+            "test(\"waits beside it\", async ({ request }) => {\n",
+            "  await new Promise((done) => setTimeout(done, 2000));\n",
+            "  expect(await (await request.get(\"/ready\")).text()).toBe(\"ready\");\n",
+            "});\n",
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("requests outside pages");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    let strong = |line: u32, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("server/app.js:{line}:")) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{line} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    // Each way a test reaches the server kills its route's mutant.
+    for (line, way) in [
+        (2, "a request context of its own"),
+        (4, "the page's request"),
+        (8, "Node's fetch"),
+        (11, "Node's http"),
+        (14, "a routed fetch"),
+        (17, "curl in a child process"),
+    ] {
+        let verdict = strong(line, ":ArithmeticOperator:/");
+        assert_eq!(verdict["status"], "killed", "{way}\n{context}");
+    }
+    // curl's request named no test, and was no test's by time: its mutant
+    // ran with the server started with it.
+    let child = strong(17, ":ArithmeticOperator:/");
+    assert!(
+        child["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("its code ran for a request that named no test")),
+        "{context}"
+    );
+    // The arrow, mutated whole: the server made it as it loaded the module.
+    let arrow = strong(2, ":ArrowFunction:undefined");
+    assert_eq!(arrow["status"], "killed", "{context}");
+    assert!(
+        arrow["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("it is a server module's top-level code")),
+        "{context}"
+    );
+    // What survives only changes the log line: counted on its own, and
+    // marked where survivors are listed.
+    assert_eq!(reply["summary"]["survived"], 2, "{context}");
+    assert_eq!(reply["survivors"]["logOnly"], 2, "{context}");
+    for logged in mutants
+        .iter()
+        .filter(|mutant| mutant["strong"]["status"] == "survived")
+    {
+        assert!(
+            logged["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("server/app.js:7:")
+                && logged["logOnly"] == true,
+            "{context}"
+        );
+    }
+    let survivors = project
+        .supercov(&["runs", "latest", "mutants", "--status", "survived"])
+        .succeeds();
+    contains_all(
+        &survivors,
+        &[
+            "2 survived (2 only change a log line)",
+            "(only changes a log line)",
+        ],
+    );
+}
+
+/// `mutants test` over a Playwright test whose `expect` starts late under a
+/// mutant and fails by its own timeout after the attempt's limit: the
+/// mutant sends the page's request through a route the test delays, so the
+/// assertion begins seconds after it does without the mutant, and its five
+/// seconds end past the limit its baseline gives. Stopped there, the mutant
+/// was a timeout on a loaded machine and a kill on an idle one; it is let run
+/// to the assertion's own end, and the assertion kills it, on any machine.
+#[cfg(unix)]
+#[test]
+fn mutants_test_lets_an_expect_that_starts_late_fail_by_its_own_timeout() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-late-expect");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-late-expect", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "server.mjs",
+        "import { createServer } from \"node:http\";\nimport { readFileSync } from \"node:fs\";\ncreateServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  try {\n    const body = readFileSync(new URL(`./public/${file}`, import.meta.url));\n    response.writeHead(200, { \"content-type\": file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\" });\n    response.end(body);\n  } catch {\n    response.writeHead(404);\n    response.end();\n  }\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><p id=\"out\">loading</p><script type=\"module\" src=\"/app.js\"></script>\n",
+    );
+    // The page asks for its mode's data; every mutant of the condition but
+    // one asks for the other mode's.
+    project.write(
+        "public/app.js",
+        "export function mode(count) {\n  return count > 2 ? \"good\" : \"bad\";\n}\nfetch(`/data?mode=${mode(5)}`).then((response) => response.text()).then((text) => {\n  document.getElementById(\"out\").textContent = text;\n});\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node server.mjs\", url: \"http://127.0.0.1:{port}/\", reuseExistingServer: false, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // The route answers the other mode three seconds late: the assertion
+    // starts then, and its five seconds end well past the limit a
+    // half-second baseline gives (1.5 × baseline + 5 s).
+    project.write(
+        "tests/late.spec.js",
+        concat!(
+            "import { test, expect } from \"@playwright/test\";\n",
+            "test(\"shows its mode's data\", async ({ page }) => {\n",
+            "  await page.route(\"**/data*\", async (route) => {\n",
+            "    const good = route.request().url().endsWith(\"mode=good\");\n",
+            "    if (!good) await new Promise((done) => setTimeout(done, 3000));\n",
+            "    await route.fulfill({ body: good ? \"good\" : \"other\", contentType: \"text/plain\" });\n",
+            "  });\n",
+            "  const answered = page.waitForResponse(\"**/data*\");\n",
+            "  await page.goto(\"/\");\n",
+            "  await answered;\n",
+            "  await expect(page.locator(\"#out\")).toHaveText(\"good\");\n",
+            "});\n",
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("an expect that starts late");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "public")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    let verdict = |prefix: &str, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(prefix) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{prefix} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    // Each mutant that sends the page to the other mode is killed by the
+    // assertion, which started three seconds late and failed by its own
+    // timeout past the limit: none of them is a timeout.
+    for (prefix, ending) in [
+        ("public/app.js:2:10-", ":ConditionalExpression:false"),
+        ("public/app.js:2:10-", ":EqualityOperator:<="),
+        ("public/app.js:2:22-", ":StringLiteral:empty"),
+    ] {
+        let late = verdict(prefix, ending);
+        assert_eq!(late["status"], "killed", "{ending}\n{context}");
+        assert!(
+            late["reason"].as_str().is_some_and(
+                |reason| reason.contains("toHaveText") && reason.contains("Timeout: 5000ms")
+            ),
+            "{ending}\n{context}"
+        );
+        assert!(
+            late["durationMs"].as_u64().unwrap() > 6_500,
+            "{ending}: it ran past its limit\n{context}"
+        );
+    }
+    // The address emptied: the page asks for nothing the test waits for,
+    // and a wait with no timeout of its own still ends at the limit.
+    let hang = verdict("public/app.js:4:7-", ":StringLiteral:empty");
+    assert_eq!(hang["status"], "timeout", "{context}");
+    assert_eq!(reply["summary"]["timeout"], 1, "{context}");
+}
+
+/// `mutants test` over Playwright tests that drive a pipeline through a cron
+/// route, which answers at once and leaves the work running: each test posts
+/// to the route, carrying its name as any request does, and polls until its
+/// job is done. A mock batch server, a process of its own, plays the provider
+/// the work sends batches to and polls. One kind of work is sent, polled and
+/// read after the response, in the request's own continuation; the other is
+/// read by one poller the process's first call started, so every later
+/// call's batch is finished in a continuation an earlier request began. Each
+/// way's mutant is killed by the tests that wait for it, though no request's
+/// mutant reaches the poller: such work runs with the server started with
+/// the mutant.
+#[cfg(unix)]
+#[test]
+fn mutants_test_kills_server_mutants_work_after_a_response_reaches() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let free = || common::free_port();
+    let (port, batches) = (free(), free());
+    let project = Project::empty("strong-playwright-after-response");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-after-response", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // The provider: a batch is in progress for its first two polls, then
+    // done, its output its input plus one.
+    project.write(
+        "support/batches.js",
+        "import http from \"node:http\";\nconst batches = new Map();\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/ready\") return response.end(\"ready\");\n  if (request.method === \"POST\" && path === \"/batches\") {\n    let body = \"\";\n    request.on(\"data\", (chunk) => (body += chunk)).on(\"end\", () => {\n      const id = `batch-${batches.size + 1}`;\n      batches.set(id, { input: JSON.parse(body).input, polls: 0 });\n      response.end(JSON.stringify({ id }));\n    });\n    return;\n  }\n  const batch = batches.get(path.slice(\"/batches/\".length));\n  batch.polls += 1;\n  response.end(JSON.stringify(batch.polls > 2 ? { status: \"completed\", output: batch.input + 1 } : { status: \"in_progress\" }));\n}).listen(Number(process.env.BATCH_PORT));\n",
+    );
+    // The cron route answers before the work is done.
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { pipeline } from \"./pipeline.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  const job = url.searchParams.get(\"job\");\n  if (url.pathname === \"/ready\") return response.end(\"ready\");\n  if (request.method === \"POST\" && url.pathname === \"/cron\") {\n    pipeline[url.searchParams.get(\"how\")](job, Number(url.searchParams.get(\"q\")));\n    response.statusCode = 202;\n    return response.end(\"accepted\");\n  }\n  response.end(String(pipeline.result(job) ?? \"pending\"));\n}).listen(Number(process.env.PORT));\n",
+    );
+    // The pipeline: the work after the response, and one poller for the
+    // process, which the first call starts.
+    project.write(
+        "support/pipeline.js",
+        "import { afterResponse, byPoller } from \"../server/finish.js\";\nconst provider = `http://127.0.0.1:${process.env.BATCH_PORT}/batches`;\nconst results = new Map();\nconst waiting = new Map();\nlet poller;\nconst sleep = (ms) => new Promise((done) => setTimeout(done, ms));\nasync function submit(input) {\n  const response = await fetch(provider, { method: \"POST\", body: JSON.stringify({ input }) });\n  return (await response.json()).id;\n}\nasync function retrieve(id) {\n  return (await fetch(`${provider}/${id}`)).json();\n}\nasync function poll() {\n  for (;;) {\n    for (const [job, submitted] of waiting) {\n      const batch = await retrieve(await submitted);\n      if (batch.status === \"completed\") {\n        waiting.delete(job);\n        results.set(job, byPoller(batch.output));\n      }\n    }\n    await sleep(20);\n  }\n}\nexport const pipeline = {\n  afterResponse(job, q) {\n    void (async () => {\n      const id = await submit(q);\n      for (;;) {\n        const batch = await retrieve(id);\n        if (batch.status === \"completed\") return results.set(job, afterResponse(batch.output));\n        await sleep(20);\n      }\n    })();\n  },\n  nextCall(job, q) {\n    waiting.set(job, submit(q));\n    poller ??= poll();\n  },\n  result(job) {\n    return results.get(job);\n  },\n};\n",
+    );
+    // What each way does with a finished batch: the code under test.
+    project.write(
+        "server/finish.js",
+        "export function afterResponse(output) {\n  return output * 2;\n}\nexport function byPoller(output) {\n  return output * 3;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: [\n    {{ command: \"node support/batches.js\", url: \"http://127.0.0.1:{batches}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ BATCH_PORT: \"{batches}\" }} }},\n    {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", BATCH_PORT: \"{batches}\" }} }},\n  ],\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/pipeline.spec.js",
+        concat!(
+            "import { test, expect } from \"@playwright/test\";\n",
+            "async function run(request, how, job, q) {\n",
+            "  const posted = await request.post(`/cron?how=${how}&job=${job}&q=${q}`);\n",
+            "  expect(posted.status()).toBe(202);\n",
+            "  await expect.poll(async () => (await request.get(`/status?job=${job}`)).text(), { timeout: 5000 }).not.toBe(\"pending\");\n",
+            "  return (await request.get(`/status?job=${job}`)).text();\n",
+            "}\n",
+            "test(\"a job read after the response\", async ({ request }) => {\n",
+            "  expect(await run(request, \"afterResponse\", `after-${Math.random()}`, 5)).toBe(\"12\");\n",
+            "});\n",
+            "test(\"the first job the poller reads\", async ({ request }) => {\n",
+            "  expect(await run(request, \"nextCall\", `first-${Math.random()}`, 5)).toBe(\"18\");\n",
+            "});\n",
+            "test(\"a later job the same poller reads\", async ({ request }) => {\n",
+            "  expect(await run(request, \"nextCall\", `later-${Math.random()}`, 6)).toBe(\"21\");\n",
+            "});\n",
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a pipeline a cron route leaves running");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    let strong = |line: u32| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("server/finish.js:{line}:"))
+                    && id.ends_with(":ArithmeticOperator:/")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{line}\n{context}");
+        found[0]["strong"].clone()
+    };
+    // Read after the response, and by the poller an earlier call started:
+    // each is killed, with the server started with it, since its work went
+    // on after its request was answered.
+    for (line, way) in [(2, "after the response"), (5, "by the poller")] {
+        let verdict = strong(line);
+        assert_eq!(verdict["status"], "killed", "{way}\n{context}");
+        assert!(
+            verdict["reason"].as_str().is_some_and(|reason| reason.contains(
+                "ran alone, with the server started with it switched on: its code ran in server work no request was waiting for"
+            )),
+            "{way}\n{context}"
+        );
+    }
+}
+
+/// `mutants test` over a Playwright test whose server hands its work to one
+/// worker process, which the first request that needs it starts: the worker
+/// carries that request's attempt, as a child process does, and does every
+/// later request's work as that attempt's. In a strong pass that attempt is
+/// the test's first run, with no mutant, so no attempt's mutant reaches the
+/// worker, and every candidate passes. Such a survivor, which its candidates
+/// reached when measured and none of its attempts ran, is in doubt: it runs
+/// again alone, with the server started with it switched on, and is killed,
+/// and the pass says so.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_alone_a_survivor_no_attempt_ran() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-unreached");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-unreached", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { fork } from \"node:child_process\";\nlet worker;\nconst waiting = new Map();\nlet next = 0;\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/ready\") return response.end(\"ready\");\n  // One worker for the process, started by the first request that needs it.\n  if (!worker) {\n    worker = fork(new URL(\"./worker.js\", import.meta.url));\n    worker.on(\"message\", ({ id, value }) => waiting.get(id)(value));\n  }\n  const id = next++;\n  waiting.set(id, (value) => response.end(String(value)));\n  worker.send({ id, q: Number(url.searchParams.get(\"q\")) });\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "support/worker.js",
+        "import { double } from \"../server/compute.js\";\nprocess.on(\"message\", ({ id, q }) => process.send({ id, value: double(q) }));\n",
+    );
+    project.write(
+        "server/compute.js",
+        "export function double(q) {\n  return q * 2;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: [{{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }}],\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/compute.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"the worker doubles\", async ({ request }) => {\n  expect(await (await request.get(\"/work?q=5\")).text()).toBe(\"10\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a server that hands its work to one worker");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let context = format!("{}\n{said}", serde_json::to_string_pretty(mutants).unwrap());
+    let divided = mutants
+        .iter()
+        .find(|mutant| {
+            mutant["id"]
+                .as_str()
+                .unwrap()
+                .ends_with(":ArithmeticOperator:/")
+        })
+        .unwrap_or_else(|| panic!("{context}"));
+    assert_eq!(divided["strong"]["status"], "killed", "{context}");
+    assert!(
+        divided["strong"]["reason"].as_str().is_some_and(|reason| reason.contains(
+            "ran alone, with the server started with it switched on: its candidates passed on the shared server, yet no attempt of theirs ran it there"
+        )),
+        "{context}"
+    );
+    contains_all(
+        &said,
+        &[
+            "[supercov] warning: 2 mutant(s) lived through every candidate test on the shared server, though no attempt ran them there",
+            "Each runs again alone, with the server started with it switched on: server/compute.js:",
+            "[supercov] warning: 1 mutant(s) the shared server let live were killed alone, with the server started with them switched on; their verdicts are the kills: server/compute.js:2:",
+        ],
+    );
+}
+
+/// A survivor of the shared server that no attempt ran, sent alone, whose
+/// round alone the budget stops before it runs: the passes its candidates
+/// made on the shared server passed without it, so the pass leaves it with
+/// no verdict and no progress, and the next pass runs it on the shared server
+/// and then alone, where it is killed. Before, those passes were kept as its
+/// progress, and the next pass, finding every candidate passed, called it
+/// `survived` without running it.
+#[cfg(unix)]
+#[test]
+fn a_survivor_no_attempt_ran_keeps_no_progress_when_the_budget_stops_it_alone() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-unreached-budget");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-unreached-budget", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(
+        ".gitignore",
+        "node_modules\n.supercov\nsupport/slow-alone\n",
+    );
+    // As in `mutants_test_runs_alone_a_survivor_no_attempt_ran`, the worker
+    // the first request starts carries that request's attempt. And a server
+    // started with a mutant switched on is slow to be ready while
+    // `support/slow-alone` is there: the round alone outlasts the budget.
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { existsSync } from \"node:fs\";\nimport { fork } from \"node:child_process\";\nconst slow = Boolean(process.env.SUPERCOV_ACTIVE_MUTANT) && existsSync(new URL(\"./slow-alone\", import.meta.url));\nlet worker;\nconst waiting = new Map();\nlet next = 0;\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/ready\") {\n    if (slow) response.statusCode = 503;\n    return response.end(slow ? \"starting\" : \"ready\");\n  }\n  if (!worker) {\n    worker = fork(new URL(\"./worker.js\", import.meta.url));\n    worker.on(\"message\", ({ id, value }) => waiting.get(id)(value));\n  }\n  const id = next++;\n  waiting.set(id, (value) => response.end(String(value)));\n  worker.send({ id, q: Number(url.searchParams.get(\"q\")) });\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "support/worker.js",
+        "import { double } from \"../server/compute.js\";\nprocess.on(\"message\", ({ id, q }) => process.send({ id, value: double(q) }));\n",
+    );
+    project.write(
+        "server/compute.js",
+        "export function double(q) {\n  return q * 2;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: [{{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 600000, env: {{ PORT: \"{port}\" }} }}],\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/compute.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"the worker doubles\", async ({ request }) => {\n  expect(await (await request.get(\"/work?q=5\")).text()).toBe(\"10\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a server that hands its work to one worker");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let run = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let divided_id = || -> (String, serde_json::Value) {
+        let listed = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json();
+        let divided = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(":ArithmeticOperator:/")
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("{listed}"));
+        (divided["id"].as_str().unwrap().to_owned(), divided)
+    };
+    let saved = || -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(
+                project
+                    .root
+                    .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+            )
+            .unwrap_or_else(|_| "{}".into()),
+        )
+        .unwrap()
+    };
+    // The budget ends while the round alone waits for its server.
+    project.write("support/slow-alone", "");
+    let stopped = project.supercov_with(
+        &[
+            "runs", "latest", "mutants", "test", "--json", "--budget", "60",
+        ],
+        &[roots[0], ("SUPERCOV_VERBOSE", "1")],
+    );
+    let said = stopped.stderr();
+    let (id, divided) = divided_id();
+    let context = format!("{divided}\n{}\n{said}", saved());
+    contains_all(
+        &said,
+        &[
+            "[supercov] warning: 2 mutant(s) lived through every candidate test on the shared server, though no attempt ran them there",
+            "mutant(s), alone",
+            "budget spent, ",
+        ],
+    );
+    // No verdict, and nothing passed with it.
+    assert!(saved()["mutants"].get(&id).is_none(), "{context}");
+    assert!(saved()["progress"].get(&id).is_none(), "{context}");
+    assert_ne!(divided["strong"]["status"], "survived", "{context}");
+    // The next pass runs it on the shared server, then alone, where it is
+    // killed.
+    std::fs::remove_file(project.root.join("support/slow-alone")).unwrap();
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let (_, divided) = divided_id();
+    let context = format!("{divided}\n{}\n{said}", saved());
+    assert!(
+        !said.contains("passed every candidate in earlier passes"),
+        "{context}"
+    );
+    assert_eq!(divided["strong"]["status"], "killed", "{context}");
+    assert!(
+        divided["strong"]["reason"].as_str().is_some_and(|reason| reason.contains(
+            "ran alone, with the server started with it switched on: its candidates passed on the shared server, yet no attempt of theirs ran it there"
+        )),
+        "{context}"
+    );
+}
+
+/// A Playwright mutant attempt is stopped at its time limit, its test's
+/// baseline x 1.5 + 5 s, or sooner where it stalls: a mutant that keeps an
+/// element from appearing ends as a `timeout` once the attempt is past every
+/// passing run of its test (baseline x 1.5 + 1 s) and waits, its page quiet,
+/// on a click with no timeout of its own (the test asks for 90 s) or an
+/// `expect` given 60 s; a slow test's window grows with its baseline, so its
+/// survivor, woken by a timer in the page, lives; an `expect` whose own
+/// timeout ends it before the limit still kills, though after the window; a
+/// page that keeps sending requests is not stalled, and its timeout runs to
+/// the limit; a page that polls on a timer every 4 s, quiet between polls,
+/// is not stalled either while its next poll is due before the limit: the
+/// mutant that leaves its first poll unanswered lives through the test, which
+/// a later poll satisfies, and the one that answers no poll stalls once no
+/// poll is due before the limit; a page with a request its server has not
+/// answered is never stalled, and the mutant that keeps it from saying done
+/// runs to its limit, a timeout confirmed there; and the summary and the
+/// progress lines say so.
+#[cfg(unix)]
+#[test]
+fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-limit");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-limit", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  if (path === \"/hang\") return;\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><body><script src=\"/ready.js\"></script></body>\n",
+    );
+    project.write(
+        "public/ready.js",
+        "function ready(flag) {\n  return flag === \"go\";\n}\nif (ready(\"go\")) {\n  const button = document.createElement(\"button\");\n  button.id = \"ready\";\n  document.body.append(button);\n}\n",
+    );
+    project.write(
+        "public/slow.html",
+        "<!doctype html><body><p id=\"slow\"></p><script src=\"/slow.js\"></script></body>\n",
+    );
+    project.write(
+        "public/slow.js",
+        "const box = document.getElementById(\"slow\");\nsetTimeout(() => {\n  box.textContent = \"Done\";\n  console.log(\"shown\");\n}, 3000);\n",
+    );
+    project.write(
+        "public/note.html",
+        "<!doctype html><body><script src=\"/note.js\"></script></body>\n",
+    );
+    project.write(
+        "public/note.js",
+        "function shown(state) {\n  return state === \"saved\";\n}\nif (shown(\"saved\")) {\n  const note = document.createElement(\"p\");\n  note.id = \"note\";\n  note.textContent = \"Saved\";\n  document.body.append(note);\n}\n",
+    );
+    project.write(
+        "public/poll.html",
+        "<!doctype html><body><p id=\"poll\"></p><script src=\"/poll.js\"></script></body>\n",
+    );
+    project.write(
+        "public/poll.js",
+        "const status = document.getElementById(\"poll\");\nlet count = 0;\nasync function tick() {\n  await fetch(\"/health\");\n  count += 1;\n  if (count === 3) status.textContent = \"Done\";\n  else setTimeout(tick, 150);\n}\ntick();\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // Polls its server soon after it loads, then every 4 s: the first poll
+    // says ready, unless a mutant makes it wait for the next.
+    project.write(
+        "public/later.html",
+        "<!doctype html><body><script src=\"/later.js\"></script></body>\n",
+    );
+    project.write(
+        "public/later.js",
+        "let count = 0;\nfunction answered(polls) {\n  return polls >= 1;\n}\nfunction poll() {\n  count += 1;\n  fetch(`/health?ready=${answered(count) ? 1 : 0}`);\n}\nsetTimeout(poll, 300);\nsetInterval(poll, 4000);\n",
+    );
+    // Asks its server for what it never answers, and says done.
+    project.write(
+        "public/hang.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/hang.js\"></script></body>\n",
+    );
+    project.write(
+        "public/hang.js",
+        "function ready(state) {\n  return state === \"ok\";\n}\nfetch(\"/hang\");\ndocument.getElementById(\"state\").textContent = ready(\"ok\") ? \"Done\" : \"Waiting\";\n",
+    );
+    project.write(
+        "tests/hang.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits for done\", async ({ page }) => {\n  await page.goto(\"/hang.html\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
+    );
+    // Waits for the poll that says ready, with no timeout of its own.
+    project.write(
+        "tests/later.spec.js",
+        "import { test } from \"@playwright/test\";\ntest(\"waits for the ready poll\", async ({ page }) => {\n  await page.goto(\"/later.html\");\n  await page.waitForResponse((response) => response.url().includes(\"ready=1\"));\n});\n",
+    );
+    project.write(
+        "tests/ready.spec.js",
+        "import { test } from \"@playwright/test\";\ntest(\"clicks when ready\", async ({ page }) => {\n  test.setTimeout(90_000);\n  await page.goto(\"/\");\n  await page.locator(\"#ready\").click();\n});\n",
+    );
+    project.write(
+        "tests/slow.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits for the slow text\", async ({ page }) => {\n  await page.goto(\"/slow.html\");\n  await expect(page.locator(\"#slow\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
+    );
+    // An `expect` that gives up after 4 s, sooner than the limit (6.5 s at
+    // least) and later than the window (2.5 s at least) of a quick test.
+    project.write(
+        "tests/note.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"shows the note\", async ({ page }) => {\n  await page.goto(\"/note.html\");\n  await expect(page.locator(\"#note\")).toBeVisible({ timeout: 4_000 });\n});\n",
+    );
+    project.write(
+        "tests/poll.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits for the polled status\", async ({ page }) => {\n  await page.goto(\"/poll.html\");\n  await expect(page.locator(\"#poll\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright limit");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "public")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        // The command's output too, with each attempt's line.
+        &[
+            roots[0],
+            ("SUPERCOV_PROGRESS_INTERVAL_MS", "300"),
+            ("SUPERCOV_VERBOSE", "1"),
+        ],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let context = format!(
+        "{reply}\n{}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let strong = |file: &str, line: u32, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("{file}:{line}:")) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{file}:{line} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    let duration = |verdict: &serde_json::Value| verdict["durationMs"].as_u64().unwrap_or(0);
+    let reason = |verdict: &serde_json::Value| verdict["reason"].as_str().unwrap_or("").to_owned();
+    // The limit a verdict's reason states, in ms: `... of its 6.9 s time
+    // limit` or `... time limit of 6.9 s`.
+    let limit_ms = |verdict: &serde_json::Value| {
+        let said = reason(verdict);
+        let seconds = said
+            .split_once("of its ")
+            .or_else(|| said.split_once("time limit of "))
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .and_then(|number| number.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("no limit in {said}\n{context}"));
+        (seconds * 1000.0) as u64
+    };
+    // The button never appears: the click, with no timeout of its own, waits
+    // on a quiet page past every passing run of its test, and the attempt
+    // ends there, 4 s before its limit (1.5 x a baseline of a second or two
+    // + 5 s), not at the 90 s the test asked for nor Playwright's 30 s.
+    let never = strong("public/ready.js", 2, ":EqualityOperator:!==");
+    assert_eq!(never["status"], "timeout", "{context}");
+    assert!(
+        reason(&never).starts_with("stopped at ")
+            && reason(&never).contains("1.5 × its ")
+            && reason(&never).contains("waiting on Locator.click (#ready)"),
+        "{context}"
+    );
+    assert!(
+        (2_000..limit_ms(&never) - 3_000).contains(&duration(&never)),
+        "{never}\n{context}"
+    );
+    // The slow test's baseline is over 3 s, so is its window: the mutant
+    // that keeps its text from showing waits that long on an `expect` given
+    // 60 s, and ends there, before its limit.
+    let blank = strong("public/slow.js", 3, ":StringLiteral:empty");
+    assert_eq!(blank["status"], "timeout", "{context}");
+    assert!(
+        reason(&blank).starts_with("stopped at ")
+            && reason(&blank).contains("waiting on expect(#slow) to.have.text"),
+        "{context}"
+    );
+    assert!(
+        (6_000..limit_ms(&blank) - 3_000).contains(&duration(&blank)),
+        "{blank}\n{context}"
+    );
+    // Slow but passing, woken by a timer in a quiet page: no timeout.
+    let logged = strong("public/slow.js", 4, ":StringLiteral:empty");
+    assert_eq!(logged["status"], "survived", "{context}");
+    // The note never shows: its `expect` gives up after 4 s, past the
+    // test's window but before its limit, and the test fails: a kill, as
+    // without the window.
+    let hidden = strong("public/note.js", 2, ":EqualityOperator:!==");
+    assert_eq!(hidden["status"], "killed", "{context}");
+    assert!(
+        reason(&hidden).contains("toBeVisible"),
+        "{hidden}\n{context}"
+    );
+    assert!(duration(&hidden) >= 4_000, "{hidden}\n{context}");
+    // A page that keeps asking its server is busy, not stalled: the mutant
+    // that keeps it from ever being done runs to its limit.
+    let busy = strong("public/poll.js", 6, ":ConditionalExpression:false");
+    assert_eq!(busy["status"], "timeout", "{context}");
+    assert!(
+        reason(&busy).starts_with("ran past its time limit of ")
+            && reason(&busy).contains("waiting on expect(#poll) to.have.text"),
+        "{busy}\n{context}"
+    );
+    assert!(
+        duration(&busy) + 1_000 >= limit_ms(&busy),
+        "{busy}\n{context}"
+    );
+    // The first poll left unanswered: the page's next poll, 4 s later,
+    // answers the wait before the limit, though the page was quiet past the
+    // window. It lives.
+    let later = strong("public/later.js", 3, ":EqualityOperator:>");
+    assert_eq!(later["status"], "survived", "{later}\n{context}");
+    // No poll ever answers: a timeout. Where no poll is due before the limit
+    // (a quick baseline's limit falls before the second interval poll), it
+    // stops there; where one is (a slow machine's longer baseline), it runs
+    // to the limit and says so.
+    let unanswered = strong("public/later.js", 3, ":ConditionalExpression:false");
+    assert_eq!(unanswered["status"], "timeout", "{context}");
+    assert!(
+        reason(&unanswered).contains("waiting on Page.waitForResponse at tests/later.spec.js:")
+            && ((reason(&unanswered).starts_with("stopped at ")
+                && reason(&unanswered)
+                    .contains("its pages quiet with nothing due before the limit"))
+                || (reason(&unanswered).starts_with("ran past its time limit of ")
+                    && reason(&unanswered).contains("with a timer due in ")
+                    && reason(&unanswered).contains("so it ran to its limit to confirm"))),
+        "{unanswered}\n{context}"
+    );
+    // A request still unanswered could end the wait: never stalled, its
+    // timeout runs to the limit, and says so.
+    let hanging = strong("public/hang.js", 2, ":ConditionalExpression:false");
+    assert_eq!(hanging["status"], "timeout", "{context}");
+    assert!(
+        reason(&hanging).starts_with("ran past its time limit of ")
+            && reason(&hanging).contains("waiting on expect(#state) to.have.text at tests/hang.spec.js:")
+            && reason(&hanging).contains(", with 1 unanswered request(s) that could still end the wait, so it ran to its limit to confirm"),
+        "{hanging}\n{context}"
+    );
+    assert!(
+        duration(&hanging) + 1_000 >= limit_ms(&hanging),
+        "{hanging}\n{context}"
+    );
+    assert!(
+        reply["timeLimit"]["confirmedAtLimit"].as_u64() >= Some(1),
+        "{context}"
+    );
+    assert!(
+        said.contains("past a stall at ")
+            && said.contains("with 1 unanswered request(s) that could still end the wait"),
+        "{context}"
+    );
+    eprintln!(
+        "stalled: {} ms of {} ms, {} ms of {} ms; at the limit: {} ms of {} ms",
+        duration(&never),
+        limit_ms(&never),
+        duration(&blank),
+        limit_ms(&blank),
+        duration(&busy),
+        limit_ms(&busy)
+    );
+    // The answer counts the timeouts at the limit and those that stalled,
+    // and says the limit.
+    assert_eq!(reply["timeLimit"]["factor"], 1.5, "{context}");
+    assert!(
+        reply["timeLimit"]["timedOut"].as_u64() >= Some(1)
+            && reply["timeLimit"]["stalled"].as_u64() >= Some(2),
+        "{context}"
+    );
+    // While an attempt waits near its limit, the progress lines say so;
+    // each attempt's line says what a timeout waited on.
+    assert!(said.contains(", near its time limit: "), "{context}");
+    assert!(
+        said.contains("stalled before its ")
+            && said.contains(", waiting on Locator.click (#ready) at tests/ready.spec.js:"),
+        "{context}"
+    );
+    // The factor is the pass's to set: a factor no number is refused.
+    let refused = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[roots[0], ("SUPERCOV_STRONG_TIMEOUT_FACTOR", "slow")],
+    );
+    assert!(
+        refused
+            .stderr()
+            .contains("SUPERCOV_STRONG_TIMEOUT_FACTOR takes a number above 0, not slow"),
+        "{}",
+        refused.stderr()
+    );
+}
+
+/// A Playwright mutant tries its cheap candidates before its slow one: a
+/// test that polls for seconds until the page says it is active is declared
+/// first in its file, beside three fast tests that each read one text. The
+/// mutants a fast test kills are decided by it, in under a second each, and
+/// the slow test never runs them; it runs only the mutants every fast test
+/// let live, and a survivor runs all four of its candidates. While it runs,
+/// the progress lines name the slow test as the costliest left and say the
+/// time its round has left.
+#[cfg(unix)]
+#[test]
+fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-order");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-order", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><body><p id=\"first\"></p><p id=\"second\"></p><p id=\"third\"></p><p id=\"state\"></p><script src=\"/app.js\"></script></body>\n",
+    );
+    project.write(
+        "public/app.js",
+        "function show(id, text) {\n  document.getElementById(id).textContent = text;\n}\nshow(\"first\", \"First\");\nshow(\"second\", \"Second\");\nshow(\"third\", \"Third\");\nconsole.log(\"loaded\");\nsetTimeout(() => show(\"state\", \"Active\"), 3000);\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // The slow test first: a pass that ran a file's tests in their order,
+    // each test all its mutants, would run every mutant with it first.
+    project.write(
+        "tests/app.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits until it is active\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\", { timeout: 60_000 });\n});\nfor (const [id, text] of [[\"first\", \"First\"], [\"second\", \"Second\"], [\"third\", \"Third\"]]) {\n  test(`shows the ${id}`, async ({ page }) => {\n    await page.goto(\"/\");\n    expect(await page.locator(`#${id}`).textContent()).toBe(text);\n  });\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright order");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &[roots],
+        )
+        .json();
+    let tests = plan["tests"].as_array().unwrap();
+    let slow = tests
+        .iter()
+        .find(|test| test["title"] == "waits until it is active")
+        .unwrap_or_else(|| panic!("no slow test in {plan}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The command's output, with each attempt's line: SUPERCOV_VERBOSE.
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[
+            roots,
+            ("SUPERCOV_PROGRESS_INTERVAL_MS", "300"),
+            ("SUPERCOV_VERBOSE", "1"),
+        ],
+    );
+    let said = format!("{}\n{}", ran.stdout(), ran.stderr());
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let context = format!(
+        "{}\n{}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::json!({ "tests": plan["tests"], "mutants": plan["mutants"] })
+    );
+    let on_line = |line: u32| {
+        mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("public/app.js:{line}:"))
+            })
+            .collect::<Vec<_>>()
+    };
+    // Each mutant of `show` and of the three texts breaks what a fast test
+    // reads: a fast test kills it, and no more than the three fast ones ran
+    // it. (Its time said so too, under three seconds, until a loaded runner
+    // took 3.5 s over one fast kill.)
+    let mut fast_kills = Vec::new();
+    for line in 1..=6 {
+        for mutant in on_line(line) {
+            let strong = &mutant["strong"];
+            assert_eq!(strong["status"], "killed", "{mutant}\n{context}");
+            assert_ne!(strong["killedBy"], slow.as_str(), "{mutant}\n{context}");
+            assert!(
+                (1..=3).contains(&strong["tests"].as_u64().unwrap_or(0)),
+                "{mutant}\n{context}"
+            );
+            fast_kills.push(mutant["id"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(fast_kills.len() >= 4, "{context}");
+    // The slow test ran none of them: each attempt's line names its mutant
+    // and its test.
+    let slow_ran = said
+        .lines()
+        .filter(|line| line.contains(": \"waits until it is active\" "))
+        .filter_map(|line| line.split("[supercov] ").nth(1))
+        .filter_map(|line| line.split(": \"").next())
+        .collect::<Vec<_>>();
+    assert!(!slow_ran.is_empty(), "{context}");
+    for id in &slow_ran {
+        assert!(!fast_kills.iter().any(|fast| fast == id), "{id}\n{context}");
+    }
+    // Nothing a fast test reads: every fast test lets it live, then the
+    // slow one, all four candidates run.
+    let loaded = on_line(7);
+    assert_eq!(loaded.len(), 1, "{context}");
+    assert_eq!(loaded[0]["strong"]["status"], "survived", "{context}");
+    assert_eq!(loaded[0]["strong"]["tests"], 4, "{context}");
+    // What only the slow test reads (the state it waits for): it runs out
+    // of its time limit there, once the fast tests let it live.
+    let detected_by_slow = on_line(8)
+        .into_iter()
+        .filter(|mutant| mutant["strong"]["status"] == "timeout")
+        .inspect(|mutant| {
+            assert_eq!(
+                mutant["strong"]["killedBy"],
+                slow.as_str(),
+                "{mutant}\n{context}"
+            )
+        })
+        .count();
+    assert!(detected_by_slow >= 1, "{context}");
+    // The progress lines name the costliest test left and the round's time.
+    assert!(
+        said.contains("costliest test left: \"waits until it is active\", "),
+        "{context}"
+    );
+    assert!(said.contains(" left in this round"), "{context}");
+}
+
+/// A test's first run in an invocation takes a mutant where the mutant
+/// already lived through a candidate: a test whose mutants live needs no run
+/// without one, and a failure is judged by the control after it. Here the
+/// app's server fails the first request to each page in a strong pass (a
+/// cold cache), and the only mutant is a log line nothing reads, with two
+/// candidates in two files. The first file's test runs without it first
+/// (no candidate let it live yet, so a cold failure is likely): the cold
+/// page fails that run, the next passes, and then the mutant lives. The
+/// second file's test takes the mutant at once, and fails on its cold page;
+/// that failure decides nothing: the control after it passes, the test runs
+/// the mutant again, and it survives, where a kill confirmed by that control
+/// would have been false.
+#[cfg(unix)]
+#[test]
+fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-cold");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-cold", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // Notes each page it serves and the mutant the request's attempt named
+    // (`-`: a control), outside the project.
+    let served = project.root.with_extension("served.jsonl");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { appendFileSync, readFileSync } from \"node:fs\";\n// A strong pass's server fails the first request to each page: a cold cache.\nconst warm = new Set();\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  if (path.endsWith(\".html\")) {\n    const cold = Boolean(process.env.SUPERCOV_STRONG_PLAN) && !warm.has(path);\n    warm.add(path);\n    appendFileSync(process.env.SERVED_LOG, JSON.stringify({ path, mutant: scope.get(\"m\"), cold }) + \"\\n\");\n    if (cold) {\n      response.statusCode = 503;\n      return response.end(\"warming up\");\n    }\n  }\n  const file = path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    for page in ["first", "second"] {
+        project.write(
+            &format!("public/{page}.html"),
+            "<!doctype html><body><p id=\"out\">Ready</p><script src=\"/app.js\"></script></body>\n",
+        );
+    }
+    project.write("public/app.js", "console.log(\"shown\");\n");
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
+            served.display().to_string()
+        ),
+    );
+    // One test a file: a worker runs the first file's before the second's.
+    for (at, page) in [(1, "first"), (2, "second")] {
+        project.write(
+            &format!("tests/{at}-{page}.spec.js"),
+            &format!("import {{ test, expect }} from \"@playwright/test\";\ntest(\"shows the {page} page\", async ({{ page }}) => {{\n  const response = await page.goto(\"/{page}.html\");\n  expect(response.status()).toBe(200);\n  await expect(page.locator(\"#out\")).toHaveText(\"Ready\");\n}});\n"),
+        );
+    }
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright cold");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let _ = std::fs::remove_file(&served);
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[roots, ("SUPERCOV_VERBOSE", "1")],
+    );
+    let said = format!("{}\n{}", ran.stdout(), ran.stderr());
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let pages = std::fs::read_to_string(&served).unwrap_or_default();
+    let context = format!(
+        "{}\n{pages}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let logged = mutants
+        .iter()
+        .filter(|mutant| {
+            mutant["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("public/app.js:1:")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(logged.len(), 1, "{context}");
+    // The second page's attempt failed cold, and said it runs again.
+    assert!(
+        said.contains("before any control here: runs again after one"),
+        "{context}"
+    );
+    // Both candidates let it live: it survives.
+    assert_eq!(logged[0]["strong"]["status"], "survived", "{context}");
+    assert_eq!(logged[0]["strong"]["tests"], 2, "{context}");
+    let runs = pages
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let served = |path: &str| {
+        runs.iter()
+            .filter(|run| run["path"] == path)
+            .map(|run| {
+                let mutant = run["mutant"].as_str().unwrap_or("");
+                let with = if mutant == "-" {
+                    "control"
+                } else if mutant.starts_with("public/app.js#") {
+                    "mutant"
+                } else {
+                    "other"
+                };
+                (with, run["cold"] == true)
+            })
+            .collect::<Vec<_>>()
+    };
+    // The first page: without the mutant, cold, and again, then with it.
+    assert_eq!(
+        served("/first.html"),
+        [("control", true), ("control", false), ("mutant", false)],
+        "{context}"
+    );
+    // The second: with the mutant, cold; the control; with it again.
+    assert_eq!(
+        served("/second.html"),
+        [("mutant", true), ("control", false), ("mutant", false)],
+        "{context}"
+    );
+}
+
+/// A pass its budget stopped keeps, for each mutant it left open, the
+/// candidates that already passed with it, and the next pass resumes there:
+/// in a spec file with a serial describe of six tests that each wait for
+/// the page to become active, a mutant no test detects (what the page logs)
+/// runs, in the pass to its end, exactly the candidates no pass before
+/// recorded, never one it passed again,
+/// and survives with all six (a test the stop itself failed, its server
+/// gone, kills nothing); one only the file's last test detects is killed by
+/// it, whichever pass got there.
+#[cfg(unix)]
+#[test]
+fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-resume");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-resume", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file.startsWith(\"public/\") ? \"\" : \"static/\"}${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/public/log.js\"></script><script src=\"/app.js\"></script></body>\n",
+    );
+    // The page becomes active after a while: every test waits for it, long
+    // enough that a pass stopped at 32 s runs only some of the six with a
+    // mutant (a test's first run takes one: there is no baseline first).
+    project.write(
+        "static/app.js",
+        "setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 5000);\n",
+    );
+    // The mutants: what the page logs (no test reads it) and a flag only
+    // the last test reads.
+    project.write(
+        "public/log.js",
+        "console.log(\"loaded\");\nwindow.ready = true;\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/purchase.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest.describe.configure({ mode: \"serial\" });\nfor (const step of [1, 2, 3, 4, 5]) {\n  test(`waits ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\", { timeout: 20_000 });\n  });\n}\ntest(\"waits 6 and is ready\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\", { timeout: 20_000 });\n  expect(await page.evaluate(() => window.ready)).toBe(true);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright resume");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &[roots],
+        )
+        .json();
+    let titles = plan["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| {
+            (
+                test["id"].as_str().unwrap().to_owned(),
+                test["title"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let run = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved = || -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(
+                project
+                    .root
+                    .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+            )
+            .unwrap_or_else(|_| "{}".into()),
+        )
+        .unwrap()
+    };
+    let listed = || -> Vec<serde_json::Value> {
+        project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let on_line = |line: u32| {
+        listed()
+            .into_iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("public/log.js:{line}:"))
+            })
+            .collect::<Vec<_>>()
+    };
+    let loaded = on_line(1);
+    assert_eq!(loaded.len(), 1, "{plan}");
+    let loaded = loaded[0]["id"].as_str().unwrap().to_owned();
+    // Each attempt's line: `<mutant>: "<test>" lives`, with the command's
+    // output (SUPERCOV_VERBOSE).
+    let lives = |said: &str| {
+        said.lines()
+            .filter_map(|line| line.split("[supercov] ").nth(1))
+            .filter(|line| {
+                line.starts_with(&format!("{loaded}: \"")) && line.contains("\" lives (")
+            })
+            .map(|line| line.split('"').nth(1).unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let mut log = String::new();
+    let mut ran = Vec::new();
+    let mut resumed_from = std::collections::BTreeSet::new();
+    // Passes stopped by their budget, until one left the mutant some
+    // candidates passed and others not; then a pass to its end.
+    for pass in 0..4 {
+        let budget = pass < 3
+            && resumed_from.is_empty()
+            && saved()["progress"][&loaded]
+                .as_array()
+                .is_none_or(Vec::is_empty);
+        let before = saved()["progress"][&loaded]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|id| titles[id.as_str().unwrap()].clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // The web server a stopped pass started may take a moment to end.
+        for _ in 0..100 {
+            if std::net::TcpListener::bind(("127.0.0.1", port.number())).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let mut args = vec!["runs", "latest", "mutants", "test"];
+        if budget {
+            args.extend(["--budget", "32"]);
+        }
+        let out = project.supercov_with(
+            &args,
+            &[
+                roots,
+                ("SUPERCOV_VERBOSE", "1"),
+                ("SUPERCOV_STRONG_KEEP", "1"),
+            ],
+        );
+        let said = format!("{}\n{}", out.stdout(), out.stderr());
+        log.push_str(&format!("=== pass {pass} (budget: {budget})\n{said}\n"));
+        // What the pass's driver wrote, should an assertion below fail.
+        for work in std::fs::read_dir(project.root.join(".supercov/strong"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for file in std::fs::read_dir(work.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let name = file.file_name().to_string_lossy().into_owned();
+                if name == "results.jsonl" || name.ends_with(".log") {
+                    let text = std::fs::read_to_string(file.path()).unwrap_or_default();
+                    let start = (text.len().saturating_sub(3_000)..=text.len())
+                        .find(|at| text.is_char_boundary(*at))
+                        .unwrap_or(0);
+                    let tail = &text[start..];
+                    log.push_str(&format!("--- {name}\n{tail}\n"));
+                }
+            }
+        }
+        log.push_str(&format!("--- saved\n{}\n", saved()));
+        let lived = lives(&said);
+        // No candidate it passed before runs again.
+        for title in &lived {
+            assert!(!before.contains(title), "{title} ran again\n{log}");
+        }
+        if !before.is_empty() {
+            resumed_from = before.clone();
+            assert!(
+                said.contains("mutant(s) resume where earlier passes left them, with "),
+                "{log}"
+            );
+        }
+        if !budget {
+            // The pass to its end runs exactly the candidates no pass
+            // before it recorded.
+            let mut left = [
+                "waits 1",
+                "waits 2",
+                "waits 3",
+                "waits 4",
+                "waits 5",
+                "waits 6 and is ready",
+            ]
+            .into_iter()
+            .filter(|title| !before.contains(*title))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let mut last = lived.clone();
+            last.sort();
+            left.sort();
+            assert_eq!(last, left, "{log}");
+        }
+        ran.extend(lived);
+        if !budget {
+            break;
+        }
+    }
+    assert!(!resumed_from.is_empty(), "no pass stopped part way\n{log}");
+    // Over all the passes, every candidate let it live. One a stopped pass
+    // ran may run again: what ended after the pass began to stop is not
+    // recorded.
+    ran.sort();
+    ran.dedup();
+    assert_eq!(
+        ran,
+        [
+            "waits 1",
+            "waits 2",
+            "waits 3",
+            "waits 4",
+            "waits 5",
+            "waits 6 and is ready"
+        ],
+        "{log}"
+    );
+    let verdicts = listed();
+    let strong =
+        |id: &str| verdicts.iter().find(|mutant| mutant["id"] == id).unwrap()["strong"].clone();
+    assert_eq!(strong(&loaded)["status"], "survived", "{log}");
+    assert_eq!(strong(&loaded)["tests"], 6, "{log}");
+    let ready = on_line(2);
+    let mut killed = 0;
+    for mutant in &ready {
+        let verdict = strong(mutant["id"].as_str().unwrap());
+        if verdict["status"] == "killed" {
+            killed += 1;
+            assert_eq!(
+                titles[verdict["killedBy"].as_str().unwrap()],
+                "waits 6 and is ready",
+                "{log}"
+            );
+        } else {
+            assert_eq!(verdict["status"], "survived", "{mutant}\n{log}");
+        }
+    }
+    assert!(killed >= 1, "{ready:?}\n{log}");
+    // Nothing is left open, so no progress is kept.
+    assert!(saved().get("progress").is_none(), "{log}");
+}
+
+/// A mutant with more candidates than a first tier holds (32) runs first
+/// against its likeliest 32, every such mutant before any runs the rest:
+/// what the page logs (no test reads it) lives through its tier, then the
+/// rest, and survives with all 34; the flag only the slowest test reads,
+/// last in its order, is killed by it in the rest. A pass that stops after
+/// a first tier leaves `survived so far`: never a survivor or in the score,
+/// listed with the survivors as such, and run to its end by the next pass.
+#[cfg(unix)]
+#[test]
+fn a_playwright_mutant_runs_its_first_tier_before_the_rest() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = common::free_port();
+    let project = Project::empty("strong-playwright-first-tier");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-first-tier", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file.startsWith(\"public/\") ? \"\" : \"static/\"}${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\">Active</p><script src=\"/public/log.js\"></script></body>\n",
+    );
+    project.write(
+        "public/log.js",
+        "console.log(\"loaded\");\nwindow.ready = true;\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // 33 quick tests that load the page, and a slow one that reads the flag.
+    project.write(
+        "tests/page.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nfor (let step = 1; step <= 33; step++) {\n  test(`loads ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\ntest(\"is ready, after a while\", async ({ page }) => {\n  await page.goto(\"/\");\n  await page.waitForTimeout(2_000);\n  expect(await page.evaluate(() => window.ready)).toBe(true);\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright first tier");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &[roots],
+        )
+        .json();
+    let titles = plan["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| {
+            (
+                test["id"].as_str().unwrap().to_owned(),
+                test["title"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let run = project.supercov(&["runs", "latest", "--json"]).json()["data"]["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved_path = project
+        .root
+        .join(format!(".supercov/runs/{run}/strong-mutation.json"));
+    let out = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[roots, ("SUPERCOV_VERBOSE", "1")],
+    );
+    let log = format!("{}\n{}", out.stdout(), out.stderr());
+    assert_eq!(out.code(), 0, "{log}");
+    let listed = || -> Vec<serde_json::Value> {
+        project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let verdicts = listed();
+    let on_line = |line: u32| {
+        verdicts
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("public/log.js:{line}:"))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let logged = on_line(1)
+        .into_iter()
+        .find(|mutant| mutant["mutator"] == "StringLiteral")
+        .unwrap_or_else(|| panic!("{plan}"));
+    let logged_id = logged["id"].as_str().unwrap().to_owned();
+    assert_eq!(logged["strong"]["status"], "survived", "{log}");
+    assert_eq!(logged["strong"]["tests"], 34, "{log}");
+    let flag = on_line(2)
+        .into_iter()
+        .find(|mutant| mutant["mutator"] == "BooleanLiteral")
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert_eq!(flag["strong"]["status"], "killed", "{log}");
+    assert_eq!(
+        titles[flag["strong"]["killedBy"].as_str().unwrap()],
+        "is ready, after a while",
+        "{log}"
+    );
+    // The flag's tier ran before the rest: 32 candidates let it live before
+    // the slow test ran with it.
+    let flag_id = flag["id"].as_str().unwrap();
+    let lived = log
+        .lines()
+        .filter(|line| line.contains(&format!("{flag_id}: \"")) && line.contains("\" lives ("))
+        .count();
+    assert_eq!(lived, 33, "{log}");
+    // A pass that stopped after the survivor's first tier: what it passed
+    // is kept, and no verdict.
+    let mut document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+    document["mutants"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&logged_id);
+    let tier = titles
+        .iter()
+        .filter(|(_, title)| title.starts_with("loads ") && title != &"loads 33")
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(tier.len(), 32);
+    document["progress"] = serde_json::json!({ logged_id.clone(): tier });
+    std::fs::write(&saved_path, document.to_string()).unwrap();
+    let survivors = project
+        .supercov(&[
+            "runs", "latest", "mutants", "--status", "survived", "--json",
+        ])
+        .json();
+    let so_far = survivors["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == logged_id.as_str())
+        .unwrap_or_else(|| panic!("{survivors}"))
+        .clone();
+    assert_eq!(so_far["strong"]["status"], "survived-so-far", "{survivors}");
+    assert_eq!(so_far["strong"]["tests"], 32, "{survivors}");
+    assert_eq!(
+        survivors["data"]["summary"]["strong"]["survived-so-far"], 1,
+        "{survivors}"
+    );
+    let only = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--status",
+            "survived-so-far",
+            "--json",
+        ])
+        .json();
+    assert_eq!(
+        only["data"]["mutants"].as_array().unwrap().len(),
+        1,
+        "{only}"
+    );
+    let killed = project
+        .supercov(&["runs", "latest", "mutants", "--status", "killed", "--json"])
+        .json();
+    assert!(
+        killed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["strong"]["status"] == "killed"),
+        "{killed}"
+    );
+    // A pass whose budget is spent before it reaches it leaves it so.
+    let stopped = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--budget", "1"],
+        &[roots],
+    );
+    let said = format!("{}\n{}", stopped.stdout(), stopped.stderr());
+    assert!(
+        said.contains("  survived so far 1: lived through a first tier (32 candidates or 60 s of their tests' time, whichever comes first)"),
+        "{said}"
+    );
+    // The next pass runs the rest alone, and it survives with all 34, once
+    // the web server the stopped pass started has ended.
+    for _ in 0..100 {
+        if std::net::TcpListener::bind(("127.0.0.1", port.number())).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let out = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &[roots]);
+    let reply = out.json();
+    assert_eq!(reply["resumed"]["mutants"], 1, "{reply}");
+    let verdicts = listed();
+    let logged = verdicts
+        .iter()
+        .find(|mutant| mutant["id"] == logged_id.as_str())
+        .unwrap();
+    assert_eq!(logged["strong"]["status"], "survived", "{reply}");
+    assert_eq!(logged["strong"]["tests"], 34, "{reply}");
+}
+
+/// A Playwright pass whose harness runs two slots, one given a spec file
+/// with a serial describe that the pass spreads to the other, stops at its
+/// budget, run as a later round's shard is: the harness starts each slot's
+/// `playwright test` in a process group of its own and, told to stop, only
+/// waits for them, yet the stop reaches both slots and their servers, and
+/// the command ends within seconds of its budget (about 1 s here).
+#[cfg(unix)]
+#[test]
+fn a_playwright_pass_with_serial_files_stops_at_its_budget() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let ports = [0, 1].map(|_| common::free_port());
+    let project = Project::empty("strong-playwright-budget");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-budget", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"static/index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/public/log.js\"></script><script>setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 1500);</script></body>\n",
+    );
+    // What the page logs: no test reads it, so every mutant survives every
+    // candidate.
+    project.write(
+        "public/log.js",
+        &(1..=20)
+            .map(|at| format!("console.log(\"line {at}\");\n"))
+            .collect::<String>(),
+    );
+    project.write(
+        "playwright.config.js",
+        "const port = Number(process.env.SLOT_PORT);\nexport default {\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: { baseURL: `http://127.0.0.1:${port}` },\n  webServer: { command: \"node support/server.js\", url: `http://127.0.0.1:${port}/health`, reuseExistingServer: false, timeout: 20000, env: { PORT: String(port) } },\n};\n",
+    );
+    project.write(
+        "tests/serial.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest.describe.configure({ mode: \"serial\" });\nfor (const step of [1, 2, 3, 4, 5, 6]) {\n  test(`serial ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\n",
+    );
+    project.write(
+        "tests/zz-other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"other\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n});\n",
+    );
+    // Two slots, each a `playwright test` of its own share with its own
+    // server; each lists its share first, as a harness that shares tests out
+    // does.
+    project.write(
+        "harness.mjs",
+        &format!(
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\n// Like a harness that tears its slots down itself: a termination does not\n// end it, and each slot is in a process group of its own.\nprocess.on(\"SIGTERM\", () => console.log(\"[harness] told to stop; waiting for the slots\"));\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\n// The second slot starts first, and the first (the one given the serial file)\n// once the second has run a mutant: what the second takes of the serial file\n// is then the same however fast either starts.\nlet release;\nconst secondRan = new Promise((resolve) => {{\n  release = resolve;\n  setTimeout(resolve, 60_000);\n  // Measuring, nothing waits.\n  if (!process.env.SUPERCOV_STRONG_PLAN) resolve();\n}});\nconst run = ([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env, detached: true }});\n    const say = (chunk) => {{\n      for (const line of String(chunk).split(\"\\n\")) {{\n        if (!line.trim()) continue;\n        console.log(`[slot ${{at + 1}}] ${{line}}`);\n        if (at === 1 && line.includes('\" lives (')) release();\n      }}\n    }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => {{\n      release();\n      done(code ?? 1);\n    }});\n  }});\n}};\nconst codes = await Promise.all([secondRan.then(() => run(slots[0], 0)), run(slots[1], 1)]);\nprocess.exit(Math.max(...codes));\n",
+            ports[0], ports[1]
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright spread");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "node", "harness.mjs"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    // A budget far shorter than the pass: it stops within the budget and a
+    // short grace, and keeps what it decided and what its open mutants
+    // passed.
+    let budget = 25;
+    let started = std::time::Instant::now();
+    let out = project.supercov_with(
+        &[
+            "mutants",
+            "--shard",
+            "1/1",
+            "--budget",
+            &budget.to_string(),
+            "--",
+            "node",
+            "harness.mjs",
+        ],
+        &[roots, ("SUPERCOV_VERBOSE", "1")],
+    );
+    let took = started.elapsed();
+    let said = format!("{}\n{}", out.stdout(), out.stderr());
+    eprintln!("budget {budget} s; the command took {took:?}");
+    assert!(
+        took < std::time::Duration::from_secs(budget + 15),
+        "took {took:?}\n{said}"
+    );
+    assert!(
+        said.contains(&format!("budget of {budget} s spent")),
+        "{said}"
+    );
+}
+
+/// A harness that runs two `playwright test` slots, each with its own
+/// server, and keeps a spec file with a serial describe in the first: in a
+/// strong pass that file runs in the second slot too, with the harness and
+/// its command unchanged, and the slots share its mutants -- each mutant
+/// meets each candidate once, whichever slot ran it -- while the harness's
+/// `--list` still sees the slot's own file alone.
+#[cfg(unix)]
+#[test]
+fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let ports = [0, 1].map(|_| common::free_port());
+    let project = Project::empty("strong-playwright-spread");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-spread", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"static/index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/public/log.js\"></script><script>setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 700);</script></body>\n",
+    );
+    // What the page logs: no test reads it, so every mutant survives every
+    // candidate.
+    project.write(
+        "public/log.js",
+        "console.log(\"one\");\nconsole.log(\"two\");\nconsole.log(\"three\");\n",
+    );
+    project.write(
+        "playwright.config.js",
+        "const port = Number(process.env.SLOT_PORT);\nexport default {\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: { baseURL: `http://127.0.0.1:${port}` },\n  webServer: { command: \"node support/server.js\", url: `http://127.0.0.1:${port}/health`, reuseExistingServer: false, timeout: 20000, env: { PORT: String(port) } },\n};\n",
+    );
+    project.write(
+        "tests/serial.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest.describe.configure({ mode: \"serial\" });\nfor (const step of [1, 2, 3, 4]) {\n  test(`serial ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\n",
+    );
+    project.write(
+        "tests/zz-other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"other\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n});\n",
+    );
+    // Two slots, each a `playwright test` of its own share with its own
+    // server; each lists its share first, as a harness that shares tests out
+    // does.
+    project.write(
+        "harness.mjs",
+        &format!(
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\n// The second slot starts first, and the first (the one given the serial file)\n// once the second has run a mutant: what the second takes of the serial file\n// is then the same however fast either starts.\nlet release;\nconst secondRan = new Promise((resolve) => {{\n  release = resolve;\n  setTimeout(resolve, 60_000);\n  // Measuring, nothing waits.\n  if (!process.env.SUPERCOV_STRONG_PLAN) resolve();\n}});\nconst run = ([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{\n      for (const line of String(chunk).split(\"\\n\")) {{\n        if (!line.trim()) continue;\n        console.log(`[slot ${{at + 1}}] ${{line}}`);\n        if (at === 1 && line.includes('\" lives (')) release();\n      }}\n    }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => {{\n      release();\n      done(code ?? 1);\n    }});\n  }});\n}};\nconst codes = await Promise.all([secondRan.then(() => run(slots[0], 0)), run(slots[1], 1)]);\nprocess.exit(Math.max(...codes));\n",
+            ports[0], ports[1]
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright spread");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "node", "harness.mjs"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let out = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[
+            roots,
+            ("SUPERCOV_VERBOSE", "1"),
+            ("SUPERCOV_PROGRESS_INTERVAL_MS", "300"),
+        ],
+    );
+    let said = format!("{}\n{}", out.stdout(), out.stderr());
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap().clone();
+    let context = format!(
+        "{}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The second slot ran the serial file too, and said so.
+    assert!(
+        said.contains("[slot 2] [supercov] strong pass: 1 spec file(s) with a serial describe run in this invocation too, each taking its own mutants of them: tests/serial.spec.js"),
+        "{context}"
+    );
+    let serial_in_second = said
+        .lines()
+        .filter(|line| line.starts_with("[slot 2] [supercov] public/log.js:"))
+        .filter(|line| line.contains(": \"serial "))
+        .count();
+    assert!(serial_in_second >= 1, "{context}");
+    // Its own file's mutants had run against no candidate yet, so there it
+    // took only mutants no copy had taken yet, anywhere: each at most once.
+    for at in 1..=3 {
+        let taken = said
+            .lines()
+            .filter(|line| line.starts_with(&format!("[slot 2] [supercov] public/log.js:{at}:")))
+            .filter(|line| line.contains(": \"serial "))
+            .count();
+        assert!(taken <= 1, "{at}\n{context}");
+    }
+    // Its list was the slot's own file alone.
+    assert!(said.contains("[list 2] "), "{context}");
+    assert!(
+        !said
+            .lines()
+            .any(|line| line.starts_with("[list 2] ") && line.contains("serial.spec.js")),
+        "{context}"
+    );
+    // Each mutant met each candidate once, whichever slot ran it, and
+    // survived all five.
+    let on_log = mutants
+        .iter()
+        .filter(|mutant| mutant["id"].as_str().unwrap().starts_with("public/log.js:"))
+        .collect::<Vec<_>>();
+    assert_eq!(on_log.len(), 3, "{context}");
+    for mutant in on_log {
+        let id = mutant["id"].as_str().unwrap();
+        assert_eq!(mutant["strong"]["status"], "survived", "{context}");
+        assert_eq!(mutant["strong"]["tests"], 5, "{context}");
+        let mut ran = said
+            .lines()
+            .filter_map(|line| line.split("[supercov] ").nth(1))
+            .filter(|line| line.starts_with(&format!("{id}: \"")) && line.contains("\" lives ("))
+            .map(|line| line.split('"').nth(1).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        ran.sort();
+        assert_eq!(
+            ran,
+            ["other", "serial 1", "serial 2", "serial 3", "serial 4"],
+            "{id}\n{context}"
+        );
+    }
+    // Nothing was confined to one slot.
+    assert!(
+        !said.contains("has a serial describe, and 1 of the"),
+        "{context}"
+    );
+}
+
 /// A measured Playwright run's plan carries each test's span, from the
 /// fixture's record of the attempt (the reporter's record of the same
 /// attempt has none), and a file whose tests ran side by side in a
@@ -23531,11 +27384,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
 #[test]
 fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
     let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let project = Project::empty("strong-playwright-spans");
     project.write(
         "package.json",
@@ -23561,17 +27410,28 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
             "export default {{\n  testDir: \"tests\",\n  fullyParallel: true,\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/?n=1\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
         ),
     );
-    // Each holds its worker a while: the two run at once.
+    // Each holds its worker a while: the two run at once. Measured, each
+    // waits for the other to have started (`MEET`, a folder each notes its
+    // start in): they overlap however late a loaded machine starts the
+    // second worker. With 1.5 s alone, a second worker that started after
+    // the first test had ended left the spans apart.
     project.write(
         "tests/double.spec.js",
-        "import { test, expect } from \"@playwright/test\";\nfor (const n of [2, 3]) {\n  test(`doubles ${n}`, async ({ request }) => {\n    await new Promise((done) => setTimeout(done, 1500));\n    expect(await (await request.get(`/?n=${n}`)).text()).toBe(String(n * 2));\n  });\n}\n",
+        "import { test, expect } from \"@playwright/test\";\nimport { existsSync, writeFileSync } from \"node:fs\";\nimport { join } from \"node:path\";\nconst meet = async (n) => {\n  const folder = process.env.MEET;\n  if (!folder) return;\n  writeFileSync(join(folder, String(n)), \"\");\n  const other = join(folder, String(5 - n));\n  while (!existsSync(other)) await new Promise((done) => setTimeout(done, 20));\n};\nfor (const n of [2, 3]) {\n  test(`doubles ${n}`, async ({ request }) => {\n    await meet(n);\n    await new Promise((done) => setTimeout(done, 1500));\n    expect(await (await request.get(`/?n=${n}`)).text()).toBe(String(n * 2));\n  });\n}\n",
     );
     project.git(&["init", "-q"]);
     project.commit("spans");
     let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    let meet = project.root.with_extension("meet");
+    std::fs::create_dir_all(&meet).unwrap();
+    let meeting = meet.display().to_string();
     project
-        .supercov_with(&["--", "npx", "playwright", "test"], &roots)
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("MEET", meeting.as_str())],
+        )
         .succeeds();
+    let _ = std::fs::remove_dir_all(&meet);
     let plan = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan", "--json"],
@@ -23607,7 +27467,280 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
         .unwrap_or_else(|| panic!("no main pass\n{reply}\n{}", ran.stderr()))
         .clone();
     assert_eq!(main["serialFiles"], 0, "{main}\n{reply}");
-    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    assert_eq!(
+        reply["summary"]["error"],
+        0,
+        "{reply}\n{listed}\n{}",
+        ran.stderr()
+    );
+}
+
+/// A Playwright plan of thousands of mutants, each with every test a
+/// candidate, run under a 256 MB heap by a harness that lists the tests
+/// first (`playwright test --list --reporter=json`) and then runs a
+/// Playwright process a spec file at once, each with a server of its own,
+/// started a second apart. The list reads no plan and lists each test once;
+/// the main pass holds only as many copies of the tests as an invocation
+/// may, and the mutants past them run in further invocations; each process
+/// runs its first test within seconds, none undoes another's work, and each
+/// mutant gets one verdict from whichever process ran it. Before, the list
+/// and the runner each made every repetition of every test, as many as the
+/// busiest file had mutants, and ran out of heap; and each process cleared
+/// the pass's files as it started, so the others waited on baselines that
+/// were gone. A process that does run out of heap is named.
+#[cfg(unix)]
+#[test]
+fn a_large_playwright_plan_runs_in_a_small_heap() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let held = (0..3).map(|_| common::free_port()).collect::<Vec<_>>();
+    let ports = held.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let project = Project::empty("strong-playwright-heap");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-heap", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // About ten thousand mutants, every one reached by every test.
+    const FUNCTIONS: usize = 1500;
+    let mut app = String::new();
+    for index in 0..FUNCTIONS {
+        app.push_str(&format!(
+            "function f{index}(n) {{\n  return n > {index} ? n + {index} : n - 1;\n}}\n"
+        ));
+    }
+    app.push_str(&format!(
+        "const all = [{}];\nexport function total(n) {{\n  let sum = 0;\n  for (const f of all) sum += f(n);\n  return sum;\n}}\n",
+        (0..FUNCTIONS)
+            .map(|index| format!("f{index}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    project.write("server/app.js", &app);
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { total } from \"../server/app.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  response.end(String(total(Number(url.searchParams.get(\"n\")))));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "const port = process.env.SLOT_PORT ?? \"{}\";\nexport default {{\n  testDir: \"tests\",\n  workers: 4,\n  reporter: \"line\",\n  use: {{ baseURL: `http://127.0.0.1:${{port}}` }},\n  webServer: {{ command: \"node support/server.js\", url: `http://127.0.0.1:${{port}}/?n=1`, reuseExistingServer: false, timeout: 20000, env: {{ PORT: port }} }},\n}};\n",
+            ports[0]
+        ),
+    );
+    // Three files of ten tests, each asking for a total of its own.
+    for file in 0..3 {
+        project.write(
+            &format!("tests/total{file}.spec.js"),
+            &format!(
+                "import {{ test, expect }} from \"@playwright/test\";\nconst expected = (n) => {{\n  let sum = 0;\n  for (let i = 0; i < {FUNCTIONS}; i++) sum += n > i ? n + i : n - 1;\n  return sum;\n}};\nfor (const n of [{}]) {{\n  test(`totals ${{n}}`, async ({{ request }}) => {{\n    expect(await (await request.get(`/?n=${{n}}`)).text()).toBe(String(expected(n)));\n  }});\n}}\n",
+                (0..10)
+                    .map(|test| (file * 10 + test) * 53 % FUNCTIONS)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+    // The harness: Playwright's list of the tests, then a process a file,
+    // each with its own server, started a second apart, as a harness that
+    // copies a build for each slot starts them. It notes when it listed.
+    let listed = project.root.with_extension("listed.txt");
+    project.write(
+        "e2e.mjs",
+        &format!(
+            "import {{ execFileSync, spawn }} from \"node:child_process\";\nimport {{ appendFileSync }} from \"node:fs\";\nconst listed = JSON.parse(execFileSync(\"npx\", [\"playwright\", \"test\", \"--list\", \"--reporter=json\"], {{ maxBuffer: 1 << 30 }}).toString());\nlet count = 0;\nconst visit = (suite) => {{\n  for (const spec of suite.specs ?? []) count += spec.tests.length;\n  (suite.suites ?? []).forEach(visit);\n}};\nlisted.suites.forEach(visit);\nappendFileSync(process.env.LISTED, `${{count}} ${{Date.now()}}\\n`);\nconst ports = {ports:?};\nconst codes = await Promise.all(ports.map((port, slot) => new Promise((done) => setTimeout(() => {{\n  const child = spawn(\"npx\", [\"playwright\", \"test\", `tests/total${{slot}}.spec.js`], {{ stdio: \"inherit\", env: {{ ...process.env, SLOT_PORT: port }} }});\n  child.on(\"close\", done);\n}}, slot * 1000))));\nprocess.exit(codes.every((code) => code === 0) ? 0 : 1);\n"
+        ),
+    );
+    // A process that runs out of heap however large its heap.
+    project.write(
+        "support/hog.js",
+        "const kept = [];\nfor (;;) kept.push({ at: kept.length });\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a large plan");
+    let listed_env = listed.display().to_string();
+    let roots = [
+        ("SUPERCOV_SOURCE_ROOTS", "server"),
+        ("LISTED", listed_env.as_str()),
+    ];
+    // How long the suite takes on this machine, list and all.
+    let measuring = std::time::Instant::now();
+    project
+        .supercov_with(&["--", "node", "e2e.mjs"], &roots)
+        .succeeds();
+    let measuring = measuring.elapsed().as_secs();
+    let _ = std::fs::remove_file(&listed);
+    let planning = std::time::Instant::now();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &roots,
+        )
+        .json();
+    let planning = planning.elapsed().as_secs();
+    let planned = plan["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["decided"].is_null())
+        .count();
+    assert!(planned > 5_000, "{planned} mutants to run");
+    // Every process of the pass in a 256 MB heap; sixty copies of the tests
+    // an invocation (about seven mutants), so that a minute sees several
+    // even on a slow runner: with six hundred an ARM runner's first
+    // invocation used the whole minute, and with a hundred and twenty a
+    // macOS runner's. The budget counts planning too, which takes a slow
+    // runner most of a minute here: the pass gets its minute after it, or
+    // four times the suite's own run where that is longer. A fixed minute
+    // was spent by the first round on a slow arm64 or macOS runner, and the
+    // budget ended the second invocation before it had listed the tests.
+    let budget = (60.max(4 * measuring) + 2 * planning).to_string();
+    let ran = project.supercov_with(
+        &[
+            "runs", "latest", "mutants", "test", "--json", "--budget", &budget,
+        ],
+        &[
+            roots[0],
+            roots[1],
+            ("NODE_OPTIONS", "--max-old-space-size=256"),
+            ("SUPERCOV_PLAYWRIGHT_COPIES", "60"),
+            // Its attempts, kept to time them.
+            ("SUPERCOV_STRONG_KEEP", "1"),
+        ],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    let context = format!("{reply}\n{said}");
+    assert!(!said.contains("ran out of memory"), "{context}");
+    assert!(!said.contains("heap out of memory"), "{context}");
+    // Each slot's server is checked for readiness while the slots before it
+    // run their tests: such a request names no test, but none of those
+    // tests is this server's, so the mutants it ran are not taken for ones
+    // a test reached without its name. Taken so, 6,351 of them went to run
+    // alone, and that round ran out of heap.
+    let main_pass = reply["passes"]
+        .as_array()
+        .and_then(|passes| passes.iter().find(|pass| pass["pass"] == "main"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        main_pass["next"]["alone"].as_u64() < Some(10),
+        "{main_pass}\n{context}"
+    );
+    // The list saw the project's thirty tests, once each, every time it
+    // finished: the budget ends the invocation it falls in, which may be
+    // listing. That the pass went on to further invocations is asserted
+    // below from its own record.
+    let counts = std::fs::read_to_string(&listed).unwrap_or_default();
+    let _ = std::fs::remove_file(&listed);
+    let listings = counts
+        .lines()
+        .map(|line| line.split_once(' ').unwrap())
+        .collect::<Vec<_>>();
+    assert!(!listings.is_empty(), "{counts}\n{context}");
+    assert!(
+        listings.iter().all(|(count, _)| *count == "30"),
+        "{counts}\n{context}"
+    );
+    // The main pass's three processes each began its tests within seconds
+    // of being started (a second apart, after the list), whatever the
+    // plan's size: each runner's status says when (one whose tests' mutants
+    // were all decided by then runs none of them).
+    let listed_at = listings[0].1.parse::<i64>().unwrap();
+    let status = std::fs::read_dir(project.root.join(".supercov/strong"))
+        .unwrap()
+        .flatten()
+        .map(|work| work.path().join("playwright/status"))
+        .find(|status| status.is_dir())
+        .unwrap_or_else(|| panic!("no status kept\n{context}"));
+    let mut began = std::collections::BTreeMap::new();
+    for runner in std::fs::read_dir(&status).unwrap().flatten() {
+        let runner: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(runner.path()).unwrap()).unwrap();
+        if runner["round"] == "main" {
+            began.insert(
+                runner["pid"].to_string(),
+                runner["startedAt"].as_i64().unwrap(),
+            );
+        }
+    }
+    assert_eq!(began.len(), 3, "{began:?}\n{context}");
+    let waits = began
+        .values()
+        .map(|started| started - listed_at)
+        .collect::<Vec<_>>();
+    eprintln!("first test of each process, ms after the list: {waits:?}");
+    assert!(
+        waits.iter().all(|wait| *wait < 20_000),
+        "{waits:?}\n{context}"
+    );
+    // One verdict a mutant, and none an error: no baseline went missing.
+    assert_eq!(reply["summary"]["error"], 0, "{context}");
+    // The main pass went on in further invocations, and killed mutants in
+    // them.
+    let mains = reply["passes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pass| pass["kind"] == "main")
+        .count();
+    assert!(mains >= 2, "{context}");
+    assert!(
+        said.contains("main (more copies than one invocation holds)"),
+        "{context}"
+    );
+    assert!(reply["summary"]["killed"].as_u64() > Some(5), "{context}");
+    // A command that runs out of heap: the process is named, and so is
+    // why each mutant has no verdict.
+    let ran = project.supercov_with(
+        &[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--json",
+            "--",
+            "node",
+            "--max-old-space-size=64",
+            "support/hog.js",
+        ],
+        &roots,
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    let context = format!("{reply}\n{said}");
+    assert!(
+        said.contains("[supercov] a Node process ran out of memory at its")
+            && said.contains("support/hog.js (pid "),
+        "{context}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let reasons = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|mutant| mutant["strong"]["reason"].as_str())
+        .filter(|reason| {
+            reason.contains("before this mutant's verdict: a Node process ran out of memory")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !reasons.is_empty()
+            && reasons
+                .iter()
+                .all(|reason| reason.contains("support/hog.js")),
+        "{reasons:?}\n{context}"
+    );
 }
 
 /// A test that passes only after an earlier test of its file ran: its file
@@ -23981,10 +28114,15 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
         "{listed}"
     );
     // One more copy for each kill a confirmation overturned (the mutant
-    // runs its file whole).
+    // runs its file whole), and each a worker took beside its mutant's
+    // running copy, no other mutant waiting: the cheapest run first, so
+    // `inc`'s chains come last, with the one worker otherwise idle.
     assert!(
         passes[0]["profile"]["mutantCopies"].as_u64().unwrap_or(0)
-            <= ran + killed + passes[0]["overturned"].as_u64().unwrap_or(0),
+            <= ran
+                + killed
+                + passes[0]["overturned"].as_u64().unwrap_or(0)
+                + passes[0]["profile"]["besideCopies"].as_u64().unwrap_or(0),
         "{reply}"
     );
     assert!(
@@ -24770,7 +28908,7 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let overview = project.supercov(&["--help"]).succeeds();
     assert!(
         overview.contains(
-            "Test the tests with mutants (JavaScript, TypeScript; Python, Rust, Go and Ruby in preview)"
+            "Test the tests with mutants (JavaScript, TypeScript, Rust; Python, Go and Ruby in preview)"
         ),
         "{overview}"
     );
@@ -24804,10 +28942,10 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run-store.discover-runs")],
         )
         .exits(1);
-    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
+    assert!(unlisted.contains("run-store.discover-runs"), "{unlisted}");
     // A run whose evidence is cut short after its header, its size as
     // recorded, has no plan. Where the cut lands (a section's header or its
     // compressed body) depends on the run's sizes, so the reason may be either.
@@ -24970,12 +29108,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1431",
+            "fs.write#mutants-test-command.run-language",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1431"),
+        fired_at(&unwritten.stderr(), "mutants-test-command.run-language"),
         "{}",
         unwritten.stderr()
     );
@@ -25223,7 +29361,10 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:287")],
+            &[(
+                "SUPERCOV_TEST_FAULT",
+                "spawn#mutants-test-command.mutants-command",
+            )],
         )
         .exits(2);
     assert!(
@@ -25422,13 +29563,16 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:717",
+            "coverage-index-read#mutants-query.coverage-mutants-query",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:717"), "{said}");
+    assert!(
+        fired_at(&said, "mutants-query.coverage-mutants-query"),
+        "{said}"
+    );
 
     // The table of files.
     contains_all(
@@ -26060,8 +30204,8 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
         &[
             "Mutation score **66.7%** (of 3 of ",
             " mutants) · 1 killed · 1 timed out · 1 survived · 1 not run (no driver)",
-            "| Where | Mutant | Weak | Strong | Why |",
-            " | survived | every test that reached it passed with it in place (2 tests ran) |",
+            "| Where | Mutant | Weak | Strong | Tests on its line | Why |",
+            " | survived | 2 | every test that reached it passed with it in place (2 tests ran) |",
         ],
     );
     let stryker: serde_json::Value =
@@ -26197,8 +30341,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:962",
-        "fs.read_dir entry#public_query.rs:962",
+        "fs.read_dir#public-query.json-files",
+        "fs.read_dir entry#public-query.json-files",
     ] {
         let unlisted = project
             .supercov_with(
@@ -26211,7 +30355,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:962"),
+            fired_at(&unlisted, "public-query.json-files"),
             "{fault}: {unlisted}"
         );
     }
@@ -26590,6 +30734,507 @@ fn an_interrupted_javascript_pass_leaves_no_process_running() {
             .root
             .join(format!(".supercov/runs/{run}/strong-mutation.json"))
             .is_file()
+    );
+}
+
+/// A Vitest project for passes cut short: `src/cart.js`'s mutants are
+/// decided at once, while each of `src/slow.js`'s holds its test for five
+/// minutes, past its limit, the test's process id written to
+/// `SUPERCOV_TEST_MARKER` first.
+#[cfg(unix)]
+fn vitest_slow_project(label: &str) -> Project {
+    vitest_slow_project_waiting(label, 0)
+}
+
+/// `vitest_slow_project`, its slow test also taking `unmutated_ms` without
+/// a mutant: a mutant's test is given three times its measured time and
+/// 10 s more, so the longer it takes, the later slow.js's mutants are
+/// judged timeouts.
+#[cfg(unix)]
+fn vitest_slow_project_waiting(label: &str, unmutated_ms: u64) -> Project {
+    let project = vitest_mutants_project(label);
+    project.write("src/slow.js", "export const twice = (n) => n * 2;\n");
+    let unmutated = if unmutated_ms > 0 {
+        format!(
+            " else {{\n    await new Promise((done) => setTimeout(done, {unmutated_ms}));\n  }}"
+        )
+    } else {
+        String::new()
+    };
+    project.write(
+        "test/slow.test.js",
+        &format!(
+            "import {{ renameSync, writeFileSync }} from \"node:fs\";\nimport {{ expect, it }} from \"vitest\";\nimport {{ twice }} from \"../src/slow.js\";\nit(\"doubles\", async () => {{\n  if (twice(2) !== 4) {{\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    if (marker) {{\n      writeFileSync(`${{marker}}.tmp`, String(process.pid));\n      renameSync(`${{marker}}.tmp`, marker);\n    }}\n    await new Promise((done) => setTimeout(done, 300000));\n  }}{unmutated}\n  expect(twice(2)).toBe(4);\n}}, 300000);\n"
+        ),
+    );
+    project.commit("slow");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    project
+}
+
+/// The saved verdicts of `project`'s latest run, by mutant id.
+#[cfg(unix)]
+fn saved_statuses(project: &Project) -> std::collections::BTreeMap<String, String> {
+    let run = project.latest();
+    std::fs::read(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    .and_then(|saved| saved["mutants"].as_object().cloned())
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, verdict)| (id, verdict["status"].as_str().unwrap_or("").to_owned()))
+    .collect()
+}
+
+/// A Vitest pass sent a signal -- only Supercov, as `timeout` signals the
+/// command it runs, the tests' processes being in a group of their own --
+/// stops its workers and ends within seconds, as the signal ends it, with
+/// the verdicts it reached saved. A pass that does not end once told to
+/// (a test makes one linger) is ended `STOP_PATIENCE` (8 s) after the
+/// signal, what it decided saved first.
+#[cfg(unix)]
+#[test]
+fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
+    let project = vitest_slow_project("strong-signalled");
+    let run = project.latest();
+    let marker = project.root.with_extension("marker");
+    let stop = |signal: i32, faults: &str| {
+        let _ = std::fs::remove_file(
+            project
+                .root
+                .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+        );
+        let _ = std::fs::remove_file(&marker);
+        let mut supercov = project
+            .supercov_command(&["runs", "latest", "mutants", "test"])
+            .env("SUPERCOV_TEST_MARKER", &marker)
+            .env("SUPERCOV_TEST_FAULT", faults)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The slow copy is running, and cart.js's mutants are decided.
+        let started = std::time::Instant::now();
+        while !marker.exists()
+            || saved_statuses(&project)
+                .values()
+                .all(|status| status != "killed")
+        {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "the pass never got under way"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let test = std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        // SAFETY: a signal to the process this test started.
+        unsafe { libc::kill(supercov.id() as i32, signal) };
+        let told = std::time::Instant::now();
+        let mut said = String::new();
+        std::io::Read::read_to_string(supercov.stderr.as_mut().unwrap(), &mut said).unwrap();
+        let status = supercov.wait().unwrap();
+        let took = told.elapsed();
+        // SAFETY: signal 0 only asks whether the process is there.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            unsafe { libc::kill(test, 0) != 0 }
+        });
+        if !gone {
+            // SAFETY: cleaning up a process this test's pass left.
+            unsafe { libc::kill(test, libc::SIGKILL) };
+        }
+        assert!(gone, "the slow copy's worker outlived the pass\n{said}");
+        let killed = saved_statuses(&project)
+            .values()
+            .filter(|status| *status == "killed")
+            .count();
+        assert!(killed > 0, "{said}");
+        (status.code(), took, said)
+    };
+    let (code, took, said) = stop(libc::SIGTERM, "");
+    assert_eq!(code, Some(143), "{said}");
+    assert!(took < std::time::Duration::from_secs(8), "{took:?}\n{said}");
+    assert!(
+        said.contains(
+            "[supercov] interrupted: the verdicts the pass reached are saved into the run"
+        ),
+        "{said}"
+    );
+    let (code, took, said) = stop(libc::SIGINT, "strong-pass-lingers");
+    assert_eq!(code, Some(130), "{said}");
+    assert!(
+        took >= std::time::Duration::from_secs(8) && took < std::time::Duration::from_secs(14),
+        "{took:?}\n{said}"
+    );
+    assert!(
+        said.contains("[supercov] the strong pass did not end within 8 s of being told to stop (sent SIGINT), so it is ended: the verdicts it reached are saved into the run"),
+        "{said}"
+    );
+}
+
+/// A command still running past its budget is ended by the budget's own
+/// deadline, whatever holds it up: here the progress loop that stops a pass
+/// at its budget never gets to (it stalls), and the pass would never end on
+/// its own. It ends about 45 s after the budget, and says why.
+#[cfg(unix)]
+#[test]
+fn a_command_held_up_past_its_budget_is_ended_by_the_budget_s_deadline() {
+    let project = vitest_slow_project_waiting("strong-budget-deadline", 10_000);
+    let started = std::time::Instant::now();
+    let held = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--budget", "3"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "strong-progress-stalls,strong-pass-lingers",
+        )],
+    );
+    let took = started.elapsed();
+    let said = held.stderr();
+    assert_eq!(held.code(), 143, "{said}");
+    assert!(
+        took >= std::time::Duration::from_secs(3 + 45)
+            && took < std::time::Duration::from_secs(3 + 45 + 15),
+        "{took:?}\n{said}"
+    );
+    assert!(
+        said.contains("[supercov] still running 45 s after its budget was spent, so it is ended"),
+        "{said}"
+    );
+}
+
+/// `--budget <seconds>`: once it is spent the pass stops and ends as one
+/// that finished, the verdicts it reached saved, the mutants left without
+/// one for the next pass -- not errors, and not a pass that ran nothing.
+/// A pass that does not end once its budget is spent is ended in time. The
+/// budget is the whole command's: what `supercov mutants` spent measuring
+/// is not the pass's, and a budget measuring spent runs nothing.
+#[cfg(unix)]
+#[test]
+fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
+    // Ten seconds without a mutant: slow.js's mutants are judged timeouts
+    // 40 s into their copies, well past the budget below. Given 13 s, the
+    // limit of a test that takes no time, they were judged before a slow
+    // runner's budget was spent.
+    let project = vitest_slow_project_waiting("strong-budget", 10_000);
+    let slow_ids = || {
+        saved_statuses(&project)
+            .into_iter()
+            .filter(|(id, _)| id.starts_with("src/slow.js:"))
+            .collect::<Vec<_>>()
+    };
+    // Spent before any slow mutant could end.
+    let first = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/slow.js",
+        "--budget",
+        "1",
+        "--json",
+    ]);
+    let reply = first.json();
+    assert_eq!(first.code(), 0, "{reply}\n{}", first.stderr());
+    let left = reply["budget"]["left"].as_u64().unwrap();
+    assert!(left > 0, "{reply}");
+    assert_eq!(reply["budget"]["seconds"], 1, "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["result"].is_null(), "{reply}");
+    assert!(slow_ids().is_empty(), "{:?}", slow_ids());
+    // Long enough for cart.js's mutants, not for slow.js's, whose test waits
+    // five minutes and is judged a timeout 40 s in. What cart.js's take is
+    // this machine's: a fixed twelve seconds decided only some of them on a
+    // busy macOS runner. Timed by a pass of their own, whose verdicts are
+    // then forgotten.
+    let timed = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/cart.js",
+        "--json",
+    ]);
+    let reply = timed.json();
+    assert_eq!(timed.code(), 0, "{reply}\n{}", timed.stderr());
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let cart_ms = reply["summary"]["durationMs"].as_u64().unwrap();
+    let run = project.latest();
+    std::fs::remove_file(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+    )
+    .unwrap();
+    // Three times that beside slow.js's copies, and short of their 40 s.
+    let budget = (cart_ms * 3 / 1000 + 10).min(30).to_string();
+    let second = project.supercov(&[
+        "runs", "latest", "mutants", "test", "--budget", &budget, "--json",
+    ]);
+    let reply = second.json();
+    assert_eq!(second.code(), 0, "{reply}\n{}", second.stderr());
+    assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
+    assert_eq!(reply["budget"]["left"].as_u64(), Some(left), "{reply}");
+    assert!(slow_ids().is_empty(), "{:?}", slow_ids());
+    // A pass that lingers once its budget is spent.
+    let lingering = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--budget", "1"],
+        &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
+    );
+    let said = lingering.stderr();
+    assert_eq!(lingering.code(), 143, "{said}");
+    assert!(
+        said.contains(
+            "did not end within 8 s of being told to stop (its budget spent), so it is ended"
+        ) && said.contains("[supercov] budget spent, "),
+        "{said}"
+    );
+    // Measured first, as the latest run recorded no values for its
+    // mutants: measuring, which takes two seconds here, spends the budget,
+    // and the pass runs nothing.
+    let started = std::time::Instant::now();
+    let measured = project.supercov(&[
+        "mutants",
+        "--file",
+        "src/slow.js",
+        "--budget",
+        "1",
+        "--",
+        "sh",
+        "-c",
+        "sleep 2 && npx vitest run",
+    ]);
+    let (out, said) = (measured.stdout(), measured.stderr());
+    assert_eq!(measured.code(), 0, "{out}\n{said}");
+    assert!(said.contains("measuring first"), "{said}");
+    assert!(
+        out.contains("  budget of 1 s spent: 2 mutant(s) left without a verdict")
+            && out.contains(" s of the 1 s budget, which leaves the pass 0 s\n"),
+        "{out}"
+    );
+    // Ended once measuring did: no pass began.
+    assert!(
+        !said.contains("strong pass:") && started.elapsed() < std::time::Duration::from_secs(60),
+        "{said}"
+    );
+}
+
+/// A pass told to stop judges nothing from then on: its copies are being
+/// stopped under their tests, and one that ends then says nothing of its
+/// mutant. A pass the budget stopped on a macOS runner saved a mutant whose
+/// test waits five minutes as `killed`. Here the mutant's test stands in for
+/// the stop: it marks the pass as stopping (`stopped-at`, beside its
+/// results, as Supercov does before it signals the command) and its copy's
+/// process exits at once, as one the stop reached before the pass's own
+/// process did. That copy did not finish its file: judged, its mutant was
+/// `killed`; now it has no verdict from this pass.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_ends_once_the_pass_is_stopping_decides_nothing() {
+    let project = vitest_mutants_project("strong-stopping-copy");
+    project.write("src/slow.js", "export const twice = (n) => n * 2;\n");
+    project.write(
+        "test/slow.test.js",
+        "import { writeFileSync } from \"node:fs\";\nimport { dirname, join } from \"node:path\";\nimport { expect, it } from \"vitest\";\nimport { twice } from \"../src/slow.js\";\nit(\"doubles\", () => {\n  const results = process.env.SUPERCOV_STRONG_RESULTS;\n  if (twice(2) !== 4 && results) {\n    writeFileSync(join(dirname(results), \"stopped-at\"), String(Date.now()));\n    process.exit(1);\n  }\n  expect(twice(2)).toBe(4);\n});\n",
+    );
+    project.commit("slow");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/slow.js",
+        "--json",
+    ]);
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let slow = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["id"].as_str().unwrap().starts_with("src/slow.js:"))
+        .collect::<Vec<_>>();
+    assert_eq!(slow.len(), 2, "{listed}");
+    for mutant in slow {
+        assert_ne!(
+            mutant["strong"]["status"],
+            "killed",
+            "{mutant}\n{}",
+            ran.stderr()
+        );
+    }
+}
+
+/// Copies run within the project's own worker limit, each with a pool id
+/// Vitest gave it (1 to `maxWorkers`) that no copy running beside it has: a
+/// setup file that gives each worker its own database by `VITEST_POOL_ID`,
+/// and throws where the id is past the databases it made or another
+/// copy's still in use, lets every copy run, and every mutant gets a
+/// verdict.
+#[cfg(unix)]
+#[test]
+fn copies_keep_to_the_project_s_workers_and_their_pool_ids() {
+    let project = vitest_mutants_project("strong-pool-ids");
+    project.write(
+        "vitest.config.js",
+        "export default { test: { maxWorkers: 2, setupFiles: [\"./test/database.js\"] } };\n",
+    );
+    project.write(
+        "test/database.js",
+        "import { mkdirSync, readFileSync, rmSync, writeFileSync } from \"node:fs\";\nimport { afterAll } from \"vitest\";\nconst worker = Number(process.env.VITEST_POOL_ID);\nif (!(worker >= 1 && worker <= 2)) throw new Error(`Worker ${worker} has no database: 2 were made`);\nconst locks = new URL(\"../.databases/\", import.meta.url);\nmkdirSync(locks, { recursive: true });\nconst lock = new URL(String(worker), locks);\nlet holder;\ntry { holder = Number(readFileSync(lock, \"utf8\")); } catch {}\nif (holder && holder !== process.pid) {\n  let running = true;\n  try { process.kill(holder, 0); } catch { running = false; }\n  if (running) throw new Error(`Worker ${worker}'s database is in use by process ${holder}`);\n}\nwriteFileSync(lock, String(process.pid));\nafterAll(() => rmSync(lock, { force: true }));\n",
+    );
+    for file in ["a", "b", "c"] {
+        project.write(
+            &format!("test/{file}.test.js"),
+            "import { describe, expect, it } from \"vitest\";\nimport { shipping, label, refund } from \"../src/cart.js\";\nconst nap = () => new Promise((done) => setTimeout(done, 50));\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", async () => { await nap(); expect(shipping(80)).toBe(0); });\n  it(\"charges small orders\", async () => { await nap(); expect(shipping(10)).toBe(5); });\n  it(\"labels\", async () => { await nap(); expect(label(\" a \")).toBe(\"A\"); });\n  it(\"refunds\", async () => { await nap(); expect(refund(200)).toBe(180); });\n});\n",
+        );
+    }
+    project.write(".gitignore", "node_modules\n.supercov\n.databases\n");
+    project.commit("a database per worker");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["summary"]["killed"].as_u64() >= Some(5), "{reply}");
+    assert_eq!(
+        reply["passes"][0]["profile"]["unevaluatedReruns"], 0,
+        "{reply}"
+    );
+}
+
+/// A mutant that makes a hook fail (a `beforeAll` seeding through a schema
+/// the mutant broke) is killed: Vitest skips the hook's tests and fails the
+/// run, and the reason is the hook's error. A copy whose file does not load
+/// or set up before its mutant ran runs again; where that repeats, the
+/// mutant is an error that says the file's error. A copy that ran none of
+/// its tests says why. The staged pass judges a hook alike.
+#[cfg(unix)]
+#[test]
+fn a_hook_or_a_load_that_fails_says_its_error() {
+    let project = vitest_mutants_project("strong-hooks");
+    // One worker: the file's baseline copy, listed first, loads first, and
+    // the mutant's copies after it. With a worker per processor the two
+    // started side by side, and on an arm64 runner the mutant's copy loaded
+    // first some of the time: the load meant to fail was the baseline's.
+    project.write(
+        "vitest.config.js",
+        "export default { test: { maxWorkers: 1, setupFiles: [\"./test/setup.js\"] } };\n",
+    );
+    // Fails where `SETUP_FAILS_COUNTER` names a directory: the first load
+    // after the first, or (`always`) every load after the first. Each load
+    // takes the next number by creating its file, so that two loads can
+    // never both take the same one.
+    project.write(
+        "test/setup.js",
+        "import { closeSync, mkdirSync, openSync } from \"node:fs\";\nconst counter = process.env.SETUP_FAILS_COUNTER;\nif (counter) {\n  mkdirSync(counter, { recursive: true });\n  let count = 0;\n  for (;; count++) {\n    try { closeSync(openSync(`${counter}/${count}`, \"wx\")); break; } catch (error) { if (error.code !== \"EEXIST\") throw error; }\n  }\n  if (count === 1 || (count > 1 && process.env.SETUP_FAILS === \"always\")) throw new Error(\"the test database is gone\");\n}\n",
+    );
+    project.write(
+        "src/schema.js",
+        "export const users = { name: \"users\" };\n",
+    );
+    project.write(
+        "src/store.js",
+        "const tables = new Map([[\"users\", []]]);\nexport function insert(table, row) {\n  const rows = tables.get(table.name);\n  if (!rows) throw new Error(`relation \"${table.name}\" does not exist`);\n  rows.push(row);\n  return rows.length;\n}\n",
+    );
+    project.write(
+        "test/store.test.js",
+        "import { beforeAll, describe, expect, it } from \"vitest\";\nimport { users } from \"../src/schema.js\";\nimport { insert } from \"../src/store.js\";\ndescribe(\"store\", () => {\n  beforeAll(() => {\n    if (process.env.HOOK_FAILS) throw new Error(\"the seed did not load\");\n    insert(users, { id: 1 });\n  });\n  it(\"inserts\", () => expect(insert(users, { id: 2 })).toBe(2));\n});\n",
+    );
+    project.commit("hooks");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let schema = "src/schema.js:1:30-1:37:StringLiteral:empty";
+    let counter = project.root.with_extension("counter");
+    let counter_path = counter.to_str().unwrap();
+    let pass = |env: &[(&str, &str)]| {
+        let _ = std::fs::remove_dir_all(&counter);
+        let run = project.latest();
+        let _ = std::fs::remove_file(
+            project
+                .root
+                .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+        );
+        let reply = project
+            .supercov_with(
+                &[
+                    "runs",
+                    "latest",
+                    "mutants",
+                    "test",
+                    "--file",
+                    "src/schema.js",
+                    "--json",
+                ],
+                env,
+            )
+            .json();
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/schema.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let mutant = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == schema)
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone();
+        (reply, mutant["strong"].clone())
+    };
+    for stages in ["", "1"] {
+        let (_, strong) = pass(&[("SUPERCOV_STRONG_STAGES", stages)]);
+        assert_eq!(strong["status"], "killed", "{strong}");
+        assert_eq!(
+            strong["reason"], "a hook failed: relation \"\" does not exist",
+            "{strong}"
+        );
+        assert_eq!(strong["killedBy"], "test/store.test.js", "{strong}");
+    }
+    // Fails once: the copy runs again, and the mutant is killed.
+    let (reply, strong) = pass(&[("SETUP_FAILS_COUNTER", counter_path)]);
+    assert_eq!(strong["status"], "killed", "{strong}");
+    assert!(
+        reply["passes"][0]["profile"]["unevaluatedReruns"].as_u64() >= Some(1),
+        "{reply}"
+    );
+    // Fails every time: an error with the file's own.
+    let (_, strong) = pass(&[
+        ("SETUP_FAILS_COUNTER", counter_path),
+        ("SETUP_FAILS", "always"),
+    ]);
+    assert_eq!(strong["status"], "error", "{strong}");
+    assert_eq!(
+        strong["reason"],
+        "its copy of test/store.test.js did not load before the mutant ran, twice: the test database is gone",
+        "{strong}"
+    );
+    // The hook fails without the mutant too: the copy ran none of its tests,
+    // and says why.
+    let (_, strong) = pass(&[("HOOK_FAILS", "1")]);
+    assert_eq!(strong["status"], "error", "{strong}");
+    assert_eq!(
+        strong["reason"],
+        "its copy of test/store.test.js ran none of the tests it was to run: the seed did not load",
+        "{strong}"
     );
 }
 

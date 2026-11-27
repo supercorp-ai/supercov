@@ -346,6 +346,7 @@ fn nested_playwright_configs(root: &Path) -> Vec<PathBuf> {
         if depth > 4 {
             return;
         }
+        // fault-site: project-discovery.visit
         let Ok(entries) = read_directory(directory) else {
             return;
         };

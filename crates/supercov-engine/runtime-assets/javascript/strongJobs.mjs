@@ -20,11 +20,17 @@
 // whose parent was not chosen) runs whole from then on. A kill by a job that
 // ran other tests than its baseline did is confirmed by running the job's
 // tests again without the mutant. A job past 3x its baseline and 10 s is
-// stopped: a timeout, unless a test had already failed.
+// stopped: a timeout, unless a test had already failed. A stopped job may
+// only have waited: on the jobs beside it (the CPU; Cargo's lock on a build
+// directory, where each job builds Rust compiled to wasm), or on a machine
+// busier than when its baseline ran (other work on it, beyond the pass's
+// own). So it runs again alone, after its tests ran alone without the
+// mutant, and its limit there is 3x the slower of that run and its
+// baseline, and 10 s: only a job past that is a timeout.
 import { fork, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, constants, cpus } from "node:os";
-import { basename, delimiter, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // A file whose baseline job took at most this long, the start of the command
@@ -93,6 +99,49 @@ export function slots(size) {
             else
                 free += 1;
         }
+    };
+}
+
+// Turns at the machine: `shared` work runs beside other shared work, and
+// `alone` work waits until none runs, while no shared work starts. A shared
+// turn learns whether other work ran beside it (`crowded`).
+export function turns() {
+    const running = new Set();
+    const idle = [];
+    let alone;
+    return {
+        async shared(work) {
+            while (alone)
+                await alone;
+            const turn = { crowded: running.size > 0 };
+            for (const other of running)
+                other.crowded = true;
+            running.add(turn);
+            try {
+                return await work(turn);
+            }
+            finally {
+                running.delete(turn);
+                if (running.size === 0)
+                    for (const wake of idle.splice(0))
+                        wake();
+            }
+        },
+        async alone(work) {
+            while (alone)
+                await alone;
+            let end;
+            alone = new Promise((done) => { end = done; });
+            try {
+                if (running.size > 0)
+                    await new Promise((wake) => idle.push(wake));
+                return await work({ crowded: false });
+            }
+            finally {
+                alone = undefined;
+                end();
+            }
+        },
     };
 }
 
@@ -337,9 +386,17 @@ function stop(child) {
     }
 }
 
-export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env, graceMs = 10_000, baselineGraceMs = 60_000 }) {
+export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env, graceMs = 10_000, baselineGraceMs = 60_000, aloneGraceMs = graceMs }) {
     const started = Date.now();
-    const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+    // Once the pass is told to stop (`stopped-at` beside the results), its
+    // jobs are stopped under their tests: one that ends then says nothing of
+    // its mutant, and no verdict is written (vitestStrongReporter.mjs).
+    const stopping = join(dirname(resultsPath), "stopped-at");
+    const write = (record) => {
+        if (record.status !== undefined && existsSync(stopping))
+            return;
+        appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
+    };
     const work = `${resultsPath}.jobs`;
     mkdirSync(work, { recursive: true });
     const tests = plan.tests;
@@ -431,16 +488,19 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         });
         return handed ? parallel(work, priority) : result;
     };
-    const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
+    const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, alone: 0, jobMs: 0 };
+    const machine = turns();
     let jobNumber = 0;
 
     // One start of the command: `tests` of `file` (null: all of them), with
     // `mutant` on (null: none), stopped at `limitMs`. A job of a mutant's
     // later batch (`priority` 1, 2, ...) waits behind every first file's,
     // so that the kills most mutants get at once come first, and a
-    // survivor's many files fill what is left.
-    function job({ mutant, file, tests: chosen, bail, limitMs, priority = 0 }) {
-        return run(() => new Promise((resolveJob) => {
+    // survivor's many files fill what is left. One run `alone` waits for no
+    // slot: it has the machine to itself.
+    function job({ mutant, file, tests: chosen, bail, limitMs, priority = 0, alone = false }) {
+        const start = (work) => (alone ? machine.alone(work) : run(() => machine.shared(work), priority));
+        return start((turn) => new Promise((resolveJob) => {
             const number = ++jobNumber;
             profile.jobs += 1;
             const directory = join(work, String(number));
@@ -458,7 +518,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                 const statuses = outcomes(evidence);
                 if (environment.SUPERCOV_STRONG_KEEP !== "1")
                     rmSync(directory, { recursive: true, force: true });
-                return { ...outcome, statuses };
+                return { ...outcome, statuses, crowded: turn.crowded };
             };
             // A runner's own command, started for this job alone.
             const spawnJob = () => {
@@ -561,7 +621,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                     durationMs: Date.now() - begun,
                 }));
             });
-        }), priority);
+        }));
     }
 
     // What a file does without a mutant: once with every test a mutant will
@@ -633,9 +693,21 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             const limitMs = 3 * baseline.durationMs + graceMs;
             // A test that fails without the mutant must not stop the job.
             const bail = !whole || [...baseline.statuses.values()].every((status) => status === "passed");
-            const result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs, priority });
+            let result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs, priority });
+            const killerIn = (outcome) => [...outcome.statuses].find(([id, status]) => status === "failed" && (chosen === null || chosen.has(id)) && !excluded(id))?.[0];
+            // Past its limit with nothing failed: it may only have waited, on
+            // the jobs beside it or on a machine busier than when its
+            // baseline ran. It runs again alone, its limit from the same
+            // tests without the mutant run alone just before it, at the
+            // machine's speed now.
+            if (result.timedOut && !result.mutantTimedOut && killerIn(result) === undefined) {
+                profile.alone += 1;
+                const now = await job({ mutant: null, file: group.file, tests: chosen, bail: false, limitMs: baselineLimit(group.file, chosen), alone: true });
+                const slowest = Math.max(baseline.durationMs, now.durationMs);
+                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs: 3 * slowest + aloneGraceMs, alone: true });
+            }
             const ran = [...result.statuses].filter(([id, status]) => status !== "skipped" && (chosen === null || chosen.has(id)));
-            const killer = ran.find(([id, status]) => status === "failed" && !excluded(id))?.[0];
+            const killer = killerIn(result);
             if (result.mutantTimedOut)
                 return { status: "timeout", reason: "the mutant's evaluations passed its limit", tests: ran.length };
             if (killer === undefined) {

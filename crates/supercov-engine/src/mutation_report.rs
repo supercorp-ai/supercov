@@ -34,6 +34,10 @@ pub enum Outcome {
     Error,
     /// No driver runs its language's tests yet.
     NotRun,
+    /// A first tier of candidates passed with it, and the rest have not run
+    /// with it yet (`strong_tiers::survived_so_far`): no verdict, never a
+    /// survivor, not in the score.
+    SurvivedSoFar,
     /// No strong verdict: no pass ran it.
     Pending,
 }
@@ -49,6 +53,7 @@ impl Outcome {
             Self::Unviable => "unviable",
             Self::Error => "error",
             Self::NotRun => "not-run",
+            Self::SurvivedSoFar => crate::strong_tiers::SURVIVED_SO_FAR,
             Self::Pending => "pending",
         }
     }
@@ -80,6 +85,7 @@ pub fn outcome(entry: &MutantEntry) -> Outcome {
         "no-coverage" => Outcome::NoCoverage,
         "equivalent" => Outcome::Equivalent,
         "unviable" => Outcome::Unviable,
+        crate::strong_tiers::SURVIVED_SO_FAR => Outcome::SurvivedSoFar,
         _ if undriven(&verdict).is_some() => Outcome::NotRun,
         _ => Outcome::Error,
     }
@@ -104,18 +110,56 @@ fn tests(count: u64) -> String {
     format!("{count} test{}", if count == 1 { "" } else { "s" })
 }
 
+/// A verdict's reason in plain words, where it is one of the codes a pass
+/// writes for a mutant it compared by compiled code
+/// (`js_compiled_equivalence`).
+fn plain_reason(reason: String) -> String {
+    use crate::js_compiled_equivalence::{COMPILES_TO_ORIGINAL, SAME_CODE_AS};
+    if reason == COMPILES_TO_ORIGINAL {
+        return "compiles to the same code as the original: no test can tell it apart, so it was not run"
+            .into();
+    }
+    match reason.strip_prefix(SAME_CODE_AS) {
+        Some(other) => {
+            format!("compiles to the same code as {other}, which ran for both")
+        }
+        None => reason,
+    }
+}
+
+/// Where a strong pass decided a mutant by its compiled code -- equivalent
+/// to the original, or taking the verdict of another that compiles to the
+/// same code -- why, in plain words.
+pub fn compiled_reason(entry: &MutantEntry) -> Option<String> {
+    use crate::js_compiled_equivalence::{COMPILES_TO_ORIGINAL, SAME_CODE_AS};
+    let reason = verdict(entry)?.reason?;
+    (reason == COMPILES_TO_ORIGINAL || reason.starts_with(SAME_CODE_AS))
+        .then(|| plain_reason(reason))
+}
+
 /// Why a mutant has its outcome, in plain words. `strong_ran` is whether a
 /// strong pass gave any of the run's mutants a verdict: a mutant without
 /// one is then one the pass left out.
 pub fn why(entry: &MutantEntry, strong_ran: bool) -> String {
     let saved = verdict(entry);
-    let given = saved.as_ref().and_then(|verdict| verdict.reason.clone());
+    let given = saved
+        .as_ref()
+        .and_then(|verdict| verdict.reason.clone())
+        .map(plain_reason);
     let ran = saved.as_ref().map_or(0, |verdict| verdict.tests);
     match outcome(entry) {
-        Outcome::Killed => match saved.and_then(|verdict| verdict.killed_by) {
-            Some(test) => format!("{test} failed with it in place"),
-            None => "a test failed with it in place".into(),
-        },
+        Outcome::Killed => {
+            let killed = match saved.and_then(|verdict| verdict.killed_by) {
+                Some(test) => format!("{test} failed with it in place"),
+                None => "a test failed with it in place".into(),
+            };
+            match given {
+                Some(same) if same.starts_with("compiles to the same code as ") => {
+                    format!("{killed}; it {same}")
+                }
+                _ => killed,
+            }
+        }
         Outcome::Timeout => {
             given.unwrap_or_else(|| "a test ran past its time with it in place".into())
         }
@@ -132,6 +176,10 @@ pub fn why(entry: &MutantEntry, strong_ran: bool) -> String {
         Outcome::NotRun => format!(
             "not run: no driver for {} yet",
             saved.as_ref().and_then(undriven).unwrap_or_default()
+        ),
+        Outcome::SurvivedSoFar => format!(
+            "survived so far: {} passed with it in place, and the rest of its candidates have not run with it yet",
+            tests(ran)
         ),
         Outcome::Pending => match entry.status {
             MutantStatus::Infected | MutantStatus::Unknown if strong_ran => format!(
@@ -159,6 +207,7 @@ pub struct StrongCounts {
     pub unviable: usize,
     pub error: usize,
     pub not_run: usize,
+    pub survived_so_far: usize,
     pub pending: usize,
 }
 
@@ -173,6 +222,7 @@ impl StrongCounts {
             Outcome::Unviable => &mut self.unviable,
             Outcome::Error => &mut self.error,
             Outcome::NotRun => &mut self.not_run,
+            Outcome::SurvivedSoFar => &mut self.survived_so_far,
             Outcome::Pending => &mut self.pending,
         } += 1;
     }
@@ -378,7 +428,7 @@ fn stryker_status(entry: &MutantEntry) -> &'static str {
         Outcome::Equivalent => "Ignored",
         Outcome::Unviable => "CompileError",
         Outcome::Error => "RuntimeError",
-        Outcome::NotRun => "Pending",
+        Outcome::NotRun | Outcome::SurvivedSoFar => "Pending",
         Outcome::Pending => match entry.status {
             MutantStatus::NotReached => "NoCoverage",
             MutantStatus::NotInfected => "Survived",
@@ -477,6 +527,8 @@ fn pit_status(entry: &MutantEntry) -> Option<(&'static str, bool)> {
         // A pass that gave no verdict did not run the mutant to its end:
         // PIT's RUN_ERROR would count it detected.
         Outcome::Error | Outcome::NotRun => ("NOT_STARTED", false),
+        // Some of its candidates ran with it, not all.
+        Outcome::SurvivedSoFar => ("STARTED", false),
         Outcome::Equivalent => return None,
         Outcome::Pending => match entry.status {
             MutantStatus::NotReached => ("NO_COVERAGE", false),
@@ -559,6 +611,8 @@ mod tests {
 
     fn entry(file: &str, line: u32, status: MutantStatus, strong: Option<Value>) -> MutantEntry {
         MutantEntry {
+            log_only: false,
+            line_tests: None,
             id: format!("{file}:{line}:5-{line}:9:EqualityOperator:<"),
             file: file.into(),
             span: MutantSpan {
@@ -583,6 +637,47 @@ mod tests {
             strong,
             stryker: None,
         }
+    }
+
+    /// A mutant decided by its compiled code says so in plain words, and a
+    /// duplicate killed names the test and whose run it took.
+    #[test]
+    fn compiled_code_reasons_are_said_in_plain_words() {
+        let with = |status: &str, reason: &str| {
+            entry(
+                "src/a.ts",
+                1,
+                MutantStatus::Infected,
+                Some(json!({"status": status, "killedBy": "t", "reason": reason})),
+            )
+        };
+        let equivalent = with("equivalent", "compiles-to-original");
+        assert_eq!(
+            why(&equivalent, true),
+            "compiles to the same code as the original: no test can tell it apart, so it was not run"
+        );
+        assert_eq!(compiled_reason(&equivalent), Some(why(&equivalent, true)));
+        let killed = with("killed", "same-code-as:src/a.ts:2:1-2:3:X:y");
+        assert_eq!(
+            why(&killed, true),
+            "t failed with it in place; it compiles to the same code as src/a.ts:2:1-2:3:X:y, which ran for both"
+        );
+        assert_eq!(
+            compiled_reason(&killed).as_deref(),
+            Some("compiles to the same code as src/a.ts:2:1-2:3:X:y, which ran for both")
+        );
+        // Any other reason is said as it is, and is no compiled reason.
+        let other = with("timeout", "ran past 5 s");
+        assert_eq!(why(&other, true), "ran past 5 s");
+        assert_eq!(compiled_reason(&other), None);
+        assert_eq!(
+            why(&with("killed", "other"), true),
+            "t failed with it in place"
+        );
+        assert_eq!(
+            compiled_reason(&entry("src/a.ts", 1, MutantStatus::Infected, None)),
+            None
+        );
     }
 
     fn data(mutants: Vec<MutantEntry>) -> CoverageMutantsData {
@@ -676,6 +771,11 @@ mod tests {
                 "not run: no driver for cobol yet",
             ),
             (
+                json!({"status": "survived-so-far", "tests": 32}),
+                Outcome::SurvivedSoFar,
+                "survived so far: 32 tests passed with it in place, and the rest of its candidates have not run with it yet",
+            ),
+            (
                 json!({"status": "strange"}),
                 Outcome::Error,
                 "the pass could not give it a verdict",
@@ -713,12 +813,13 @@ mod tests {
             Outcome::Unviable,
             Outcome::Error,
             Outcome::NotRun,
+            Outcome::SurvivedSoFar,
             Outcome::Pending,
         ]
         .map(Outcome::name);
         assert_eq!(
             names.join(","),
-            "killed,timeout,survived,no-coverage,equivalent,unviable,error,not-run,pending"
+            "killed,timeout,survived,no-coverage,equivalent,unviable,error,not-run,survived-so-far,pending"
         );
     }
 
@@ -825,6 +926,12 @@ mod tests {
             entry("src/a.js", 12, Equivalent, None),
             entry("src/a.js", 13, Infected, None),
             entry("src/a.js", 14, Unknown, None),
+            entry(
+                "src/a.js",
+                15,
+                Infected,
+                Some(json!({"status": "survived-so-far", "tests": 32})),
+            ),
             entry("gone.rs", 1, Infected, None),
         ];
         let sources = BTreeMap::from([("src/a.js".to_owned(), "x\n".to_owned())]);
@@ -854,6 +961,7 @@ mod tests {
                 "NoCoverage",
                 "Survived",
                 "Ignored",
+                "Pending",
                 "Pending",
                 "Pending"
             ]
@@ -926,6 +1034,12 @@ mod tests {
             entry("app/src/main/kotlin/a/B.kt", 1, Infected, None),
             entry("Win\\Path.go", 1, Infected, None),
             entry("noext", 1, Infected, None),
+            entry(
+                "noext",
+                2,
+                Infected,
+                Some(json!({"status": "survived-so-far", "tests": 32})),
+            ),
         ];
         let xml = pit_xml(&data(mutants));
         let statuses = xml
@@ -948,7 +1062,8 @@ mod tests {
                 "NOT_STARTED",
                 "NOT_STARTED",
                 "NOT_STARTED",
-                "NOT_STARTED"
+                "NOT_STARTED",
+                "STARTED"
             ]
         );
         assert!(xml.starts_with(

@@ -89,3 +89,76 @@ test("comparison outcomes are kept, each once per probe, and left out when there
   ]);
   assert.equal("comparisons" in mergeSnapshots([{ hits: ["a"] }]), false);
 });
+
+test("a snapshot read as columns is what the collector made of a compact one, and its events come back for a merge", async () => {
+  const runtime = await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href);
+  const { columnarEvents, eventsOfColumns } = await import("../../runtime/javascript/snapshots.mjs");
+  const columns = () => JSON.parse(globalThis.__SUPERCOV_COLUMNS_SNAPSHOT__());
+  // What the collector stored before: the compact text expanded, then as columns.
+  const before = () => columnarEvents(expandSnapshot(JSON.parse(globalThis.__SUPERCOV_COMPACT_SNAPSHOT__(globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__()))));
+  runtime.enableRuntimeSnapshotEvidence();
+  runtime.resetCoverage();
+  // Nothing recorded: no columns, an empty list of events.
+  assert.equal(JSON.stringify(columns()), JSON.stringify(before()));
+  assert.equal(JSON.stringify(eventsOfColumns(columns())), JSON.stringify(globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__()));
+  const file = runtime.registerProbeV2({ key: "00000000000000cc", points: 3, decisionWidths: [2], defaultCount: 0, selectionPoints: [3, 0], selectionTrees: [] });
+  const previous = globalThis.__SUPERCOV_PHASE_ID__;
+  try {
+    runtime.coverageHit("outside-a-phase");
+    globalThis.__SUPERCOV_PHASE_ID__ = "attempt:phase:1";
+    runtime.activateCoverageScope();
+    file.hit(0);
+    file.hit(1);
+    runtime.mcdcEndV2(file, 0, 1 + 2 + 3, false);
+    runtime.compareV2("f.ts:1:2", 1, 2, "<");
+    globalThis.__SUPERCOV_PHASE_ID__ = "attempt:phase:2";
+    runtime.activateCoverageScope();
+    file.hit(0);
+    runtime.mcdcEndV2(file, 0, 1 + 1, true);
+  } finally {
+    globalThis.__SUPERCOV_PHASE_ID__ = previous;
+  }
+  const read = columns();
+  assert.ok(read.eventColumns.id.length >= 5, JSON.stringify(read));
+  assert.equal(JSON.stringify(read), JSON.stringify(before()));
+  // The events as the runtime built them, which a merge with a document that
+  // left reads.
+  const objects = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__();
+  assert.equal(JSON.stringify(eventsOfColumns(read).events), JSON.stringify(objects.events));
+  assert.equal(JSON.stringify(mergeSnapshots([eventsOfColumns(read)])), JSON.stringify(mergeSnapshots([objects])));
+  // Anything without columns passes through.
+  assert.equal(eventsOfColumns(objects), objects);
+  assert.equal(eventsOfColumns(undefined), undefined);
+  runtime.resetCoverage();
+});
+
+test("a test's record written with its pages' kept texts is its JSON.stringify", async () => {
+  const { keepSnapshotText, recordLine } = await import("../../runtime/javascript/snapshots.mjs");
+  // As a page writes a snapshot of columns: integer keys, escapes, lone
+  // surrogates, numbers of every form, and a string shaped like the record's
+  // own placeholder.
+  const page = {
+    decisions: [{ id: "src/a.ts:3:9", vectors: [{ values: [true, null, false], outcome: true }] }],
+    hits: ["src/a.ts:1:1-1:9", "line\nbreak \"quoted\" \\   \ud800 é"],
+    eventColumns: {
+      types: ["hit", "decision"], phases: ["att:phase:1"], environments: ["browser"],
+      id: [0, 1, "src/a.ts:3:9"], type: [0, 0, 1], phase: [0, -1, 0], environment: [0, 0, 0],
+      t: [1793741378313, -3, 0.5],
+      vector: { 10: { values: [1e21, 1e-7, -1.5], outcome: false }, 2: { values: [true], outcome: true } },
+    },
+    comparisons: [{ id: "c", outcomes: ["lt", "\u0000supercov-snapshots\u0000"] }],
+  };
+  const text = JSON.stringify(page);
+  const read = JSON.parse(text);
+  keepSnapshotText(read, text);
+  const empty = { decisions: [], hits: [], events: [] };
+  const record = {
+    testId: "t1",
+    test: 'title "browser":"\u0000supercov-snapshots\u0000"',
+    phases: [{ id: "p", browser: [] }],
+    browser: [read, empty, read],
+    span: [1, 2],
+  };
+  assert.equal(recordLine(record), JSON.stringify(record));
+  assert.equal(recordLine({ ...record, browser: [] }), JSON.stringify({ ...record, browser: [] }));
+});

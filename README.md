@@ -172,8 +172,9 @@ npx supercov runs latest mutants --diff origin/main --fail-on not-infected,not-r
 Each language uses its established tool's mutants, and its verdicts were
 compared with that tool's on public projects: StrykerJS for JavaScript and
 TypeScript, under Vitest, Playwright, Jest, `node:test`, Mocha, AVA,
-node-tap, `bun:test` and Vitest Browser Mode; and in preview, mutmut for
-Python, cargo-mutants for Rust, Gremlins for Go and mutant for Ruby. The run already knows which tests reach
+node-tap, `bun:test` and Vitest Browser Mode; cargo-mutants for Rust, under
+`cargo test` and cargo-nextest; and in preview, mutmut for Python, Gremlins
+for Go and mutant for Ruby. The run already knows which tests reach
 each mutant and which never change its value, so a mutant no test reaches or
 infects is decided without running anything, and the rest run only against
 the tests that can kill them. A plain run costs nothing more. See
@@ -332,9 +333,9 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | Mocha | Exact per test and retry, `--parallel` included | StrykerJS's mutants |
 | AVA | Exact per test, concurrent tests included | StrykerJS's mutants |
 | node-tap 15 and newer | Exact per subtest | StrykerJS's mutants |
-| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Preview: cargo-mutants' mutants |
-| rustdoc doctests | Exact per doctest | Preview: cargo-mutants' mutants |
-| cargo-nextest | Exact test, attempt, retry, and binary identity | Preview: cargo-mutants' mutants |
+| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | cargo-mutants' mutants |
+| rustdoc doctests | Exact per doctest | cargo-mutants' mutants |
+| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-mutants' mutants |
 | pytest and `python -m unittest` | Exact test and setup/call/teardown phase identity | Preview: mutmut's mutants |
 | `go test` | Exact per test | Preview: Gremlins' mutants |
 | JUnit 5, JUnit 4, Kotest, Spock and TestNG | Exact per test | Not yet |

@@ -81,6 +81,17 @@ const BLOCK_STATEMENT: &str = "BlockStatement";
 
 /// The mutant's status, and why.
 pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> (Status, Reason) {
+    verdict_also_hit(mutant, observations, None)
+}
+
+/// `verdict`, with `also_hit` counted among the points `observations` hit:
+/// what a copy of them with that point added would say, without the copy,
+/// which for a record of a large run is most of planning its mutants.
+pub(crate) fn verdict_also_hit(
+    mutant: &CandidateMutant,
+    observations: &Observations,
+    also_hit: Option<&str>,
+) -> (Status, Reason) {
     // Decided from the program alone, before reach or infection: whatever
     // the tests did, they could not have made it differ.
     if let Some(rule) = &mutant.equivalent {
@@ -94,6 +105,7 @@ pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> 
     }
     let records = Records {
         observations,
+        also_hit,
         read: Cell::new(false),
     };
     let (status, reason) = decide(mutant, &records);
@@ -135,6 +147,7 @@ pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> 
 /// noting each read.
 struct Records<'o> {
     observations: &'o Observations,
+    also_hit: Option<&'o str>,
     read: Cell<bool>,
 }
 
@@ -156,7 +169,7 @@ impl Records<'_> {
     }
 
     fn hit(&self, id: &str) -> bool {
-        self.observations.hits.contains(id)
+        self.also_hit == Some(id) || self.observations.hits.contains(id)
     }
 
     fn vectors(&self, decision: &str) -> &[Vector] {
@@ -1460,6 +1473,7 @@ pub(crate) fn results(
                         let kind = Untestable::parse(&note.rule)?;
                         Some((kind, note.reason.clone()))
                     }),
+                    log_only: mutant.log_only,
                 }
             })
             .collect::<Vec<_>>();
@@ -1993,6 +2007,7 @@ mod tests {
     fn mutant(mutator: &str, replacement: &str, original: &str) -> CandidateMutant {
         let end = original.len() as u32 + 1;
         CandidateMutant {
+            log_only: false,
             id: format!("a.ts:1:1-1:{end}:{mutator}:{replacement}"),
             mutator: mutator.into(),
             replacement: replacement.into(),
@@ -2012,6 +2027,7 @@ mod tests {
             arrow: None,
             equivalent: None,
             untestable: None,
+            reads: None,
             is_static: false,
             unplaceable: None,
         }

@@ -5,17 +5,13 @@ name: Next.js compatibility
 # failed such an application at two consecutive steps before an end-to-end
 # test ran, and nothing here would have said so. One of the two depends on
 # the Node version, so both run.
+#
+# The slow tier's (slow-tier.yml): a pull request ready to merge, every push
+# to a release pull request, and each night on main. Whether the change can
+# affect the application is the plan's to say.
 on:
+  workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'crates/**'
-      - 'Cargo*'
-      - 'runtime/javascript/**'
-      - 'scripts/next-playwright-integration.mjs'
-      - 'scripts/jev-stand-in.mjs'
-      - 'tests/fixtures/next-playwright/**'
-      - '.github/workflows/next-compatibility.yml'
 
 permissions:
   contents: read
@@ -23,11 +19,29 @@ permissions:
   actions: write
 
 concurrency:
-  group: next-compatibility-${{ github.ref }}
+  group: next-compatibility-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: true
 
 jobs:
+  # Whether this change can affect the job (scripts/ci-affected.mjs), as in
+  # CI: the step summary says why it runs or not.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: next
+
   application:
+    needs: plan
+    if: ${{ fromJSON(needs.plan.outputs.jobs)['application'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # The fixture keeps the reporter's Playwright 1.60, which predates the
@@ -49,8 +63,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: npm ci
         working-directory: tests/fixtures/next-playwright
-      # The system's own libraries, by a Playwright that knows this system.
-      - run: env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y playwright@1.62.1 install-deps chromium
+      # The system's own libraries, by a Playwright that knows this system,
+      # from Ubuntu's sources alone and kept between runs.
+      - uses: ./.github/actions/system-packages
+        with:
+          command: env -u PLAYWRIGHT_HOST_PLATFORM_OVERRIDE npx -y playwright@1.62.1 install-deps chromium
+          key: apt-chromium-next-${{ runner.os }}-${{ runner.arch }}-1.62.1
+          prefix: apt-chromium-next-${{ runner.os }}-${{ runner.arch }}-
       - run: npx playwright install chromium
         working-directory: tests/fixtures/next-playwright
       - run: cargo build -p supercov

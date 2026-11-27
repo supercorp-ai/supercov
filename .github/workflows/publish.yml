@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       rebuild-native:
-        description: Build the native target matrix instead of reusing a complete prior run
+        description: Build the native target matrix instead of reusing a complete prior run (a release pull request's builds of this same tree are still reused)
         required: false
         type: boolean
         default: true
@@ -24,11 +24,69 @@ permissions:
   id-token: write
 
 jobs:
+  # Nothing is published that did not pass both tiers in full: the `Fast
+  # tier` and `Slow tier` statuses GitHub Actions posted, each saying "Passed
+  # in full", on this commit or on another of the same tree -- the release
+  # pull request's head, whose squash merge this is. Its results stand for
+  # this tree, and nothing runs again on main. With none, nothing is
+  # published (scripts/ci-tiers.mjs verify-release says what is missing).
+  verified:
+    name: Both tiers passed on this tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - run: node scripts/ci-tiers.mjs verify-release "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # The release pull request built this tree's native matrix while its CI ran
+  # (release-native.yml); a squash merge leaves main with that tree. A run of
+  # it that succeeded on the same tree is reused, and nothing is built again.
+  # A run id given by hand wins; with none found, the matrix is built here.
+  prebuilt:
+    name: Native builds of this tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-id: ${{ steps.find.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: find
+        if: inputs.reuse-run-id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          runs=$(gh run list --workflow release-native.yml --status success --limit 30 --json databaseId,headSha --jq '.[] | "\(.databaseId) \(.headSha)"')
+          while read -r id sha; do
+            [ -n "$id" ] || continue
+            git cat-file -e "$sha^{commit}" 2>/dev/null || git fetch -q origin "$sha" 2>/dev/null || continue
+            [ "$(git rev-parse "$sha^{tree}")" = "$tree" ] || continue
+            # A release pull request run that only decided "not a release" built nothing.
+            built=$(gh run view "$id" --json jobs --jq '[.jobs[] | select(.name == "Verify complete native release set" or (.name | endswith("/ Verify complete native release set"))) | select(.conclusion == "success")] | length')
+            [ "$built" -gt 0 ] || continue
+            echo "Run $id built this tree ($tree) from $sha: its artifacts are published."
+            echo "run-id=$id" >> "$GITHUB_OUTPUT"
+            exit 0
+          done <<< "$runs"
+          echo "No release pull request built this tree ($tree)."
+
   native-artifacts:
+    needs: [verified, prebuilt]
     uses: ./.github/workflows/native-artifacts.yml
     with:
-      build-targets: ${{ inputs.rebuild-native }}
-      reuse-run-id: ${{ inputs.reuse-run-id }}
+      build-targets: ${{ inputs.reuse-run-id == '' && needs.prebuilt.outputs.run-id == '' && inputs.rebuild-native }}
+      reuse-run-id: ${{ inputs.reuse-run-id || needs.prebuilt.outputs.run-id }}
     permissions:
       actions: read
       contents: read

@@ -134,8 +134,15 @@ type CandidateMutant, written and read = closed {
   arrow?: ArrowLink | null
   equivalent?: StaticNote | null
   untestable?: StaticNote | null
+  reads?: ReadLink | null
   static?: boolean
   unplaceable?: string | null
+  logOnly?: boolean
+}
+
+type CarriedFrom, written and read = {
+  run: string
+  commit?: string | null
 }
 
 type ChainLink, written and read = closed {
@@ -233,6 +240,7 @@ type EventId, read = string | uint
 type Execution, written = closed {
   test: TestSelector
   passed: boolean
+  skipped?: boolean
   files: {string: [uint]}
   attribution: string
 }
@@ -240,6 +248,7 @@ type Execution, written = closed {
 type Execution, read = closed {
   test: TestSelector
   passed: boolean
+  skipped?: boolean
   files: {string: [uint]}
   attribution?: string
 }
@@ -553,6 +562,11 @@ type RawTestResult, read = closed {
   durationMs?: uint | null
 }
 
+type ReadLink, written and read = closed {
+  read: string
+  escape: string
+}
+
 type RecordedDecision, read = {
   id: string
 }
@@ -598,6 +612,7 @@ type RunMetadata, written = closed {
   recordedBy?: string | null
   companions?: [CompanionRun] | null
   supersedes?: [string] | null
+  measuredAs?: string | null
 }
 
 type RunMetadata, read = closed {
@@ -619,6 +634,7 @@ type RunMetadata, read = closed {
   recordedBy?: string | null
   companions?: [CompanionRun] | null
   supersedes?: [string] | null
+  measuredAs?: string | null
 }
 
 type RunTimings, written and read = closed {
@@ -698,6 +714,10 @@ type StrongVerdicts, written and read = {
   run: string
   mutantSet: string
   mutants: {string: Verdict}
+  progress?: {string: [string]}
+  lived?: [string]
+  anchors?: {string: string}
+  carried?: {string: CarriedFrom}
 }
 
 type StructuralSource, written and read = "owned-probes" | "native-import" | "mixed"
@@ -705,11 +725,13 @@ type StructuralSource, written and read = "owned-probes" | "native-import" | "mi
 type SupportReach, written = {
   files: {string: [string]}
   names: {string: string}
+  loaded?: [string] | null
 }
 
 type SupportReach, read = {
   files: {string: [string]}
   names?: {string: string}
+  loaded?: [string] | null
 }
 
 type TestProvenance, written and read = closed {

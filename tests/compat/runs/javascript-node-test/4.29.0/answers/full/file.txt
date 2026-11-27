@@ -15,11 +15,11 @@ Gaps
  LINE  STATUS        SOURCE
     3  PARTIAL       member && amount > 100
        Unobserved: `amount > 100` was never false; needs `member` true, `amount > 100` false, decision false
-       Inspect: npx supercov runs 'run_0524aa0ca175a570' line 'src/price.js:3'
+       Inspect: npx supercov runs 'run_46a77bf8c46c5868' line 'src/price.js:3'
    13  PARTIAL       total > 50
        Unobserved: decision never false
        Unobserved: `total > 50` was never false; needs `total > 50` false, decision false
-       Inspect: npx supercov runs 'run_0524aa0ca175a570' line 'src/price.js:13'
+       Inspect: npx supercov runs 'run_46a77bf8c46c5868' line 'src/price.js:13'
    16  NOT COVERED   unused
        Unobserved: function not called
    17  NOT COVERED   value

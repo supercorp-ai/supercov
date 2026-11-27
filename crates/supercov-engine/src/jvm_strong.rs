@@ -267,6 +267,8 @@ pub(crate) fn candidate(
         untestable: None,
         is_static: false,
         unplaceable: None,
+        reads: None,
+        log_only: false,
     }
 }
 

@@ -1,0 +1,57 @@
+{
+  "tests": [
+    {
+      "test": {
+        "file": "tests/test_label.py",
+        "name": "tests/test_label.py::test_large_totals"
+      },
+      "passed": true,
+      "files": {
+        "src/shop/price.py": [
+          2
+        ]
+      },
+      "attribution": "exact"
+    },
+    {
+      "test": {
+        "file": "tests/test_price.py",
+        "name": "tests/test_price.py::test_coupons_take_five_off"
+      },
+      "passed": true,
+      "files": {
+        "src/shop/price.py": [
+          1
+        ]
+      },
+      "attribution": "exact"
+    },
+    {
+      "test": {
+        "file": "tests/test_price.py",
+        "name": "tests/test_price.py::test_members_save_on_large_orders"
+      },
+      "passed": true,
+      "files": {
+        "src/shop/price.py": [
+          1
+        ]
+      },
+      "attribution": "exact"
+    }
+  ],
+  "probed": {
+    "src/shop/price.py": [
+      1,
+      2,
+      3
+    ]
+  },
+  "covered": {
+    "src/shop/price.py": [
+      1,
+      2,
+      3
+    ]
+  }
+}

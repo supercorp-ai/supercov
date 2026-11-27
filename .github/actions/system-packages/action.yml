@@ -29,6 +29,18 @@ runs:
         INSTALL: ${{ inputs.command }}
       run: |
         mkdir -p ~/apt-archives/partial
+        # Every package these commands install is Ubuntu's: the image's
+        # other sources (packages.microsoft.com and the like) are set aside
+        # for this job. One of them answering 403 failed `apt-get update`,
+        # and with it all six attempts, on 2026-11-27. Ubuntu's own sources
+        # name its archives, or the mirror list the image keeps for them.
+        sudo mkdir -p /etc/apt/sources.list.d.supercov-aside
+        for source in /etc/apt/sources.list.d/*; do
+          [ -f "$source" ] || continue
+          grep -qE 'ubuntu\.com|apt-mirrors\.txt' "$source" && continue
+          echo "set aside for this job: $source"
+          sudo mv "$source" /etc/apt/sources.list.d.supercov-aside/
+        done
         # Kept where the cache is; and a connection that stops sending is
         # dropped after half a minute and tried again, on the next mirror.
         printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' "$HOME/apt-archives" \
@@ -47,13 +59,17 @@ runs:
           sleep 2
           sudo dpkg --configure -a || true
         done
+        echo "SUPERCOV_INFRA_FAILURE=the system packages did not install in six attempts" >> "$GITHUB_ENV"
         exit 1
     # Saved whether or not the install finished: what it fetched is the next
-    # run's head start. apt wrote it as root.
-    - if: always() && steps.kept.outputs.cache-hit != 'true'
+    # run's head start. apt wrote it as root. A pull request saves only where
+    # nothing was restored: one that started from main's copy, or an older
+    # one, would add a copy of its own to the repository's 10 GB of cache. A
+    # run on another branch saves nothing: no pull request can read it.
+    - if: always() && steps.kept.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && steps.kept.outputs.cache-matched-key == ''))
       shell: bash
       run: sudo chown -R "$USER" ~/apt-archives
-    - if: always() && steps.kept.outputs.cache-hit != 'true'
+    - if: always() && steps.kept.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && steps.kept.outputs.cache-matched-key == ''))
       uses: actions/cache/save@v4
       with:
         path: ~/apt-archives

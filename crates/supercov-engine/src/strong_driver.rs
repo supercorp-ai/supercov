@@ -20,6 +20,11 @@ pub const STRONG_FILES: &str = "SUPERCOV_STRONG_FILES";
 pub const STRONG_PLAN: &str = "SUPERCOV_STRONG_PLAN";
 /// Where the driver appends its verdicts (`results.jsonl`).
 pub const STRONG_RESULTS: &str = "SUPERCOV_STRONG_RESULTS";
+/// The file beside a pass's results that says when the pass began to stop,
+/// in milliseconds since the epoch: written before the pass is signalled,
+/// for its budget or a signal alike. A driver judges nothing a stop cut
+/// short (`playwrightStrongReporter.mjs` and the Rust driver read it).
+pub const STOPPED_AT: &str = "stopped-at";
 /// `<file>#<index>`: the mutant switched on in a process from its start;
 /// `-` or unset for none. `file` is the mutant's file as `mutants.json`
 /// keys it, `index` its place in that file's list.
@@ -75,6 +80,76 @@ impl StrongRun {
         path.push(TIMEOUTS_SUFFIX);
         PathBuf::from(path)
     }
+
+    /// `NODE_OPTIONS` flags that make each Node process of the pass that dies
+    /// of a fatal error (out of heap) write a diagnostic report into the
+    /// pass's directory first: afterwards, the one record of which process
+    /// it was (`out_of_memory`).
+    pub fn node_report_options(&self) -> String {
+        let directory = self.results.with_file_name(".").display().to_string();
+        // Quoted, as `NODE_OPTIONS` reads a value with spaces.
+        let quoted = directory.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("--report-on-fatalerror --report-directory=\"{quoted}\"")
+    }
+}
+
+/// The Node processes of a pass in `work` that ran out of heap, a sentence
+/// each, from the reports `node_report_options` asked for. Reads and removes
+/// every report there: each holds the process's environment.
+pub fn out_of_memory(work: &Path) -> Vec<String> {
+    let mut reports = std::fs::read_dir(work)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.starts_with("report.") && name.ends_with(".json")
+        })
+        .collect::<Vec<_>>();
+    reports.sort();
+    let mut said = Vec::new();
+    for path in reports {
+        let report = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        let header = &report["header"];
+        if !header["event"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("out of memory")
+        {
+            continue;
+        }
+        let command = header["commandLine"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        let heap = report["javascriptHeap"]["memoryLimit"]
+            .as_u64()
+            .unwrap_or_default()
+            >> 20;
+        let mut sentence = format!(
+            "a Node process ran out of memory at its {heap} MB heap: {} (pid {})",
+            command.join(" "),
+            header["processId"]
+        );
+        // A test runner's process: the one that reads the plan.
+        if command
+            .iter()
+            .any(|word| word.contains("playwright") || word.contains("vitest"))
+        {
+            sentence.push_str(
+                "; the strong plan was too large for its heap: give it more (NODE_OPTIONS=--max-old-space-size=<MB>) or run fewer mutants at once (--file, --shard)",
+            );
+        }
+        said.push(sentence);
+    }
+    said
 }
 
 /// One language's strong pass: the command over a copy of the project with
@@ -415,6 +490,8 @@ mod tests {
             duration_ms: None,
             span: None,
             runnable: true,
+            failed: false,
+            skipped: false,
         })
         .to_vec();
         let mutant = |language: &str, candidates: &[usize]| PlannedMutant {
@@ -435,10 +512,13 @@ mod tests {
                 .collect(),
             whole_files: Vec::new(),
             server_wide: None,
+            server_ran: false,
+            passed_before: 0,
             covering: 0,
             statement: None,
             function: None,
             function_hit_by: Default::default(),
+            narrowed: None,
         };
         let rust = crate::mutant_list::RUST;
         let javascript = crate::mutant_list::JAVASCRIPT;
@@ -579,6 +659,84 @@ mod tests {
         std::fs::create_dir_all(root.join("bare/.supercov/strong")).unwrap();
         prune_work_directories(&root.join("bare"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pass's Node processes write a report where its results are, the
+    /// path quoted as `NODE_OPTIONS` reads it.
+    #[test]
+    fn node_reports_go_beside_the_results() {
+        let run = StrongRun {
+            plan: PathBuf::from("plan.json"),
+            results: PathBuf::from("/work/a \"b\\c\"/results.jsonl"),
+        };
+        // The directory is joined the platform's way: `/.` here, `\\.` on
+        // Windows, each backslash doubled inside the quotes.
+        let joined = if cfg!(windows) { "\\\\." } else { "/." };
+        assert_eq!(
+            run.node_report_options(),
+            format!("--report-on-fatalerror --report-directory=\"/work/a \\\"b\\\\c\\\"{joined}\"")
+        );
+    }
+
+    /// Each process that ran out of heap, named by its command line, and
+    /// the plan blamed where it is a test runner's; other reports and files
+    /// are no such process. Every report read is removed.
+    #[test]
+    fn a_process_out_of_heap_is_named_from_its_report() {
+        let work = std::env::temp_dir().join(format!(
+            "supercov-node-reports-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&work).unwrap();
+        let report = |name: &str, event: &str, command: &[&str]| {
+            let report = serde_json::json!({
+                "header": { "event": event, "processId": 41, "commandLine": command },
+                "javascriptHeap": { "memoryLimit": 4_244_635_648_u64 },
+            });
+            std::fs::write(work.join(name), report.to_string()).unwrap();
+        };
+        std::fs::write(work.join("results.jsonl"), "").unwrap();
+        std::fs::write(work.join("report.txt"), "").unwrap();
+        std::fs::write(work.join("report.1.json"), "{ cut sh").unwrap();
+        report("report.2.json", "Fatal error", &["node", "app.js"]);
+        let oom = "Allocation failed - JavaScript heap out of memory";
+        report(
+            "report.3.json",
+            oom,
+            &["node", "node_modules/.bin/playwright", "test", "--list"],
+        );
+        report(
+            "report.4.json",
+            oom,
+            &["node", "node_modules/vitest/vitest.mjs"],
+        );
+        report("report.5.json", oom, &["node", "server.js"]);
+        let blamed = "; the strong plan was too large for its heap: give it more (NODE_OPTIONS=--max-old-space-size=<MB>) or run fewer mutants at once (--file, --shard)";
+        assert_eq!(
+            out_of_memory(&work),
+            [
+                format!(
+                    "a Node process ran out of memory at its 4048 MB heap: node node_modules/.bin/playwright test --list (pid 41){blamed}"
+                ),
+                format!(
+                    "a Node process ran out of memory at its 4048 MB heap: node node_modules/vitest/vitest.mjs (pid 41){blamed}"
+                ),
+                "a Node process ran out of memory at its 4048 MB heap: node server.js (pid 41)"
+                    .to_owned(),
+            ]
+        );
+        let mut left = std::fs::read_dir(&work)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["report.txt", "results.jsonl"]);
+        assert!(out_of_memory(&work.join("none")).is_empty());
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     #[test]

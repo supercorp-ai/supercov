@@ -1,11 +1,11 @@
-run run_4ba950fd8c41eed6
+run run_365989986201f711
 command: python3 -m pytest -q tests/test_price.py
 
 Coverage
   Lines      64.29% (9/14)
   Branches   50.00% (6/12)
   MC/DC      40.00% (2/5)
-Assertions   not assessed — npx supercov runs run_4ba950fd8c41eed6 assertions assess
+Assertions   not assessed — npx supercov runs run_365989986201f711 assertions assess
 
 By test kind
   unit            2 test(s)  lines  50.00%  branches  50.00%  MC/DC  40.00%
@@ -26,9 +26,9 @@ Remaining
   Files with measurement limits     0
 
 Commands
-  npx supercov runs 'run_4ba950fd8c41eed6' files
-  npx supercov runs 'run_4ba950fd8c41eed6' gaps
-  npx supercov runs 'run_4ba950fd8c41eed6' kinds
-  npx supercov runs 'run_4ba950fd8c41eed6' runners
-  npx supercov runs 'run_4ba950fd8c41eed6' scope
-  npx supercov runs run_4ba950fd8c41eed6 --help
+  npx supercov runs 'run_365989986201f711' files
+  npx supercov runs 'run_365989986201f711' gaps
+  npx supercov runs 'run_365989986201f711' kinds
+  npx supercov runs 'run_365989986201f711' runners
+  npx supercov runs 'run_365989986201f711' scope
+  npx supercov runs run_365989986201f711 --help

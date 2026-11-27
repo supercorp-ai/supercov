@@ -150,6 +150,7 @@ fn daemon_side_socket(_upstream: &Path) -> PathBuf {
 pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
     let preferred = state.join("docker.sock");
     if preferred.as_os_str().len() < 100 {
+        // fault-site: docker-proxy.socket-path.create-dir-all
         fs::create_dir_all(state)?;
         return Ok(preferred);
     }
@@ -161,6 +162,7 @@ pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0)
     ));
+    // fault-site: docker-proxy.socket-path.create-private-dir
     fs::create_private_dir(&directory)?;
     Ok(directory.join("docker.sock"))
 }
@@ -216,6 +218,7 @@ impl DockerProxy {
     /// Listen on `socket` and relay to `upstream`.
     pub fn start(socket: &Path, upstream: &Path, settings: ProxySettings) -> io::Result<Self> {
         if let Some(parent) = socket.parent() {
+            // fault-site: docker-proxy.start.create-dir-all-1
             fs::create_dir_all(parent)?;
         }
         let _ = fs::remove_file(socket);
@@ -224,6 +227,7 @@ impl DockerProxy {
             .set_nonblocking(true)
             .expect("a listening socket just bound can be made nonblocking");
         if let Some(parent) = settings.state.parent() {
+            // fault-site: docker-proxy.start.create-dir-all-2
             fs::create_dir_all(parent)?;
         }
         // The marks containers leave (`MARK_VARIABLE`) go in a directory made
@@ -314,6 +318,7 @@ impl DockerProxy {
             open_what_containers_wrote(&self.upstream, &self.shared.settings, copy.uid());
         }
         self.stop.store(true, Ordering::Release);
+        let _ = std::os::unix::net::UnixStream::connect(&self.socket);
         // Always there: only `finish`, which takes the relay, takes it.
         let _ = self.thread.take().map(JoinHandle::join);
         remove_socket(&self.socket);
@@ -351,13 +356,33 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
                     });
             }
             // Nothing waiting, or a connection that failed before it was
-            // taken: look again shortly.
-            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            // taken: wait for the next one. Looking again every 10 ms woke
+            // the relay a hundred times a second for the whole run, most
+            // runs never using it; `finish` wakes it with a connection, and
+            // the wait ends by itself in case that connection cannot be made.
+            // The relay stops on the check below, before taking that
+            // connection.
+            Err(_) => wait_readable(listener, Duration::from_millis(250)),
         }
         if stop.load(Ordering::Acquire) {
             break;
         }
     }
+}
+
+/// Until `listener` has a connection to take, or `limit` has passed.
+fn wait_readable(listener: &UnixListener, limit: Duration) {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let milliseconds = libc::c_int::try_from(limit.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: one valid pollfd, for the call's length. Whatever it answers,
+    // the relay tries to take a connection next: a poll that was interrupted
+    // only ends a wait early.
+    unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
 }
 
 /// An HTTP/1.1 message head: the start line and its headers, as sent.
@@ -3086,23 +3111,26 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:153", || {
-                socket_path(&directory.join("state"))
-            })
+            crate::fault::during(
+                "fs.create_dir_all#docker-proxy.socket-path.create-dir-all",
+                || { socket_path(&directory.join("state")) }
+            )
             .is_err()
         );
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:164", || {
-                socket_path(&directory.join("state").join("d".repeat(120)))
-            })
+            crate::fault::during(
+                "fs.create_dir#docker-proxy.socket-path.create-private-dir",
+                || { socket_path(&directory.join("state").join("d".repeat(120))) }
+            )
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:227", || {
-                DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
-            })
+            crate::fault::during(
+                "fs.create_dir_all#docker-proxy.start.create-dir-all-2",
+                || { DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)) }
+            )
             .is_err()
         );
         let gone = directory.join("gone.sock");

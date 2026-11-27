@@ -677,6 +677,7 @@ pub(crate) fn candidates_of(
         let end = position(source, site.token.1);
         site.mutants.iter().for_each(|(mutator, replacement)| {
             listed.push(CandidateMutant {
+                log_only: false,
                 id: String::new(),
                 mutator: (*mutator).to_owned(),
                 replacement: (*replacement).to_owned(),
@@ -709,6 +710,7 @@ pub(crate) fn candidates_of(
                     }
                 }),
                 untestable: untestable.clone(),
+                reads: None,
                 is_static: false,
                 unplaceable: None,
             });

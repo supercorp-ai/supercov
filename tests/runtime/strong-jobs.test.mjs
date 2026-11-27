@@ -6,13 +6,13 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { delimiter } from "node:path";
-import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, turns, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
 // A strong pass's driver over a runner whose tests do what `rules` says
 // (fixtures/strong-jobs-runner.mjs), each mutant's verdict by id.
-async function pass({ tests, mutants, listed, rules, files, workers = 4 }) {
+async function pass({ tests, mutants, listed, rules, files, workers = 4, aloneGraceMs }) {
     const root = mkdtempSync(join(tmpdir(), "supercov-strong-jobs-"));
     try {
         mkdirSync(join(root, ".supercov/frontend-evidence"), { recursive: true });
@@ -28,6 +28,7 @@ async function pass({ tests, mutants, listed, rules, files, workers = 4 }) {
             environment: { ...process.env, FAKE_SUITE: join(root, "suite.json") },
             graceMs: 1_500,
             baselineGraceMs: 1_500,
+            ...(aloneGraceMs === undefined ? {} : { aloneGraceMs }),
         });
         const records = readFileSync(resultsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
         return {
@@ -157,6 +158,77 @@ test("jobs wait their turn by priority, first come first served among equals", a
     release();
     await Promise.all([first, ...queued]);
     assert.deepEqual(order, ["c", "e", "d", "b"]);
+});
+
+// Every job holds a lock the others wait on (Cargo's on the build directory
+// where each job builds Rust compiled to wasm): side by side, the last jobs
+// wait past a limit set by a baseline that ran alone. Each runs again alone,
+// and the verdicts are the ones a pass that ran them one at a time reaches.
+// Side by side, the limit's grace is short, so the waits pass it; alone, it
+// is the pass's own 10 s: with every test file of the suite running at once,
+// a 1 s run alone took more than 3 x 1 s + 1.5 s, and four survivors were
+// timeouts.
+test("a job past its limit beside others runs again alone before it is a timeout", async () => {
+    const tests = [test_("w1", "t/w.test.js"), test_("w2", "t/w.test.js")];
+    const mutants = Array.from({ length: 8 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }));
+    const listed = mutants.map(({ id }) => ({ id }));
+    const rules = { "*": { w1: "locked" }, "src/a.js#0": { w1: "locked,fail" }, "src/a.js#7": { w1: "locked,fail" } };
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 8, aloneGraceMs: 10_000 });
+    const status = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id, verdict.status]));
+    assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "survived", m3: "survived", m4: "survived", m5: "survived", m6: "survived", m7: "killed" }, JSON.stringify(summary));
+    assert.ok(summary.alone >= 1, JSON.stringify(summary));
+});
+
+// The machine slows down once the baselines have run (other work on it):
+// every job then takes 2.5 s, past the limit their 1 ms baselines set. One
+// job at a time, so none waited on another: each runs again alone, its limit
+// from its tests run again without the mutant, and the verdicts are the ones
+// a machine as slow throughout reaches. Before, every one was a timeout.
+test("a job past its limit on a machine slower than at its baseline is judged at the machine's speed now", async () => {
+    const tests = [test_("w1", "t/w.test.js"), test_("w2", "t/w.test.js")];
+    const mutants = Array.from({ length: 3 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }));
+    const listed = mutants.map(({ id }) => ({ id }));
+    const rules = { "*": { w1: "loaded" }, "src/a.js#0": { w1: "loaded,fail" }, "src/a.js#2": { w1: "hang" } };
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 1 });
+    const status = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id, verdict.status]));
+    assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "timeout" }, JSON.stringify(summary));
+    assert.equal(summary.alone, 3, JSON.stringify(summary));
+});
+
+// Once the pass is told to stop, its jobs are stopped under their tests: a
+// job that ends then (here, one that marks the stop and exits, as a job the
+// stop reached first) did not finish its file, and was taken for a kill.
+// Now nothing is judged from then on, and the mutant is left for the next
+// pass.
+test("a job that ends once the pass is told to stop decides nothing", async () => {
+    const tests = [test_("w1", "t/w.test.js")];
+    const mutants = [{ id: "m0", file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }];
+    const rules = { "src/a.js#0": { w1: "stops" } };
+    const { verdicts, summary } = await pass({ tests, mutants, listed: [{ id: "m0" }], rules, files: { "t/w.test.js": ["w1"] }, workers: 1 });
+    assert.deepEqual(verdicts, {}, JSON.stringify(summary));
+    assert.ok(summary, "the pass still says what it did");
+});
+
+// Alone work waits for the shared work under way, and holds back the work
+// that comes after it, first come first served; shared work knows whether it
+// had company.
+test("work alone waits for the machine to be free", async () => {
+    const machine = turns();
+    const order = [];
+    let release;
+    const first = machine.shared((turn) => new Promise((done) => { release = () => done(turn); }));
+    const second = machine.shared(async (turn) => { order.push("second"); return turn; });
+    const alone = machine.alone(async (turn) => { order.push("alone"); return turn; });
+    const late = machine.shared(async (turn) => { order.push("late"); return turn; });
+    const otherAlone = machine.alone(async () => order.push("other alone"));
+    await second;
+    release();
+    const [firstTurn, secondTurn, aloneTurn, lateTurn] = await Promise.all([first, second, alone, late, otherAlone]);
+    assert.deepEqual(order, ["second", "alone", "late", "other alone"]);
+    assert.equal(firstTurn.crowded, true);
+    assert.equal(secondTurn.crowded, true);
+    assert.equal(aloneTurn.crowded, false);
+    assert.equal(lateTurn.crowded, false);
 });
 
 // Ctrl-C reaches the driver, not its jobs, which run in process groups of

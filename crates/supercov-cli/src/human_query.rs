@@ -1061,15 +1061,57 @@ pub(crate) fn strong_verdict(mutant: &supercov_engine::mutants_query::MutantEntr
         .to_owned()
 }
 
+/// Where a strong verdict kept from an earlier run was reached (`  carried
+/// from run r3 (commit 1a2b3c4)`); empty for one this run's passes reached.
+pub(crate) fn carried_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    let Some(from) = mutant
+        .strong
+        .as_ref()
+        .map(|verdict| &verdict["carriedFrom"])
+        .filter(|from| from.is_object())
+    else {
+        return String::new();
+    };
+    let run = from["run"].as_str().unwrap_or_default();
+    match from["commit"].as_str() {
+        Some(commit) => format!(
+            "  carried from run {run} (commit {})",
+            crate::mutants_test_command::short_commit(commit)
+        ),
+        None => format!("  carried from run {run}"),
+    }
+}
+
 /// The hint that a mutant not infected is practically untestable.
 fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    let log_line = if mutant.log_only {
+        "  (only changes a log line)"
+    } else {
+        ""
+    };
     match mutant.weak.untestable {
         Some(kind)
             if mutant.status == supercov_engine::coverage_index::MutantStatus::NotInfected =>
         {
-            format!("  ({} boundary)", kind.name())
+            format!("  ({} boundary){log_line}", kind.name())
         }
-        _ => String::new(),
+        _ => log_line.to_owned(),
+    }
+}
+
+/// A strong verdict's count as the summary says it: the survivors with how
+/// many of them only change a log line.
+pub(crate) fn strong_count(status: &str, n: usize, log_only_survivors: Option<usize>) -> String {
+    match log_only_survivors {
+        // Never `Some(0)`: the summary leaves out a count of none.
+        Some(log_only) if status == "survived" => {
+            format!(
+                "{} {status} ({} only change a log line)",
+                count(n),
+                count(log_only)
+            )
+        }
+        _ => format!("{} {status}", count(n)),
     }
 }
 
@@ -1385,7 +1427,7 @@ fn mutants_text(
                 score(summary.mutation_score),
                 strong
                     .iter()
-                    .map(|(status, n)| format!("{} {status}", count(*n)))
+                    .map(|(status, n)| strong_count(status, *n, summary.log_only_survivors))
                     .collect::<Vec<_>>()
                     .join(" · ")
             ));
@@ -1579,7 +1621,7 @@ fn mutants_text(
                     mutant.status.name(),
                     match strong_verdict(mutant) {
                         verdict if verdict.is_empty() => String::new(),
-                        verdict => format!("  strong: {verdict}"),
+                        verdict => format!("  strong: {verdict}{}", carried_suffix(mutant)),
                     },
                     untestable_suffix(mutant),
                     stryker(&mutant.stryker)
@@ -1595,6 +1637,9 @@ fn mutants_text(
             ));
             if let Some(reason) = &mutant.weak.untestable_reason {
                 lines.push(format!("  untestable in practice: {reason}"));
+            }
+            if let Some(reason) = supercov_engine::mutation_report::compiled_reason(mutant) {
+                lines.push(format!("  strong: {}: {reason}", strong_verdict(mutant)));
             }
             lines.push(format!("  id:  {}", mutant.id));
         });
@@ -1636,13 +1681,17 @@ fn mutants_text(
                 format!("{:<strong_width$}  ", strong_verdict(mutant))
             };
             format!(
-                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {strong}{}{}{}",
+                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {strong}{}{}{}{}",
                 position(mutant),
                 mutant.mutator,
                 change(mutant),
                 mutant.status.name(),
-                mutant.weak.reason,
+                // Decided by its compiled code: that says more than how
+                // far the tests got.
+                supercov_engine::mutation_report::compiled_reason(mutant)
+                    .unwrap_or_else(|| mutant.weak.reason.clone()),
                 untestable_suffix(mutant),
+                carried_suffix(mutant),
                 stryker(&mutant.stryker)
             )
         }));
@@ -3047,6 +3096,18 @@ fn assertion_summary_lines(value: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The survivors' count says how many only change a log line; other
+    /// verdicts' counts, and a summary with none so marked, say only theirs.
+    #[test]
+    fn the_survivors_count_says_how_many_only_change_a_log_line() {
+        assert_eq!(
+            strong_count("survived", 185, Some(109)),
+            "185 survived (109 only change a log line)"
+        );
+        assert_eq!(strong_count("killed", 40, Some(109)), "40 killed");
+        assert_eq!(strong_count("survived", 3, None), "3 survived");
+    }
+
     /// Each branch outcome a frontend labels is said as the outcome not
     /// observed, and each assertion confidence by what it means.
     #[test]
@@ -3177,6 +3238,55 @@ mod tests {
         );
     }
 
+    /// A strong verdict kept from an earlier run says where it was reached:
+    /// the run, and its commit where git said.
+    #[test]
+    fn a_kept_verdict_says_where_it_was_reached() {
+        use serde_json::{Value, json};
+        use supercov_engine::coverage_index::MutantStatus;
+        use supercov_engine::mutants_query::{MutantEntry, MutantSpan, WeakResult};
+        let mutant = |strong: Option<Value>| MutantEntry {
+            log_only: false,
+            line_tests: None,
+            id: "src/a.ts:1:3-1:9:LogicalOperator:&&".into(),
+            file: "src/a.ts".into(),
+            span: MutantSpan {
+                start: [1, 3],
+                end: [1, 9],
+            },
+            mutator: "LogicalOperator".into(),
+            original: "a || b".into(),
+            replacement: "a && b".into(),
+            changed: None,
+            status: MutantStatus::Infected,
+            weak: WeakResult {
+                reach: "reached",
+                infection: Some("infected"),
+                code: "c".into(),
+                reason: "r".into(),
+                proxy: false,
+                rule: None,
+                untestable: None,
+                untestable_reason: None,
+            },
+            strong,
+            stryker: None,
+        };
+        let suffix = |strong: Value| carried_suffix(&mutant(Some(strong)));
+        assert_eq!(
+            suffix(
+                json!({"status": "killed", "carriedFrom": {"run": "r5", "commit": "1a2b3c4d5e"}})
+            ),
+            "  carried from run r5 (commit 1a2b3c4)"
+        );
+        assert_eq!(
+            suffix(json!({"status": "killed", "carriedFrom": {"run": "r5"}})),
+            "  carried from run r5"
+        );
+        assert_eq!(suffix(json!({"status": "killed"})), "");
+        assert_eq!(carried_suffix(&mutant(None)), "");
+    }
+
     /// A pull request's comment: the survivors' table, cut at its cap with
     /// the command that lists the rest; pipes and backticks kept in cells.
     #[test]
@@ -3187,6 +3297,8 @@ mod tests {
             MutantsSummary, WeakResult,
         };
         let mutant = |line: u32, status: MutantStatus| MutantEntry {
+            log_only: false,
+            line_tests: None,
             id: format!("src/a.ts:{line}:3-{line}:9:LogicalOperator:&&"),
             file: "src/a.ts".into(),
             span: MutantSpan {
@@ -3237,6 +3349,7 @@ mod tests {
                 commit: None,
                 changed_lines: 40,
                 lines_with_mutants: 31,
+                unrun_lines: Default::default(),
             }),
             fail_on: None,
         };
@@ -3247,7 +3360,7 @@ mod tests {
         assert!(text.starts_with("### Mutants on this change\n\n**31 mutants** on 31 of 40 changed lines since `origin/main` (from `0123456789ab`): weak score **3.2%** · 30 not infected · 1 infected\n"), "{text}");
         assert_eq!(text.matches("| `src/a.ts:").count(), 25, "{text}");
         assert!(
-            text.contains("| `src/a.ts:1:3` | `` a \\|\\| `b` → a && `b` `` | not infected | `a` was always true \\| never false |"),
+            text.contains("| `src/a.ts:1:3` | `` a \\|\\| `b` → a && `b` `` | not infected | — | `a` was always true \\| never false |"),
             "{text}"
         );
         assert!(!text.contains("src/a.ts:40:"), "{text}");

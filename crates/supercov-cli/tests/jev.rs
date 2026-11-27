@@ -216,7 +216,7 @@ fn each_git_ask_of_a_patch_review_that_cannot_start_is_handled() {
             "return express ? 20 : 5;",
         );
         project.write("src/new.js", "export const x = 1;\n");
-        let fault = format!("spawn#changes.rs:81@{nth}");
+        let fault = format!("spawn#quality-changes.git@{nth}");
         let mut env = jev.to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault.as_str()));
         let ran = project.supercov_with(&["quality", "patch"], &env);
@@ -238,7 +238,7 @@ fn each_git_ask_of_a_patch_review_that_cannot_start_is_handled() {
             "return express ? 20 : 5;",
         );
         project.commit("express");
-        let fault = format!("spawn#changes.rs:81@{nth}");
+        let fault = format!("spawn#quality-changes.git@{nth}");
         let mut env = jev.to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault.as_str()));
         let ran = project.supercov_with(&["quality", "patch", "--base", "HEAD~1"], &env);
@@ -255,7 +255,7 @@ fn each_git_ask_of_a_patch_review_that_cannot_start_is_handled() {
     );
     project.git(&["add", "src/cart.js"]);
     let mut env = jev.to_vec();
-    env.push(("SUPERCOV_TEST_FAULT", "spawn#changes.rs:81@6"));
+    env.push(("SUPERCOV_TEST_FAULT", "spawn#quality-changes.git@6"));
     let ran = project.supercov_with(&["quality", "patch", "--staged"], &env);
     let output = format!("{}{}", ran.stdout(), ran.stderr());
     assert_ne!(ran.code(), 0, "{output}");
@@ -364,14 +364,17 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     // store of runs, listed before either.
     for (fault, place) in [
         (
-            "fs.read_from#evidence_archive.rs:677",
-            "evidence_archive.rs:677",
+            "fs.read_from#evidence-archive.read.read-from",
+            "evidence-archive.read.read-from",
         ),
         (
-            "fs.read_from#evidence_archive.rs:677@3",
-            "evidence_archive.rs:677",
+            "fs.read_from#evidence-archive.read.read-from@3",
+            "evidence-archive.read.read-from",
         ),
-        ("fs.read_dir#run_store.rs:681", "run_store.rs:681"),
+        (
+            "fs.read_dir#run-store.discover-runs",
+            "run-store.discover-runs",
+        ),
     ] {
         let mut env = jev.to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault));
@@ -1009,7 +1012,7 @@ fn a_busy_gateway_is_waited_for_and_a_broken_one_is_named() {
     let mut env = through(&base).to_vec();
     env.push((
         "SUPERCOV_TEST_FAULT",
-        "fs.create_dir_all#assertions_command.rs:641",
+        "fs.create_dir_all#assertions-command.run-pass.save-1",
     ));
     let unsaved = cart
         .supercov_with(&["runs", &run, "assertions", "assess"], &env)
@@ -1020,7 +1023,7 @@ fn a_busy_gateway_is_waited_for_and_a_broken_one_is_named() {
     let mut env = through(&answering).to_vec();
     env.push((
         "SUPERCOV_TEST_FAULT",
-        "fs.create_dir_all#assertions_command.rs:659",
+        "fs.create_dir_all#assertions-command.run-pass.save-2",
     ));
     let unsaved = cart
         .supercov_with(&["runs", &run, "assertions", "assess", "--refresh"], &env)
@@ -3056,7 +3059,10 @@ fn a_quality_diff_reads_in_either_direction_and_names_its_mistakes() {
     );
     // A cached answer whose directory or write fails is said, and the
     // assessment stands.
-    for fault in ["fs.create_dir_all#store.rs:91", "fs.write_all#store.rs:102"] {
+    for fault in [
+        "fs.create_dir_all#quality-store.write-atomic.create-dir-all",
+        "fs.write_all#quality-store.write-atomic.write-all",
+    ] {
         let mut env = through(&no).to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault));
         let ran = project
@@ -4582,12 +4588,15 @@ fn a_security_assessment_alone_is_reported() {
     // A source whose size cannot be read is left out.
     let unsized_source = project.supercov_with(
         &["report", "--no-open", "--output", "unsized.html"],
-        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:725")],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "fs.metadata#html-report.collect-quality-sources",
+        )],
     );
     assert!(
         unsized_source
             .stderr()
-            .contains("test fault at fs (html_report.rs:725 metadata)"),
+            .contains("test fault at fs (html-report.collect-quality-sources metadata)"),
         "{}",
         unsized_source.stderr()
     );
@@ -5388,7 +5397,10 @@ fn python_is_read_by_its_own_parser_and_by_patterns_when_that_cannot_run() {
     // An interpreter that cannot start is asked for again as the system's.
     let (base, seen) = gateway(MODEL, answer_reviewer);
     let mut env = through(&base).to_vec();
-    env.push(("SUPERCOV_TEST_FAULT", "spawn#candidates.rs:493"));
+    env.push((
+        "SUPERCOV_TEST_FAULT",
+        "spawn#quality-candidates.python-parse-with",
+    ));
     let report = project.supercov_with(&["security", "src/app.py", "--refresh"], &env);
     assert!(
         report.stderr().contains("test fault at spawn"),
@@ -5876,7 +5888,8 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let project = Project::cart("assess-unread");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
-    let unread = "fs.open#run_store.rs:1369,fs.read_from#evidence_archive.rs:677";
+    let unread =
+        "fs.open#run-store.read-assessment-input,fs.read_from#evidence-archive.read.read-from";
     let refused = |args: &[&str], fault: &str| {
         let mut full = vec!["runs", run.as_str(), "assertions"];
         full.extend_from_slice(args);
@@ -5885,7 +5898,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         project.supercov_with(&full, &env).exits(2)
     };
     let said = refused(&["assess"], unread);
-    assert!(said.contains("evidence_archive.rs:677"), "{said}");
+    assert!(said.contains("evidence-archive.read.read-from"), "{said}");
     project
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
         .succeeds();
@@ -5895,22 +5908,25 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         .supercov(&["runs", &run, "assertions", "--title", "total"])
         .succeeds();
     let said = refused(&["--title", "total"], unread);
-    assert!(said.contains("evidence_archive.rs:677"), "{said}");
+    assert!(said.contains("evidence-archive.read.read-from"), "{said}");
     project.edit(
         "src/cart.js",
         "return express ? 15 : 5;",
         "return express ? 20 : 5;",
     );
     for (fault, place) in [
-        (unread, "evidence_archive.rs:677"),
-        ("fs.open#source_manifest.rs:365", "source_manifest.rs:365"),
+        (unread, "evidence-archive.read.read-from"),
         (
-            "fs.read#source_manifest.rs:779",
+            "fs.open#source-manifest.load-optional-manifest",
+            "source-manifest.load-optional-manifest",
+        ),
+        (
+            "fs.read#source-manifest.affected-tests.read-file",
             "no per-test execution record",
         ),
         (
-            "fs.create_dir_all#assertions_command.rs:951",
-            "assertions_command.rs:951",
+            "fs.create_dir_all#assertions-command.assess-changed",
+            "assertions-command.assess-changed",
         ),
     ] {
         let said = refused(&["assess", "--changed", "--refresh"], fault);
@@ -5922,13 +5938,16 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
     let mut env = through(&base).to_vec();
-    env.push(("SUPERCOV_TEST_FAULT", "fs.write#assertion_coverage.rs:2309"));
+    env.push((
+        "SUPERCOV_TEST_FAULT",
+        "fs.write#assertion-coverage.save-snapshot",
+    ));
     let assessed = project.supercov_with(&["runs", &run, "assertions", "assess"], &env);
     assert_eq!(assessed.code(), 0, "{}", assessed.stderr());
     assert!(
         assessed
             .stderr()
-            .contains("test fault at fs (assertion_coverage.rs:2309 write)"),
+            .contains("test fault at fs (assertion-coverage.save-snapshot write)"),
         "{}",
         assessed.stderr()
     );

@@ -199,6 +199,29 @@ into `$RUNNER_TEMP` (or the system temp directory) and installs packages there.
 To re-plan shards after a corpus change:
 `node benchmarks/mutation/plan-shards.mjs hono <stryker-cold.json> 6 --write`.
 
+## Rust, against cargo-mutants
+
+`rust/` holds the Rust benchmark: eleven public crates pinned to a tag (`rust/corpus.json`), each
+run by cargo-mutants 27.1.0 in shards of its mutants and by Supercov's `supercov mutants --shard
+k/n` (measuring included), the shards merged and every mutant joined by id
+(`scripts/cargo-mutants-agreement.mjs`). `.github/workflows/mutation-rust.yml` runs it
+(`gh workflow run mutation-rust.yml -f crates="base64 fastrand"`; no `crates` runs all eleven), and
+its `agreement` artifact holds each crate's join (`rust/summarize.mjs report`). Each job gives its
+tool 6 minutes of mutants, so it stays under ten; a mutant left past that is not joined. cargo-mutants
+runs under a 10 GiB address-space cap, so a mutant that allocates without end fails its test rather
+than taking down the runner and every outcome of its job.
+
+The results are the table in `docs/mutation.md` (Rust, against cargo-mutants 27.1.0). The run of
+2026-11-27 for base64 and fastrand, with more shards than the first:
+
+| Crate | Joined | Agree | Soundness violations | Other | Not joined, and why |
+| --- | ---: | ---: | ---: | --- | --- |
+| base64 0.22.1 | 305 of 619 | 305 | 0 | 0 | cargo-mutants' 48 jobs decided 509; Supercov's 16 left 204 of those without a verdict, each job at its time limit |
+| fastrand 2.3.0 | 211 | 203 | 0 | 8 lint (cargo-mutants' build fails on a lint the crate denies; Supercov caps lints) | Supercov's 8 jobs under nextest left 21 at their time limit |
+
+Joining every mutant of the two needs about twice the jobs (some 130 for base64 and fastrand
+together), which this run did not spend.
+
 ## End to end against StrykerJS
 
 The per-mutant figures below put Supercov's strong pass (baselines included) beside StrykerJS's mutant

@@ -173,6 +173,17 @@ impl<'a> Checkout<'a> {
             .contains(file)
     }
 
+    /// What one Rust test loads beyond the code it ran, by what it names
+    /// (`Imports::rust_test`).
+    pub fn rust_test_loads(
+        &self,
+        file: &str,
+        test: &str,
+        siblings: &BTreeSet<String>,
+    ) -> crate::test_loads::Loads {
+        self.imports.rust_test(file, test, siblings)
+    }
+
     /// What a run's tests load: their files, and the configuration of each
     /// runner they ran under with what it names. `None` where a file of
     /// theirs is not one Supercov reads imports from.
@@ -780,6 +791,7 @@ mod tests {
                 .into_iter()
                 .collect(),
                 names: BTreeMap::new(),
+                loaded: None,
             }),
             ..Ran::default()
         };
@@ -797,6 +809,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 names: BTreeMap::new(),
+                loaded: None,
             }),
             ..Ran::default()
         };

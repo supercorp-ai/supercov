@@ -276,9 +276,9 @@ test('a test that reaches no server', async () => {
   }
   // The Ruby server's evidence that cannot be listed: its run is not
   // published, its evidence is kept, and the run fails.
-  const unlistedRuby = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'grade.config.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#ruby_evidence.rs:343' });
+  const unlistedRuby = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'grade.config.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#ruby-evidence.read-evidence-directory' });
   assert.notEqual(unlistedRuby.status, 0, unlistedRuby.stdout + unlistedRuby.stderr);
-  assert.ok(unlistedRuby.stderr.includes('test fault at fs (ruby_evidence.rs:343'), unlistedRuby.stderr);
+  assert.ok(unlistedRuby.stderr.includes('test fault at fs (ruby-evidence.read-evidence-directory'), unlistedRuby.stderr);
   assert.match(unlistedRuby.stderr, /their evidence is kept at/u, unlistedRuby.stderr);
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
@@ -291,9 +291,9 @@ test('a test that reaches no server', async () => {
   assert.match(moved.stderr, /Ruby server coverage: 1 test/u, moved.stderr);
   // Prepared again for the copy that moved, the Python server's plan that
   // cannot be written ends the run.
-  const reprepared = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved,fs.write#python_run.rs:717@2' });
+  const reprepared = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'copy-moved,fs.write#python-run.prepare.write-file@2' });
   assert.notEqual(reprepared.status, 0, reprepared.stdout + reprepared.stderr);
-  assert.ok(reprepared.stderr.includes('test fault at fs (python_run.rs:717'), reprepared.stderr);
+  assert.ok(reprepared.stderr.includes('test fault at fs (python-run.prepare.write-file'), reprepared.stderr);
   const unpublishable = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: 'server-publish' });
   assert.notEqual(unpublishable.status, 0, unpublishable.stdout + unpublishable.stderr);
   assert.match(unpublishable.stderr, /test fault at server-publish/u, unpublishable.stderr);
@@ -314,11 +314,11 @@ test('a test that reaches no server', async () => {
   // finished, the evidence cleared, the run's state written, the first run
   // finished -- that fails ends the run, saying where.
   for (const [fault, place] of [
-    ['fs.symlink_metadata#javascript_run.rs:1485', 'javascript_run.rs:1485'],
-    ['fs.symlink_metadata#javascript_run.rs:1501', 'javascript_run.rs:1501'],
-    ['fs.symlink_metadata#javascript_run.rs:1503', 'javascript_run.rs:1503'],
-    ['fs.read#javascript_run.rs:1529', 'javascript_run.rs:1529'],
-    ['fs.symlink_metadata#javascript_run.rs:1541', 'javascript_run.rs:1541'],
+    ['fs.symlink_metadata#javascript-run.run-javascript.finalize-published-run-1', 'javascript-run.run-javascript.finalize-published-run-1'],
+    ['fs.symlink_metadata#javascript-run.run-javascript.remove-stored-tree-deferred-1', 'javascript-run.run-javascript.remove-stored-tree-deferred-1'],
+    ['fs.symlink_metadata#javascript-run.run-javascript.remove-stored-tree-deferred-2', 'javascript-run.run-javascript.remove-stored-tree-deferred-2'],
+    ['fs.read#javascript-run.run-javascript.update-run-state-4', 'javascript-run.run-javascript.update-run-state-4'],
+    ['fs.symlink_metadata#javascript-run.run-javascript.finalize-published-run-2', 'javascript-run.run-javascript.finalize-published-run-2'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
@@ -328,12 +328,12 @@ test('a test that reaches no server', async () => {
   // directory, its archive, its run moved into place -- is said, and never
   // panics; the first server's failing ends the run.
   for (const [fault, place] of [
-    ['fs.create_dir_all#python_run.rs:849', 'python_run.rs:849'],
-    ['fs.create_dir_all#ruby_run.rs:649', 'ruby_run.rs:649'],
-    ['fs.rename#evidence_archive.rs:512', 'evidence_archive.rs:512'],
-    ['fs.rename#evidence_archive.rs:512@2', 'evidence_archive.rs:512'],
-    ['fs.rename#lifecycle.rs:1216', 'lifecycle.rs:1216'],
-    ['fs.rename#lifecycle.rs:1216@2', 'lifecycle.rs:1216'],
+    ['fs.create_dir_all#python-run.build-run', 'python-run.build-run'],
+    ['fs.create_dir_all#ruby-run.build-run', 'ruby-run.build-run'],
+    ['fs.rename#evidence-archive.write-entries.rename', 'evidence-archive.write-entries.rename'],
+    ['fs.rename#evidence-archive.write-entries.rename@2', 'evidence-archive.write-entries.rename'],
+    ['fs.rename#lifecycle.publish-run-with-fault.rename', 'lifecycle.publish-run-with-fault.rename'],
+    ['fs.rename#lifecycle.publish-run-with-fault.rename@2', 'lifecycle.publish-run-with-fault.rename'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);

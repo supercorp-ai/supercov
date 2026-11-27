@@ -92,7 +92,7 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
-Test the tests with mutants (JavaScript, TypeScript; Python, Rust, Go and Ruby in preview):
+Test the tests with mutants (JavaScript, TypeScript, Rust; Python, Go and Ruby in preview):
   supercov mutants                     which mutants the tests kill, run by run
   supercov mutants --diff main         only the mutants on changed lines
 
@@ -119,6 +119,7 @@ Settings, in the environment of the measured command (supercov docs cli says wha
   SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
   SUPERCOV_MUTANTS=1                   list mutants as the run measures, with their probes
   SUPERCOV_STRONG_WORKERS=<n>          forks a Python strong pass runs at once
+  SUPERCOV_STRONG_TIMEOUT_FACTOR=<x>   a Playwright mutant's limit: x times its baseline + 5 s
 
 Guides:
   supercov docs                        list bundled guides
@@ -255,6 +256,8 @@ fn hydrate_line_source_from_working_tree(
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    // The CLI's own fault sites, named before any fault is read.
+    supercov_engine::fault::name_sites(include!(concat!(env!("OUT_DIR"), "/fault_sites.rs")));
     let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     // nextest's target runner for the owned frontend: test arguments pass
     // through untouched, so dispatch before anything reads them as UTF-8.
@@ -607,7 +610,7 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
     };
     for run_ids in groups {
         let (run_id, started_at) = public_run_identity();
-        match supercov_engine::run_merge::merge_coverage_runs(
+        match supercov_engine::run_merge::merge_runs(
             &root,
             &run_ids,
             &run_id,
@@ -615,8 +618,11 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
             allow_changed,
         ) {
             Ok(merged) => {
-                println!("[supercov] merged run {merged}");
-                println!("{} runs {merged}", launcher_command());
+                println!("[supercov] merged run {}", merged.id);
+                for note in merged.notes {
+                    println!("[supercov] {note}");
+                }
+                println!("{} runs {}", launcher_command(), merged.id);
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");
@@ -1174,7 +1180,7 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
 const PUBLIC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
-fn public_run_identity() -> (String, String) {
+pub(crate) fn public_run_identity() -> (String, String) {
     // A fixed format of the current time: only a year past 9999 fails it.
     let started_at = OffsetDateTime::now_utc()
         .format(PUBLIC_TIMESTAMP_FORMAT)
@@ -2672,6 +2678,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     }
     let watchdog_program = std::env::current_exe()
         .ok()
+        // fault-site: main.public-coverage-run
         .and_then(|path| fs::canonicalize(path).ok());
     let command_words = command.clone();
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
@@ -2981,15 +2988,16 @@ fn integrity_command(root: &Path, run: &StoredRun) -> (Vec<String>, Option<Vec<S
         return own();
     };
     let combined = &run.metadata.integrity.fingerprint.combined;
-    let mut current = run;
-    // A merge of merges: follow the fingerprint down to a run of a command.
+    let mut current = run.clone();
+    // A merge of merges: follow the fingerprint down to a run of a command,
+    // as the merge kept it or the store holds it.
     for _ in 0..16 {
         let Some(parent) = current
             .metadata
             .parents
             .iter()
             .flatten()
-            .filter_map(|id| inventory.runs.iter().find(|stored| stored.id == *id))
+            .filter_map(|id| supercov_engine::run_store::merged_part(&inventory, &current, id))
             .find(|parent| parent.metadata.integrity.fingerprint.combined == *combined)
         else {
             break;
@@ -3304,7 +3312,7 @@ fn execute_coverage_query(
         let changed = supercov_engine::strong_plan::list_run_mutants(
             &supercov_engine::coverage_report::ArchiveReportRequest {
                 archive_path: run.evidence_path.clone(),
-                run_id: run.id.clone(),
+                run_id: run.evidence_run_id().to_owned(),
                 generated_at: run.metadata.started_at.clone(),
                 integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
                 test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
@@ -3326,14 +3334,9 @@ fn execute_coverage_query(
     // The strong verdicts a pass saved: the mutants listing shows each, and
     // the summary their score.
     if matches!(request.command.as_str(), "mutants" | "summary") {
-        let saved = mutants_test_command::read_saved(run);
-        if !saved.is_empty() {
-            request.mutants.strong = Some(
-                saved
-                    .into_iter()
-                    .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data")))
-                    .collect(),
-            );
+        let shown = mutants_test_command::read_shown(run);
+        if !shown.is_empty() {
+            request.mutants.strong = Some(shown);
         }
     }
     let mut diff_inputs = None;
@@ -4084,7 +4087,7 @@ fn analyze_stored_run_filtered(
 ) -> Result<supercov_engine::coverage_report::CoverageReport, String> {
     analyze_coverage_archive(&ArchiveReportRequest {
         archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
+        run_id: run.evidence_run_id().to_owned(),
         generated_at: run.metadata.started_at.clone(),
         integrity: serde_json::to_value(&run.metadata.integrity).ok(),
         test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
@@ -4287,10 +4290,10 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2482).
 mod mutants_export;
 mod mutants_pit_command;
 mod mutants_test_command;
+mod strong_status;
 
 #[cfg(test)]
 mod docs_command_tests {

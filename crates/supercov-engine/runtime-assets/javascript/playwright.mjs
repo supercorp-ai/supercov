@@ -18,9 +18,9 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepSnapshotText, recordLine } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
-import { PAGE_TIMEOUT_MARKER, activatePageMutant, strongClaim, strongFinish } from "./playwrightStrong.mjs";
+import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, ownEndPast, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -79,6 +79,21 @@ function internally(owner, work) {
     finally {
         Error.prepareStackTrace = prepareStackTrace;
     }
+}
+/**
+ * The Playwright object behind one of the collector's proxies (`wrap`). The
+ * suite's `page` fixture is the proxy of a page the collector registered
+ * already, when its context opened it: registered again by its proxy, every
+ * page and its context were known twice, and every action told the page and
+ * its cookies its phase twice, the context ran the runtime and the test's
+ * scripts twice, and a test's evidence was read twice and written twice.
+ */
+const proxiedTargets = new WeakMap();
+function unwrapped(value) {
+    // A proxy an earlier test's controller made, wrapped again by this one.
+    while (proxiedTargets.has(value))
+        value = proxiedTargets.get(value);
+    return value;
 }
 function bounded(promise, milliseconds) {
     let timer;
@@ -189,6 +204,10 @@ const ACTION_METHODS = new Set([
     "type",
     "uncheck",
 ]);
+// The calls that open and close a test's browser contexts and pages, as
+// Playwright's own fixtures make them while setting a test up and tearing
+// it down: no wait of the test's, and not where its own time starts.
+const LIFECYCLE = new Set(["Browser.newContext", "Browser.newPage", "BrowserContext.newPage", "BrowserContext.close", "Page.close"]);
 const REQUEST_METHODS = new Set([
     "delete",
     "fetch",
@@ -203,6 +222,26 @@ function isApiRequestContext(value) {
     return (typeof candidate["fetch"] === "function" &&
         typeof candidate["get"] === "function" &&
         typeof candidate["post"] === "function");
+}
+/**
+ * Where in the test's own code a call was made, for a timeout's reason: the
+ * stack through these proxies runs past V8's usual ten frames.
+ */
+function testSite() {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 50;
+    const stack = new Error().stack?.split("\n").slice(2) ?? [];
+    Error.stackTraceLimit = limit;
+    // A strong pass runs the suite in its isolated copy of the project, under
+    // `.supercov/`: the test's frame is any outside `node_modules`, said
+    // relative to where the suite runs.
+    const frame = stack.find((line) => /[/\\]tests?[/\\]|\.(spec|test)\.[cm]?[jt]sx?:/.test(line) && !line.includes("node_modules"));
+    if (!frame)
+        return undefined;
+    const root = process.cwd().replaceAll("\\", "/");
+    const place = frame.trim().replace(/^at\s+/, "").replaceAll("\\", "/").replace(`${pathToFileURL(root).href}/`, "").replace(`${root}/`, "");
+    // `name (file:line:column)`: the place alone.
+    return /\(([^()]+)\)$/.exec(place)?.[1] ?? place;
 }
 function callerSource() {
     const stack = new Error().stack?.split("\n").slice(2) ?? [];
@@ -241,6 +280,8 @@ class CoveragePhaseController {
     pageRegistrations = new WeakMap();
     scriptUpdate = Promise.resolve();
     proxyCache = new WeakMap();
+    // Each proxy's Playwright object: calls made on it are not the test's.
+    proxyTargets = new WeakMap();
     runtimeSnapshots;
     // Contexts whose creation the collector did not observe: it does not know
     // what `extraHTTPHeaders` their owner configured, so it must not rewrite
@@ -278,6 +319,18 @@ class CoveragePhaseController {
     // Set when a worker's evidence could not be read: the test's coverage is
     // then a lower bound.
     workerEvidenceMissing = false;
+    // A strong attempt's: the test's default timeouts (`watchWaits`), the
+    // calls it made on Playwright's objects that have not settled, each with
+    // when its own timeout ends it, the newest of them, since when its pages
+    // have sent and answered no request (`stall`), and the requests they sent
+    // that are not answered yet (`pageWork`).
+    waitTimeouts;
+    waits = new Set();
+    newestWait;
+    testCalledAt;
+    matcherSite;
+    quietSince = Date.now();
+    unanswered = new Set();
     disposed = false;
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
@@ -335,8 +388,10 @@ class CoveragePhaseController {
             if (snapshot)
                 snapshots.push(snapshot);
         }
+        // A snapshot read as columns is stored as it is; merged with what
+        // documents handed over as they left, its events are objects again.
         this.runtimeSnapshots = this.leftSnapshots.length > 0
-            ? [mergeSnapshots([...this.leftSnapshots, ...snapshots])]
+            ? [mergeSnapshots([...this.leftSnapshots, ...snapshots.map(eventsOfColumns)])]
             : snapshots;
         return this.runtimeSnapshots;
     }
@@ -421,6 +476,7 @@ class CoveragePhaseController {
     }
     /** Read a registered page's evidence while it can still be evaluated. */
     async snapshotBeforeClose(page) {
+        page = unwrapped(page);
         if (!this.pages.has(page) || this.snapshottedPages.has(page) || this.runtimeSnapshots)
             return;
         return internally(page, () => this.snapshotBeforeCloseNow(page));
@@ -512,6 +568,7 @@ class CoveragePhaseController {
      * know its phase, and its hits were left to be placed by their time.
      */
     registerPage(page) {
+        page = unwrapped(page);
         if (this.disposed)
             return Promise.resolve();
         let registration = this.pageRegistrations.get(page);
@@ -569,6 +626,7 @@ class CoveragePhaseController {
             void this.registerWorker(worker);
     }
     async registerContext(context, { adopted = false } = {}) {
+        context = unwrapped(context);
         if (this.contexts.has(context) || this.disposed)
             return;
         this.contexts.add(context);
@@ -609,6 +667,9 @@ class CoveragePhaseController {
             parts.push(`(${activatePageMutant})(${JSON.stringify(mutant === "-"
                 ? { file: null, index: -1, marker: PAGE_TIMEOUT_MARKER }
                 : { file: mutant.slice(0, at), index: Number(mutant.slice(at + 1)), marker: PAGE_TIMEOUT_MARKER })});`);
+            // What the document has yet to do, for a stalled attempt's
+            // watch: before the page's own scripts set a timer.
+            parts.push(`(${watchPageWork})();`);
         }
         parts.push(`(${announceAttempt})(${JSON.stringify({
             attemptId: this.scope.attemptId,
@@ -647,16 +708,30 @@ class CoveragePhaseController {
             void this.registerWorker(worker);
         };
         const closed = () => this.closedContexts.add(context);
-        context.on("page", register);
-        context.on("serviceworker", registerServiceWorker);
-        context.on("close", closed);
-        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker], ["close", closed]]);
+        const listeners = [["page", register], ["serviceworker", registerServiceWorker], ["close", closed]];
+        // A strong attempt's pages are busy while they send or have
+        // answered a request: not stalled.
+        if (this.waitTimeouts) {
+            const sent = (request) => {
+                this.quietSince = Date.now();
+                this.unanswered.add(request);
+            };
+            const answered = (request) => {
+                this.quietSince = Date.now();
+                this.unanswered.delete(request);
+            };
+            listeners.push(["request", sent], ["requestfinished", answered], ["requestfailed", answered]);
+        }
+        for (const [event, listener] of listeners)
+            context.on(event, listener);
+        this.contextListeners.set(context, listeners);
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
         for (const page of context.pages())
             register(page);
     }
     async registerWorker(worker) {
+        worker = unwrapped(worker);
         if (this.workers.has(worker))
             return;
         this.workers.add(worker);
@@ -761,6 +836,94 @@ class CoveragePhaseController {
     requestPhaseId() {
         return this.activePhaseId;
     }
+    /** Keeps the calls a strong attempt makes, under its test's default timeouts. */
+    watchWaits(timeouts) {
+        this.waitTimeouts = timeouts;
+    }
+    /** A call the test made on one of Playwright's objects, until it settles. */
+    trackWait(object, method, args, pending, site) {
+        if (!this.waitTimeouts || !(pending instanceof Promise))
+            return;
+        // A locator assertion's `_expect` comes from Playwright's matcher:
+        // where the test called the matcher.
+        this.keepWait(describeCall(object, method, args), ownDeadline({ method, args, startedAt: Date.now(), request: isApiRequestContext(object), timeouts: this.waitTimeouts }), pending, site ?? this.matcherSite);
+    }
+    /**
+     * An `expect.poll` or a `toPass`, until it settles: it ends by its own
+     * timeout, `timeout` where the test gave one, else its config's.
+     */
+    keepRetries(operation, timeout, polls, pending) {
+        if (!this.waitTimeouts || !(pending instanceof Promise))
+            return;
+        const ms = timeout ?? (polls ? this.waitTimeouts.expect : this.waitTimeouts.toPass);
+        this.keepWait(operation, ms > 0 ? Date.now() + ms : Infinity, pending, this.matcherSite);
+    }
+    keepWait(operation, deadline, pending, at) {
+        // Whether it is the test's own (not opening or closing a context or
+        // a page, as Playwright's fixtures do); the first such call is where
+        // the test's own time starts.
+        // Where in the test it was called (`at`), for a timeout's reason.
+        const wait = { operation: at ? `${operation} at ${at}` : operation, deadline, fromTest: !LIFECYCLE.has(operation.split(" ")[0]), startedAt: Date.now(), pending };
+        if (wait.fromTest)
+            this.testCalledAt ??= Date.now();
+        this.waits.add(wait);
+        this.newestWait = wait;
+        const settled = () => this.waits.delete(wait);
+        pending.then(settled, settled);
+    }
+    /** A default timeout the test set on a page or a context: the shortest counts. */
+    lowerTimeout(method, args) {
+        const ms = Number(args[0]);
+        if (!this.waitTimeouts || !(ms > 0))
+            return;
+        const kind = method === "setDefaultTimeout" ? "action" : "navigation";
+        const now = this.waitTimeouts[kind];
+        this.waitTimeouts[kind] = now > 0 ? Math.min(now, ms) : ms;
+    }
+    /**
+     * What the test's pages could still do that may end a stalled wait
+     * before `limitAt` (`pendingBefore`), asked of every frame of every page
+     * at once.
+     */
+    async pageWork(limitAt) {
+        // The pages themselves, not the test's view of them: a question
+        // asked through that would be a call of the test's, its newest.
+        const pages = this.allPages().map((page) => this.proxyTargets.get(page) ?? page).filter((page) => !page.isClosed());
+        const asked = pages.flatMap((page) => page.frames().map(async (frame) => {
+            const answer = await bounded(internally(page, () => frame.evaluate(() => globalThis[Symbol.for("supercov.pageWork")]?.() ?? null)).catch(() => PAGE_GONE), PAGE_ANSWER_MS);
+            return { url: frame.url(), answer: answer === WORKER_TIMED_OUT ? PAGE_BUSY : answer };
+        }));
+        const frames = await Promise.all(asked);
+        const workers = pages.reduce((sum, page) => sum + page.workers().length, 0);
+        return pendingBefore({ frames, requests: this.unanswered.size, workers, limitAt, now: Date.now() });
+    }
+    /**
+     * What a strong attempt is stalled on before `limitAt`, if it is, what it
+     * waits on now, and when the calls it waits on end by their own timeouts
+     * past the limit, where they all do (`ownEndPast`).
+     */
+    stall(limitAt, testTimeoutAt) {
+        const newest = this.newestWait;
+        const stalled = stalledOn({ waits: this.waits, newest, limitAt, quietSince: this.quietSince, now: Date.now() });
+        return {
+            stalled: stalled?.operation,
+            waiting: this.waits.has(newest) ? newest.operation : undefined,
+            since: this.testCalledAt,
+            ownEnd: ownEndPast({ waits: this.waits, limitAt, testTimeoutAt }),
+        };
+    }
+    /**
+     * The calls the test waits on now run past `limitAt` to their own
+     * timeouts (`watchStall`), and the test's own outcome decides. Where
+     * they have all ended before the limit, it holds again (`restore`).
+     */
+    extendPast(limitAt, restore) {
+        const waits = [...this.waits];
+        Promise.allSettled(waits.map((wait) => wait.pending)).then(() => {
+            if (Date.now() < limitAt)
+                restore();
+        });
+    }
     async dispose() {
         this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
@@ -815,6 +978,9 @@ class CoveragePhaseController {
                 const method = String(property);
                 return (...args) => {
                     this.promotePendingAssertion();
+                    // Where the test made the call, while its frame is
+                    // still on the stack.
+                    const site = this.waitTimeouts ? testSite() : undefined;
                     const isRequest = REQUEST_METHODS.has(method) &&
                         isApiRequestContext(object);
                     if (ACTION_METHODS.has(method) || isRequest) {
@@ -822,7 +988,9 @@ class CoveragePhaseController {
                             const operation = `${object.constructor?.name ?? "Playwright"}.${method}`;
                             const phase = await this.beginAction(operation);
                             try {
-                                const result = await Reflect.apply(value, object, isRequest ? this.scopeApiRequest(args) : args);
+                                const pending = Reflect.apply(value, object, isRequest ? this.scopeApiRequest(args) : args);
+                                this.trackWait(object, method, args, pending, site);
+                                const result = await pending;
                                 this.finish(phase);
                                 return this.prepareResult(result);
                             }
@@ -836,11 +1004,16 @@ class CoveragePhaseController {
                         ? this.scopeBrowserContext(args)
                         : args;
                     const result = Reflect.apply(value, object, invokedArgs);
+                    if (method === "setDefaultTimeout" || method === "setDefaultNavigationTimeout")
+                        this.lowerTimeout(method, invokedArgs);
+                    this.trackWait(object, method, invokedArgs, result, site);
                     return this.wrapResult(result, method === "newContext" ? invokedArgs : undefined);
                 };
             },
         });
         this.proxyCache.set(target, proxy);
+        this.proxyTargets.set(proxy, target);
+        proxiedTargets.set(proxy, target);
         // Playwright's built-in `page` fixture is created through the wrapped
         // worker-scoped browser. The test-scoped fixture sees that proxy again;
         // treating our own proxy as a fresh target would nest wrappers, emit two
@@ -1232,9 +1405,15 @@ function readSnapshot(target) {
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
+        const columns = globalThis.__SUPERCOV_COLUMNS_SNAPSHOT__;
         const compact = globalThis.__SUPERCOV_COMPACT_SNAPSHOT__;
         if (!getSnapshot)
             return undefined;
+        // A runtime that keeps its events as columns gives them as such: the
+        // snapshot the evidence stores (columnarEvents). An older copy in
+        // the page gives its events compactly.
+        if (typeof columns === "function")
+            return columns();
         return typeof compact === "function" ? compact(getSnapshot()) : JSON.stringify(getSnapshot());
     })
         .then((text) => {
@@ -1242,7 +1421,13 @@ function readSnapshot(target) {
             return undefined;
         // Phase timing counts the bytes each read carried, as its "ms".
         timingCount("transfer.snapshotBytes", text.length);
-        return expandSnapshot(JSON.parse(text));
+        const parsed = JSON.parse(text);
+        const snapshot = expandSnapshot(parsed);
+        // The page wrote it with JSON.stringify, as the record will: kept,
+        // the record takes the text as it came instead of writing it again.
+        if (snapshot === parsed && snapshot && typeof snapshot === "object")
+            keepSnapshotText(snapshot, text);
+        return snapshot;
     });
 }
 let activeController;
@@ -1298,6 +1483,7 @@ function liveTrackedContexts() {
 }
 /** The controller that registered `page`, whichever test it belongs to. */
 function controllerOwning(page) {
+    page = unwrapped(page);
     if (activeController?.pages.has(page))
         return activeController;
     for (const controller of controllers.values())
@@ -1664,7 +1850,12 @@ function isPlaywrightValue(value) {
         return true;
     }
 }
-function wrapMatchers(matchers, path = "expect", settles = false) {
+/**
+ * The matchers of an `expect`. `retries` is what an `expect.poll` or a
+ * `toPass` retries under: whether it polls, and the timeout its `expect` was
+ * given (`expect.poll(fn, { timeout })`, `expect.configure({ timeout })`).
+ */
+function wrapMatchers(matchers, path = "expect", settles = false, retries = { polls: false, timeout: undefined }) {
     return new Proxy(matchers, {
         get(target, property) {
             // Matcher objects and built-ins can expose getters whose internal slots
@@ -1675,11 +1866,15 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
             if (value &&
                 typeof value === "object" &&
                 (name === "not" || name === "resolves" || name === "rejects"))
-                return wrapMatchers(value, `${path}.${name}`, settles && name === "not");
+                return wrapMatchers(value, `${path}.${name}`, settles && name === "not", retries);
             if (typeof value !== "function")
                 return value;
             return (...args) => {
                 const controller = activeController;
+                // Where the test called the matcher: the calls it makes of
+                // Playwright's objects are named by it.
+                if (controller?.waitTimeouts)
+                    controller.matcherSite = testSite();
                 const settled = settles && SETTLED_MATCHERS.has(name);
                 const phase = bridgedAssertionDepth === 0
                     ? controller?.beginAssertion(`${path}.${name}`, undefined, !settled)
@@ -1690,6 +1885,10 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
                     controller?.promotePendingAssertion();
                 try {
                     const result = Reflect.apply(value, target, args);
+                    // A poll, or `toPass`, retries until its own timeout,
+                    // whatever the calls in it wait on.
+                    if (retries.polls || name === "toPass")
+                        controller?.keepRetries(`${path}.${name}`, retries.polls ? retries.timeout : args[0]?.timeout ?? retries.timeout, retries.polls, result);
                     if (result instanceof Promise) {
                         return result.then((resolved) => {
                             if (phase && controller)
@@ -1714,21 +1913,22 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
         },
     });
 }
-function wrapExpectCallable(callable, polls = false) {
+function wrapExpectCallable(callable, polls = false, timeout = undefined) {
     return new Proxy(callable, {
         apply(target, thisArg, argumentsList) {
             const result = Reflect.apply(target, thisArg, argumentsList);
+            // `expect.configure(options)`: an `expect` under its timeout.
             if (typeof result === "function")
-                return wrapExpectCallable(result, polls);
+                return wrapExpectCallable(result, polls, argumentsList[0]?.timeout ?? timeout);
             if (result && typeof result === "object")
-                return wrapMatchers(result, "expect", !polls && !isPlaywrightValue(argumentsList[0]));
+                return wrapMatchers(result, "expect", !polls && !isPlaywrightValue(argumentsList[0]), { polls, timeout: polls ? argumentsList[1]?.timeout ?? timeout : timeout });
             return result;
         },
         get(target, property, receiver) {
             const value = Reflect.get(target, property, receiver);
             if (typeof value !== "function")
                 return value;
-            return wrapExpectCallable(value.bind(target), polls || property === "poll");
+            return wrapExpectCallable(value.bind(target), polls || property === "poll", timeout);
         },
     });
 }
@@ -1870,6 +2070,13 @@ const instrumentedFixtures = {
             const configuredHeaders = Object.fromEntries(Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(([name, value]) => [name, String(value)]));
             const setupStarted = performance.now();
             const controller = new CoveragePhaseController(scope, configuredHeaders, testInfo.project.use.baseURL);
+            if (strong?.kind === "mutant")
+                controller.watchWaits({
+                    action: testInfo.project.use.actionTimeout ?? 0,
+                    navigation: testInfo.project.use.navigationTimeout ?? 0,
+                    expect: testInfo.project.expect?.timeout ?? 5_000,
+                    toPass: testInfo.project.expect?.toPass?.timeout ?? 0,
+                });
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
@@ -1905,10 +2112,16 @@ const instrumentedFixtures = {
             // test is running for all of this, not only during its actions.
             const startedAtMs = Date.now();
             timingCount("fixture.testSetup", performance.now() - setupStarted);
+            // A mutant that ran in this worker's own process may have left
+            // state in it: the next test gets a new worker.
+            let restartWorker = false;
+            // A mutant attempt that stalls ends there, a timeout.
+            const stall = watchStall(testInfo, strong, (limitAt, testTimeoutAt) => controller.stall(limitAt, testTimeoutAt), (limitAt) => controller.pageWork(limitAt), (limitAt, restore) => controller.extendPast(limitAt, restore));
             try {
                 await use();
             }
             finally {
+                stall?.stop();
                 const teardownStarted = performance.now();
                 const endedAtMs = Date.now();
                 try {
@@ -1940,10 +2153,14 @@ const instrumentedFixtures = {
                         browser: browser.map(columnarEvents),
                         span: [startedAtMs, endedAtMs],
                     };
-                    appendEvidenceLine(`${JSON.stringify(payload)}\n`);
+                    appendEvidenceLine(`${recordLine(payload)}\n`);
                 }
                 finally {
-                    strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true });
+                    strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true, ...stallDetails(stall) });
+                    const ranHere = ranInWorker(strong, scope.attemptId);
+                    restartWorker = ranHere && testInfo.status === "passed";
+                    if (keepsWorker(strong, ranHere, testInfo.status))
+                        testInfo.expectedStatus = testInfo.status;
                     await timed("controller.dispose", () => controller.dispose());
                     timingCount("fixture.testTeardown", performance.now() - teardownStarted);
                     timingReport(testInfo.title);
@@ -1953,10 +2170,16 @@ const instrumentedFixtures = {
                     controllers.delete(scope.attemptId);
                 }
             }
+            if (restartWorker)
+                throw new Error("Supercov strong mutation: the mutant ran in this worker's process, so the next test runs in a new worker");
         },
         { auto: true },
     ],
 };
+// A strong pass declares each test it needs as many times as it may run it
+// (playwrightStrong.mjs): on Playwright's test type, before the test object
+// every spec uses is made.
+installCopies(base);
 const instrumentedTest = base.extend(instrumentedFixtures);
 export const test = instrumentedTest;
 // `export *` passes no default on, and `import test from "@playwright/test"`

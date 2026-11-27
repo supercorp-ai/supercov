@@ -183,6 +183,7 @@ fn sorted_entries(directory: &Path) -> io::Result<Vec<fs::DirEntry>> {
 
 pub fn place_launchers(tools: &Path, to: &Path) -> io::Result<()> {
     let judges = source_tools();
+    // fault-site: source-tools.place-launchers
     let (Some(binary), Ok(entries)) = (launching_binary(), fs::read_dir(tools)) else {
         return Ok(());
     };
@@ -208,6 +209,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
     let path = std::env::var_os("PATH")?;
     let binary = launching_binary()?;
     let directory = workspace.join(".supercov/node_modules/.tools");
+    // fault-site: source-tools.path-with-launchers.remove
     remove(&directory).ok()?;
     // The forms a tool is installed in, in the order the system tries them,
     // and the launcher that answers to the name.
@@ -229,6 +231,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
         else {
             return Some(());
         };
+        // fault-site: source-tools.path-with-launchers.create-dir-all
         fs::create_dir_all(&directory).ok()?;
         #[cfg(windows)]
         write_launcher(
@@ -237,6 +240,7 @@ pub fn path_with_launchers(workspace: &Path) -> Option<OsString> {
         )
         .ok()?;
         #[cfg(not(windows))]
+        // fault-site: source-tools.path-with-launchers.write-launcher
         write_launcher(&directory.join(&name), &launcher(&binary, &tool)).ok()?;
         found = true;
         Some(())
@@ -400,6 +404,7 @@ fn refresh_directory(
     state: &mut View,
 ) -> io::Result<()> {
     let mut present = BTreeSet::new();
+    // fault-site: source-tools.refresh-directory.sorted-entries-1
     for entry in sorted_entries(&workspace.join(local))? {
         let name = entry.file_name();
         if name == ".supercov" {
@@ -415,6 +420,7 @@ fn refresh_directory(
             } else {
                 from
             };
+            // fault-site: source-tools.refresh-directory.point
             point(&to, &target)?;
         } else if file_type.is_symlink() {
             point(&to, &fs::read_link(&from)?)?;
@@ -437,9 +443,11 @@ fn refresh_directory(
     }
     let boundary = local.as_os_str().is_empty() && !present.contains(OsStr::new(BOUNDARY));
     if boundary && !view.join(BOUNDARY).is_dir() {
+        // fault-site: source-tools.refresh-directory.remove
         remove(&view.join(BOUNDARY))?;
         fs::create_dir(view.join(BOUNDARY))?;
     }
+    // fault-site: source-tools.refresh-directory.sorted-entries-2
     for entry in sorted_entries(&view.join(local))? {
         let kept =
             present.contains(&entry.file_name()) || (boundary && entry.file_name() == BOUNDARY);
@@ -490,6 +498,7 @@ fn reconcile_directory(
     local: &Path,
     state: &View,
 ) -> io::Result<()> {
+    // fault-site: source-tools.reconcile-directory
     for entry in sorted_entries(&view.join(local))? {
         let path = local.join(entry.file_name());
         let (from, to) = (view.join(&path), workspace.join(&path));
@@ -675,6 +684,7 @@ fn apply_directory(
 ) -> io::Result<()> {
     // The tree holds the files the tools wrote, so each of its directories
     // holds one at least.
+    // fault-site: source-tools.apply-directory.sorted-entries
     sorted_entries(&directory.join(local))?
         .into_iter()
         .try_for_each(|entry| {
@@ -682,6 +692,7 @@ fn apply_directory(
             if fs::file_type(&entry)?.is_dir() {
                 return apply_directory(root, workspace, directory, &path, changes);
             }
+            // fault-site: source-tools.apply-directory.read
             let text = fs::read(entry.path())?;
             let started_from = fs::read(authored_path(workspace, &path)).ok();
             // A tool that writes every file it formats, changed or not.
@@ -747,8 +758,14 @@ mod tests {
             ("view", "fs.create_dir@5"),
             ("view", "fs.symlink@1"),
             // The project's dependencies, and the boundary, not laid in.
-            ("view", "fs.symlink_metadata#source_tools.rs:418"),
-            ("view", "fs.symlink_metadata#source_tools.rs:440"),
+            (
+                "view",
+                "fs.symlink_metadata#source-tools.refresh-directory.point",
+            ),
+            (
+                "view",
+                "fs.symlink_metadata#source-tools.refresh-directory.remove",
+            ),
             // What a tool did, brought back alone: a file linked in, one in
             // a directory it made, a link it made.
             ("reconcile", "fs.metadata@1"),

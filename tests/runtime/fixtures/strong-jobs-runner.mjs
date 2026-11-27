@@ -6,10 +6,16 @@
 // mutant, then the test id:
 //   "fail", "hang" (never ends), "loop" (passes its hit limit and says so),
 //   "crash" (the process ends, nothing written), "subset-fail" (fails when
-//   run without the tests before it in its file), "slow" (passes in 0.8 s).
+//   run without the tests before it in its file), "slow" (passes in 0.8 s),
+//   "locked" (holds a lock every job shares for 0.8 s, as each job that
+//   builds Rust compiled to wasm holds Cargo's on its build directory),
+//   "loaded" (once any job with a mutant has started, every job's test
+//   takes 2.5 s: a machine other work made slower after the baselines ran),
+//   "stops" (marks the pass as told to stop, `stopped-at` beside its
+//   results, and the process ends, nothing written: a job the stop ended).
 // A test id may also carry a second rule after a comma: "slow,subset-fail".
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const suite = JSON.parse(readFileSync(process.env.FAKE_SUITE, "utf8"));
 const job = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_JOB, "utf8"));
@@ -33,10 +39,42 @@ for (const [file, chosen] of Object.entries(job.files)) {
         const [rule, also] = String(rules[testId] ?? "").split(",").reverse();
         if (also === "slow" || rule === "slow")
             await new Promise((done) => setTimeout(done, 800));
+        if (also === "loaded" || rule === "loaded") {
+            const slowed = join(dirname(process.env.FAKE_SUITE), "slowed");
+            if (mutant !== "-")
+                writeFileSync(slowed, "");
+            if (existsSync(slowed))
+                await new Promise((done) => setTimeout(done, 2_500));
+        }
+        if (also === "locked" || rule === "locked") {
+            // Released when its holder ends, however it ends, as Cargo's is.
+            const lock = join(dirname(process.env.FAKE_SUITE), "build.lock");
+            for (;;) {
+                try {
+                    writeFileSync(lock, String(process.pid), { flag: "wx" });
+                    break;
+                }
+                catch {
+                    try {
+                        process.kill(Number(readFileSync(lock, "utf8")), 0);
+                    }
+                    catch {
+                        rmSync(lock, { force: true });
+                    }
+                    await new Promise((done) => setTimeout(done, 10));
+                }
+            }
+            await new Promise((done) => setTimeout(done, 800));
+            rmSync(lock);
+        }
         if (rule === "hang")
             await new Promise(() => setInterval(() => { }, 1000));
         if (rule === "crash")
             process.exit(3);
+        if (rule === "stops") {
+            writeFileSync(join(dirname(process.env.FAKE_SUITE), "stopped-at"), String(Date.now()));
+            process.exit(3);
+        }
         if (rule === "loop") {
             appendFileSync(`${process.env.SUPERCOV_STRONG_RESULTS}.timeouts.jsonl`, `${JSON.stringify({ mutant, attemptId: null, pass: "main" })}\n`);
             write(testId, "passed");

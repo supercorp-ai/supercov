@@ -444,8 +444,20 @@ fn rounded_millisecond(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
-fn supervision_options() -> Result<SupervisionOptions, String> {
-    let defaults = SupervisionOptions::default();
+/// A strong pass's progress lines say what its command does every few
+/// seconds (`mutants test`): its process tree is listed only once it has
+/// run this long, not every minute.
+const STRONG_DIAGNOSTIC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn supervision_options(strong: bool) -> Result<SupervisionOptions, String> {
+    let defaults = SupervisionOptions {
+        diagnostic_interval: if strong {
+            STRONG_DIAGNOSTIC_INTERVAL
+        } else {
+            SupervisionOptions::default().diagnostic_interval
+        },
+        ..SupervisionOptions::default()
+    };
     Ok(SupervisionOptions {
         diagnostic_interval: positive_milliseconds(
             std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
@@ -749,6 +761,7 @@ fn run_javascript(
         );
     }
     cleanup.mark_state_written();
+    // fault-site: javascript-run.run-javascript.write-run-state
     write_run_state(
         &root,
         &RunState {
@@ -991,11 +1004,19 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
+        // A process that runs out of heap says which it was, in a report.
+        let options = format!(
+            "{} {}",
+            overrides["NODE_OPTIONS"],
+            strong.node_report_options()
+        );
+        overrides.insert("NODE_OPTIONS".into(), options);
         overrides.extend(wasm_strong.clone().unwrap_or_default());
         if let Some(files) = strong.switched_files() {
             let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();
             let path = strong.switched_files_path();
+            // fault-site: javascript-run.run-javascript.write-1
             crate::fault_fs::write(
                 &path,
                 serde_json::to_vec(&files).expect("plain data serializes"),
@@ -1094,6 +1115,7 @@ fn run_javascript(
             .collect::<BTreeMap<_, _>>(),
     });
     let settings_path = frontend.preload_path.with_file_name("run.json");
+    // fault-site: javascript-run.run-javascript.write-2
     crate::fault_fs::write(
         &settings_path,
         serde_json::to_vec(&settings).expect("plain data serializes"),
@@ -1130,7 +1152,7 @@ fn run_javascript(
             },
         },
     };
-    let options = supervision_options()?;
+    let options = supervision_options(request.strong.is_some())?;
     let watchdog_program = request.watchdog_program.as_ref().ok_or_else(|| {
         DirectJavascriptRunError::Failed(
             "the JavaScript run is missing its crash-containment executable".into(),
@@ -1177,6 +1199,7 @@ fn run_javascript(
                     reason: error.to_string(),
                 })?;
             }
+            // fault-site: javascript-run.run-javascript.update-run-state-1
             update_run_state(&root, &run_id, RunStateStatus::Testing, &started_at, None).map_err(
                 |error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
@@ -1228,7 +1251,17 @@ fn run_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
+    // A stopped pass keeps the verdicts of what it finished.
+    if let Some(strong) = &request.strong {
+        judge_playwright_pass(
+            strong,
+            None,
+            &workspace,
+            execution.interrupted_signal.is_some(),
+        );
+    }
     if let Some(signal) = execution.interrupted_signal {
+        // fault-site: javascript-run.run-javascript.interrupt-run-state
         interrupt_run_state(&root, &run_id, &started_at, signal.name())
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
@@ -1258,6 +1291,7 @@ fn run_javascript(
             options,
             diagnostics,
         )?;
+        // fault-site: javascript-run.run-javascript.update-run-state-2
         update_run_state(&root, &run_id, RunStateStatus::Complete, &started_at, None)
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
@@ -1265,6 +1299,8 @@ fn run_javascript(
         // Its verdicts are in its results: it publishes no run.
         return Ok(Finished::strong(execution.exit_code));
     }
+    // What the command created or changed in the copy, synced back or not.
+    let written_by_command;
     // Leave the real working tree as the command alone would have: updated
     // snapshots, generated fixtures, and reports belong in the repository,
     // not in the cache. Deletions and instrumented-source rewrites are
@@ -1281,6 +1317,12 @@ fn run_javascript(
             .collect::<std::collections::BTreeSet<_>>();
         let outputs = sync_command_outputs(&root, &workspace, baseline, &protected)
             .map_err(|error| error.to_string())?;
+        written_by_command = outputs
+            .synced_paths
+            .iter()
+            .chain(&outputs.skipped_instrumented)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
         if outputs.synced > 0 {
             let _ = writeln!(
                 diagnostics,
@@ -1367,6 +1409,7 @@ fn run_javascript(
         }
         let _ = std::fs::remove_file(&missing_loads);
     }
+    // fault-site: javascript-run.run-javascript.update-run-state-3
     update_run_state(
         &root,
         &run_id,
@@ -1386,7 +1429,19 @@ fn run_javascript(
     } else {
         crate::served_tests::read(&evidence_directory)
     };
-    let support = crate::support_reach::read(&support_directory, &workspace, &served);
+    let mut support = crate::support_reach::read(&support_directory, &workspace, &served);
+    // What the servers read that the command wrote itself is no input.
+    if let Some(support) = &mut support {
+        let generated = support.leave_out_generated(&root, &written_by_command);
+        if !generated.is_empty() {
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] {} file(s) the servers read were written by the command and are not tracked, so they are not inputs of the run: {}",
+                generated.len(),
+                crate::run_merge::listed(&generated)
+            );
+        }
+    }
     if project.source_files.is_empty() {
         // Only the servers were measured: the first published is the run,
         // any other beside it.
@@ -1416,6 +1471,7 @@ fn run_javascript(
             recorded_by: None,
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         // Each server's run is built before any is published, so each can
         // name the others: the first under the command's run id, which `runs
@@ -1482,6 +1538,7 @@ fn run_javascript(
             match publish(server_metadata, diagnostics) {
                 Ok(run) if nth == 0 => published = Some(run),
                 Ok((directory, _)) => {
+                    // fault-site: javascript-run.run-javascript.finalize-published-run-1
                     finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                     server_runs.push((language.to_owned(), directory));
                 }
@@ -1498,8 +1555,10 @@ fn run_javascript(
                 }
             }
         }
+        // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-1
         remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
             .map_err(|error| error.to_string())?;
+        // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-2
         remove_stored_tree_deferred(&root, &server_evidence_root)
             .map_err(|error| error.to_string())?;
         if published.is_none()
@@ -1526,6 +1585,7 @@ fn run_javascript(
             cleanup.mark_terminal();
             return Err(message.into());
         };
+        // fault-site: javascript-run.run-javascript.update-run-state-4
         update_run_state(
             &root,
             &run_id,
@@ -1538,6 +1598,7 @@ fn run_javascript(
             None,
         )
         .map_err(|error| error.to_string())?;
+        // fault-site: javascript-run.run-javascript.finalize-published-run-2
         finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
         return Ok(Finished::published(Box::new(DirectJavascriptRunResult {
@@ -1645,8 +1706,10 @@ fn run_javascript(
     });
     std::thread::spawn(move || drop(entries));
     let raw = raw.map_err(|error| error.to_string())?;
+    // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-3
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;
+    // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-4
     remove_stored_tree_deferred(&root, &server_evidence_root).map_err(|error| error.to_string())?;
     let evidence_publication_ms = elapsed_ms(publication_started);
     let timings = RunTimings {
@@ -1683,6 +1746,7 @@ fn run_javascript(
         recorded_by: None,
         companions: None,
         supersedes: None,
+        measured_as: None,
     };
     // Each server's run beside the browser run, under an id of its own that
     // sorts after it: `runs latest` stays the browser run. Published first,
@@ -1710,6 +1774,7 @@ fn run_javascript(
             });
         match published {
             Ok(Some((directory, _))) => {
+                // fault-site: javascript-run.run-javascript.finalize-published-run-3
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                 server_runs.push((language.to_owned(), directory));
                 companions.push(crate::run_store::CompanionRun {
@@ -1739,6 +1804,7 @@ fn run_javascript(
         crate::lifecycle::Archived {
             report: analysed,
             inputs: None,
+            parts: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -1747,8 +1813,10 @@ fn run_javascript(
     } else {
         RunStateStatus::Failed
     };
+    // fault-site: javascript-run.run-javascript.update-run-state-5
     update_run_state(&root, &run_id, terminal_status, &started_at, None)
         .map_err(|error| error.to_string())?;
+    // fault-site: javascript-run.run-javascript.finalize-published-run-4
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
     cleanup.mark_terminal();
     Ok(Finished::published(Box::new(DirectJavascriptRunResult {
@@ -2994,12 +3062,16 @@ fn run_strong_restarts(
                 .results
                 .with_file_name(format!("restart-{number}.log"));
             number += 1;
+            // fault-site: javascript-run.run-strong-restarts
             crate::fault_fs::write(
                 &path,
                 serde_json::to_vec(&job).expect("plain data serializes"),
             )
             .map_err(|error| format!("{}: {error}", path.display()))?;
-            let everywhere = job["everywhere"] == true;
+            // One mutant a Playwright invocation: each runner switches its
+            // own on for the processes it starts.
+            let batch = job["batch"] == true;
+            let everywhere = job["everywhere"] == true && !batch;
             let mutants = job["mutants"].as_array().map_or(0, Vec::len);
             let _ = writeln!(
                 diagnostics,
@@ -3007,7 +3079,9 @@ fn run_strong_restarts(
                 path.file_stem().unwrap_or_default().to_string_lossy(),
                 mutants,
                 job["kind"].as_str().unwrap_or("alone"),
-                if everywhere {
+                if batch {
+                    ", one an invocation of Playwright, its server started with it switched on"
+                } else if everywhere {
                     ", every process started with it switched on"
                 } else {
                     ""
@@ -3042,6 +3116,12 @@ fn run_strong_restarts(
                 |_, _| Ok(()),
             )
             .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+            judge_playwright_pass(
+                strong,
+                Some(&path),
+                workspace,
+                execution.interrupted_signal.is_some(),
+            );
             // An interrupted pass ends here; the mutants left have no verdict.
             if execution.interrupted_signal.is_some() {
                 return Ok(());
@@ -3051,6 +3131,39 @@ fn run_strong_restarts(
             return Ok(());
         }
     }
+}
+
+/// Decides a Playwright pass's verdicts once its command has ended, with
+/// every invocation of Playwright it started (`judge` in
+/// `playwrightStrongReporter.mjs`): a harness may start several at once, each
+/// with a share of the tests, and a mutant's rows may be in any of them. A
+/// pass that started no Playwright left no work, and has nothing to judge.
+/// A round a signal or the budget stopped (`stopped`) leaves what it did not
+/// finish without a verdict, for the next pass: it is not a round whose
+/// tests ran to their end and decided nothing.
+fn judge_playwright_pass(
+    strong: &StrongRun,
+    restart: Option<&Path>,
+    workspace: &Path,
+    stopped: bool,
+) {
+    let name = restart
+        .and_then(Path::file_stem)
+        .map_or_else(|| "main".into(), |stem| stem.to_string_lossy().into_owned());
+    let round = strong.results.with_file_name("playwright").join(name);
+    if !round.join("pass.json").is_file() {
+        return;
+    }
+    let _ = std::process::Command::new("node")
+        .arg(workspace.join(".supercov/node_modules/playwrightStrongReporter.mjs"))
+        .current_dir(workspace)
+        .env_remove("NODE_OPTIONS")
+        .env("SUPERCOV_STRONG_PLAN", &strong.plan)
+        .env("SUPERCOV_STRONG_RESULTS", &strong.results)
+        .envs(restart.map(|path| ("SUPERCOV_STRONG_RESTART", path)))
+        .envs(stopped.then_some(("SUPERCOV_STRONG_STOPPED", "1")))
+        .stdout(std::process::Stdio::null())
+        .status();
 }
 
 /// What a strong pass starts: the command itself, which Vitest's and

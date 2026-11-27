@@ -1,0 +1,113 @@
+{
+  "description": "Rust validation corpus: public crates pinned to a tag, each run by cargo-mutants 27.1.0 (every mutant, the whole suite) and by Supercov's measured run and strong pass, joined mutant by mutant. Read by .github/workflows/mutation-rust.yml and benchmarks/mutation/rust/summarize.mjs.",
+  "tools": {
+    "rust": "1.95.0",
+    "cargoMutants": "27.1.0",
+    "cargoNextest": "0.9.140",
+    "runner": "GitHub ubuntu-latest (4 vCPU, 16 GB)",
+    "jobs": 2
+  },
+  "crates": [
+    {
+      "name": "strsim",
+      "repo": "https://github.com/rapidfuzz/strsim-rs",
+      "tag": "v0.11.1",
+      "shape": "small library, unit tests and doctests",
+      "test": "cargo test",
+      "truthShards": 4,
+      "supercovShards": 1
+    },
+    {
+      "name": "hex",
+      "repo": "https://github.com/KokaKiwi/rust-hex",
+      "tag": "v0.4.3",
+      "shape": "small library, deny-by-default lints, doctests",
+      "test": "cargo test",
+      "truthShards": 2,
+      "supercovShards": 1
+    },
+    {
+      "name": "semver",
+      "repo": "https://github.com/dtolnay/semver",
+      "tag": "1.0.27",
+      "shape": "library with const code and integration tests",
+      "test": "cargo test",
+      "truthShards": 4,
+      "supercovShards": 1
+    },
+    {
+      "name": "itoa",
+      "repo": "https://github.com/dtolnay/itoa",
+      "tag": "1.0.15",
+      "shape": "tiny library, generic over integer types",
+      "test": "cargo test",
+      "truthShards": 1,
+      "supercovShards": 1
+    },
+    {
+      "name": "smallvec",
+      "repo": "https://github.com/servo/rust-smallvec",
+      "tag": "v1.15.1",
+      "shape": "unsafe-heavy collection, many unit tests",
+      "test": "cargo test",
+      "truthShards": 6,
+      "supercovShards": 1
+    },
+    {
+      "name": "unicode-width",
+      "repo": "https://github.com/unicode-rs/unicode-width",
+      "tag": "v0.2.1",
+      "shape": "generated lookup tables, integration tests",
+      "test": "cargo test",
+      "truthShards": 8,
+      "supercovShards": 1
+    },
+    {
+      "name": "base64",
+      "repo": "https://github.com/marshallpierce/rust-base64",
+      "tag": "v0.22.1",
+      "shape": "mid-size library, randomized round-trip tests",
+      "test": "cargo test",
+      "truthShards": 48,
+      "supercovShards": 16
+    },
+    {
+      "name": "fastrand",
+      "repo": "https://github.com/smol-rs/fastrand",
+      "tag": "v2.3.0",
+      "shape": "run under cargo-nextest by both tools",
+      "test": "cargo nextest run",
+      "cargoMutantsArgs": "--test-tool=nextest",
+      "truthShards": 8,
+      "supercovShards": 8
+    },
+    {
+      "name": "bitflags",
+      "repo": "https://github.com/bitflags/bitflags",
+      "tag": "2.9.1",
+      "shape": "macro-generated code, compile tests",
+      "test": "cargo test",
+      "truthShards": 3,
+      "supercovShards": 1
+    },
+    {
+      "name": "anyhow",
+      "repo": "https://github.com/dtolnay/anyhow",
+      "tag": "1.0.98",
+      "shape": "build script, unsafe vtables, many test files",
+      "test": "cargo test",
+      "truthShards": 3,
+      "supercovShards": 1
+    },
+    {
+      "name": "regex-syntax",
+      "repo": "https://github.com/rust-lang/regex",
+      "tag": "regex-syntax-0.8.5",
+      "shape": "workspace member, mid-size parser",
+      "test": "cargo test -p regex-syntax",
+      "cargoMutantsArgs": "-p regex-syntax",
+      "truthShards": 40,
+      "supercovShards": 10
+    }
+  ]
+}

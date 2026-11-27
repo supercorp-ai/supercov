@@ -197,17 +197,24 @@ pub fn named<'u>(units: impl IntoIterator<Item = &'u Unit>) -> String {
     }
 }
 
-/// The top-level functions a JavaScript or TypeScript file gained, where that
-/// is all that changed since `before` was read: nothing that existed then
-/// reads differently, no new code runs when the file loads, and no code that
-/// existed then names what was added (it would have meant something else
-/// before). Code written before these functions existed cannot have run them.
+/// The top-level functions a JavaScript, TypeScript or Python file gained,
+/// where that is all that changed since `before` was read: nothing that
+/// existed then reads differently, no new code runs when the file loads, and
+/// no code that existed then names what was added (it would have meant
+/// something else before). Code written before these functions existed
+/// cannot have run them.
 ///
 /// Decided by taking the additions out again -- the functions, and import
 /// names only they use -- and requiring every declaration of `before`, the
 /// file's own top level included, to digest exactly as it did. What cannot
 /// be taken out cleanly is not an addition; the answer is `None`, and the
 /// file counts as changed.
+///
+/// Every other language `code` reads is `None` too: Supercov cannot tell an
+/// addition there from a change. A Rust `fn` can shadow what a glob import
+/// brought into the module, and a Ruby `def` can redefine a method of a class
+/// opened elsewhere, so added functions are not known to leave earlier code
+/// as it was.
 pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>> {
     use oxc_ast::ast::*;
     use oxc_ast_visit::Visit;
@@ -216,6 +223,8 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
     if path.ends_with(".py") {
         return only_added_python(before, path, source);
     }
+    let source_type =
+        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
     let after = code(path, source)?;
     let diff = before.diff(&after);
     let added = diff
@@ -229,8 +238,6 @@ pub fn only_added(before: &Code, path: &str, source: &str) -> Option<Vec<String>
         return None;
     }
     // `code` read the same source with the same parser: it parses cleanly.
-    let source_type = crate::js_instrumenter::project_source_type(std::path::Path::new(path))
-        .expect("`code` read this path as JavaScript");
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     // Names a statement binds, where all it does is define functions.
@@ -644,6 +651,23 @@ pub fn code(path: &str, source: &str) -> Option<Code> {
     Some(build(source, outline))
 }
 
+/// A JavaScript or TypeScript file's source with each comment's characters
+/// blanked, line breaks kept: every offset is where it was, and no comment
+/// is left to read a name in. `None` where the file does not parse, or is
+/// not JavaScript or TypeScript.
+pub fn javascript_without_comments(path: &str, source: &str) -> Option<String> {
+    let outline = javascript(path, source)?;
+    let mut bytes = source.as_bytes().to_vec();
+    // A character's every byte, so the text stays UTF-8.
+    outline
+        .comments
+        .iter()
+        .flat_map(|(start, end)| *start..*end)
+        .filter(|at| source.as_bytes()[*at] != b'\n')
+        .for_each(|at| bytes[at] = b' ');
+    Some(String::from_utf8(bytes).expect("ASCII spaces in place of whole characters"))
+}
+
 fn short_digest(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
@@ -974,9 +998,9 @@ fn javascript(path: &str, source: &str) -> Option<Outline> {
     use oxc_ast_visit::{Visit, walk};
     use oxc_span::GetSpan;
 
-    // `code` sends only the extensions oxc reads.
-    let source_type = crate::js_instrumenter::project_source_type(std::path::Path::new(path))
-        .expect("a JavaScript or TypeScript extension");
+    // A path oxc has no source type for is not JavaScript or TypeScript.
+    let source_type =
+        crate::js_instrumenter::project_source_type(std::path::Path::new(path)).ok()?;
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
@@ -1963,6 +1987,17 @@ mod tests {
 
     use super::*;
 
+    /// Comments blanked where they were, line breaks kept; a file that does
+    /// not parse has none to blank.
+    #[test]
+    fn a_javascript_file_s_comments_are_blanked_in_place() {
+        assert_eq!(
+            javascript_without_comments("a.js", "a(); /* b\nc */ d(); // é\n").as_deref(),
+            Some("a();     \n     d();      \n")
+        );
+        assert_eq!(javascript_without_comments("a.js", "function ("), None);
+    }
+
     fn paths(code: &Code) -> Vec<(&str, &str)> {
         code.units
             .iter()
@@ -2799,6 +2834,90 @@ mod tests {
         let added = "import os; x = 1\n\n\ndef added():\n    return os.sep\n";
         assert!(code("h.py", added).is_some());
         assert_eq!(only_added(&before, "h.py", added), None);
+    }
+
+    /// Python's added functions are judged; every other language `code`
+    /// reads but `only_added` cannot judge is a change, never a panic: a
+    /// file that gained functions, one whose function changed, and a new
+    /// one alike.
+    #[test]
+    fn only_python_and_javascript_additions_are_judged() {
+        for (path, kept, function, changed, judged) in [
+            (
+                "tests/helpers.py",
+                "def a():\n    return 1\n",
+                "\n\ndef b():\n    return 2\n",
+                "def a():\n    return 3\n",
+                true,
+            ),
+            (
+                "h.js",
+                "export function a() {\n  return 1;\n}\n",
+                "\nexport function b() {\n  return 2;\n}\n",
+                "export function a() {\n  return 3;\n}\n",
+                true,
+            ),
+            (
+                "tests/common/mod.rs",
+                "pub fn a() -> u8 {\n    1\n}\n",
+                "\npub fn b() -> u8 {\n    2\n}\n",
+                "pub fn a() -> u8 {\n    3\n}\n",
+                false,
+            ),
+            (
+                "spec/support.rb",
+                "def a\n  1\nend\n",
+                "\ndef b\n  2\nend\n",
+                "def a\n  3\nend\n",
+                false,
+            ),
+            (
+                "a.go",
+                "package a\n\nfunc A() int {\n\treturn 1\n}\n",
+                "\nfunc B() int {\n\treturn 2\n}\n",
+                "package a\n\nfunc A() int {\n\treturn 3\n}\n",
+                false,
+            ),
+            (
+                "A.java",
+                "class A {\n}\n",
+                "class B {\n    int b() {\n        return 2;\n    }\n}\n",
+                "class A {\n    int a = 3;\n}\n",
+                false,
+            ),
+            (
+                "a.kt",
+                "fun a() = 1\n",
+                "\nfun b() = 2\n",
+                "fun a() = 3\n",
+                false,
+            ),
+        ] {
+            let before = code(path, kept).unwrap_or_else(|| panic!("{path}"));
+            let gained = format!("{kept}{function}");
+            // What `only_added` sees is what `code` reads as gaining a
+            // declaration and nothing else.
+            let diff = before.diff(&code(path, &gained).unwrap());
+            assert!(!diff.added.is_empty(), "{path}");
+            assert!(diff.removed.is_empty(), "{path}");
+            assert!(diff.changed.iter().all(|index| *index == 0), "{path}");
+            let new = code(path, "").unwrap_or_else(|| panic!("{path}"));
+            let expected = judged.then(|| vec!["b".to_owned()]);
+            assert_eq!(only_added(&before, path, &gained), expected, "{path}");
+            assert_eq!(
+                only_added(&new, path, &gained[kept.len()..]),
+                expected,
+                "{path}"
+            );
+            assert_eq!(only_added(&before, path, changed), None, "{path}");
+            assert_eq!(
+                only_added(&before, path, &format!("{changed}{function}")),
+                None,
+                "{path}"
+            );
+        }
+        // Nor is a file of another language read as JavaScript.
+        assert_eq!(javascript_without_comments("a.rs", "fn a() {}\n"), None);
     }
 
     #[test]

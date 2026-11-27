@@ -1,0 +1,91 @@
+name: Quick check
+
+# The tests a change most likely affects, on Linux x64, macOS arm64 and
+# Windows x64 side by side, in about ten minutes: `cargo fmt`, clippy (the
+# only pass before Compatibility that sees Windows- and macOS-only code), and
+# what `scripts/quick-check.mjs` picks from the files changed since the merge
+# base, each with the reason it was picked. A full round is some 150 jobs and
+# most of an hour, and a Windows path separator, a stale test pin or a
+# platform's expectation surfaced only at its end.
+#
+# It is a pre-check, not CI: a test that reaches a changed file without naming
+# it is not picked. Run it before pushing anything that touches several crates,
+# and before a release commit:
+#
+#   gh workflow run quick-check.yml --ref <branch>
+#
+# It runs by hand only. A pull request's own CI picks its tests from
+# Supercov's coverage map of main (scripts/ci-affected.mjs) and runs them on
+# Linux; macOS and Windows run on a release pull request, a push to main and
+# the `full-ci` label, so this is the way to try them on a branch first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: The branch the change is measured from.
+        default: main
+        type: string
+
+permissions:
+  contents: read
+  # The stop-on-failure step cancels this commit's runs.
+  actions: write
+
+concurrency:
+  group: quick-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # main and a release branch run the full matrix already.
+    if: github.ref_name != 'main' && !startsWith(github.ref_name, 'release/')
+    name: Quick check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The merge base with the branch the change is measured from.
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      # The Compatibility jobs' Rust cache, which main keeps warm
+      # (dependency-caches.yml): a first run on a branch builds only what the
+      # branch changed. Restored only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # What the JVM tests' Maven and Gradle builds fetch, from main's cache.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
+      - run: npm ci
+      - if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        timeout-minutes: 15
+      - run: node scripts/quick-check.mjs --base "origin/${BASE}" --run
+        timeout-minutes: 20
+        env:
+          BASE: ${{ github.base_ref || inputs.base }}
+          QUICK_CHECK_SUMMARY: ${{ runner.os == 'Linux' && '1' || '' }}
+      # A failure here ends this commit's other runs too: no waiting on them.
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure

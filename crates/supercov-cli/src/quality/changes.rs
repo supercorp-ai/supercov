@@ -78,6 +78,7 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .current_dir(root)
         .args(arguments)
+        // fault-site: quality-changes.git
         .launch_output()
         .map_err(|e| format!("cannot run git: {e}"))?;
     if !output.status.success() {

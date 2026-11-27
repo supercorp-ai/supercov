@@ -122,9 +122,18 @@ function runtimePrelude(transformed) {
   const importMatch = transformed.match(
     /import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
   );
+  // The first helper is read off the global; the others from one binding of
+  // the global itself, `<runtime> = globalThis.__supercovRuntime`.
+  const shared = transformed.match(
+    /([\w$]+)\s*=\s*globalThis\.__supercovRuntime(?![\w$.])/,
+  );
+  const escape = (name) => name.replace(/\$/g, "\\$");
   const globalMatches = [
     ...transformed.matchAll(
-      /([\w$]+)\s*=\s*globalThis\.__supercovRuntime\.([\w$]+)/g,
+      new RegExp(
+        `([\\w$]+)\\s*=\\s*(?:globalThis\\.__supercovRuntime${shared ? `|${escape(shared[1])}` : ""})\\.([\\w$]+)`,
+        "g",
+      ),
     ),
   ];
   if (!importMatch && globalMatches.length === 0)
@@ -134,7 +143,7 @@ function runtimePrelude(transformed) {
     mcdcCondition: "function(frame,index,value){return value;}",
     mcdcEnd: "function(frame,value){return value;}",
     coverageHit: "function(){}",
-    registerProbeV2: "function(definition){return Object.assign(definition,{clock:{e:1,fast:true},hitEpochs:new Uint32Array(definition.points),hit:function(){},decisionEpochs:definition.decisionWidths.map(function(width){return new Uint32Array(2*3**Math.min(width,6));}),pendingDefaults:new Uint32Array(definition.defaultCount||0),none:{[Symbol.iterator]:function(){return {next:function(){return {done:true};}};}}});}",
+    registerProbeV2: "function(definition){return Object.assign(definition,{clock:{e:1,fast:true},hitEpochs:new Uint32Array(definition.points),hit:function(){},end:function(){},loaded:function(){},decisionEpochs:definition.decisionWidths.map(function(width){return new Uint32Array(2*3**Math.min(width,6));}),pendingDefaults:new Uint32Array(definition.defaultCount||0),none:{[Symbol.iterator]:function(){return {next:function(){return {done:true};}};}}});}",
     coverageHitV2: "function(){}",
     renderedValueV2: "function(file,index,value){return value;}",
     mcdcEndV2: "function(file,index,encoded,value){return value;}",
@@ -173,6 +182,8 @@ function runtimePrelude(transformed) {
     assignV2: "function(site,current,value){return value;}",
     methodV2: "function(site,receiver){return receiver;}",
     valueV2: "function(site,value){return value;}",
+    trackV2: "function(file,base,keys,value){return value;}",
+    resumeV2: "function(file,value){return value;}",
     strongSlot: "function(){return {a:-1,h:function(){}};}",
   };
   if (!importMatch) {

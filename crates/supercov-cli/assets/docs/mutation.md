@@ -14,7 +14,7 @@ counts and verdicts can be compared with that tool's:
 | --- | --- | --- |
 | JavaScript, TypeScript | StrykerJS 10.1.1 | Full, under nine runners |
 | Python | mutmut 3.8.1 | Preview |
-| Rust | cargo-mutants 27.1.0 | Preview |
+| Rust | cargo-mutants 27.1.0 | Full, under `cargo test` (libtest and doctests) and cargo-nextest |
 | Go | Gremlins 0.6.0, every mutator | Preview |
 | Ruby | mutant 0.17.1, light operators | Preview |
 
@@ -60,6 +60,7 @@ switched on and records what the established tools record:
 | `survived` | Every test that could kill it passed |
 | `timeout` | A test ran past its time limit with the mutant in place |
 | `no-coverage` | No test ran the mutated code |
+| `equivalent` | No test can tell it from the original, proven before running it; left out of the score |
 | `unviable` | The mutant does not compile (Rust and Go); counted apart and left out of the score |
 | `error` | The pass could not give it a verdict, with the reason; left out of the score |
 
@@ -78,8 +79,63 @@ first pass of their own:
   reached or infected it, the likeliest killer first, and stops at the first
   failure.
 
+- a JavaScript or TypeScript mutant whose file compiles to the same code as
+  the original is `equivalent`, and is not run; mutants whose files compile
+  to the same code as each other run once, and each takes that run's verdict
+  (see Equivalent mutants, below).
+
 Each of these shortcuts is exact. Where the run cannot prove a test is
 irrelevant, the test runs.
+
+### Equivalent mutants
+
+Some mutants change the source without changing the program: a branch that
+can never run emptied, `if (false)` made `if (false)` again, `"a".trim()`
+made `"a"`. No test can kill them, yet each one used to run every test
+that reached it and then waited in the survivors for someone to dismiss it.
+
+Before a strong pass runs a JavaScript or TypeScript mutant, Supercov
+compiles its file twice -- once as written, once with the mutant -- with the
+same optimising compiler and the same options (oxc's minifier, built into
+Supercov, with every assumption that could change behaviour turned off),
+and compares the two outputs. Where they are identical the mutant is the
+original program, so it is `equivalent`: not run, not a survivor, and out of
+the score. This is Trivial Compiler Equivalence (Papadakis et al., ICSE
+2015). It only ever says `equivalent` on an exact match; anything else, a
+file it cannot compile included, runs as before. Two mutants of one file
+that compile to the same code are one program: the pass runs one of them and
+gives the other the same verdict.
+
+There is nothing to set up or turn on. The pass says what it spared:
+
+```text
+[supercov] 10 mutant(s) proven equivalent: each compiles to the same code as the original, so no test can tell it apart; 10 of them would have run and did not
+[supercov] 6 mutant(s) compile to the same code as another mutant, which runs once and gives them its verdict
+[supercov] about 1 s of test time saved by not running them
+```
+
+Its summary says the same, and each one says why where it is listed:
+
+```text
+$ supercov runs latest mutants src/shapes.ts:13
+13:7  ConditionalExpression  infected  strong: equivalent
+  empty → true
+  why: `empty` was false at least once (opposite-value)
+  strong: equivalent: compiles to the same code as the original: no test can tell it apart, so it was not run
+  id:  src/shapes.ts:13:7-13:12:ConditionalExpression:true
+```
+
+Here `if (empty) { return "none"; } return "none";` returns `"none"` whichever
+way the test goes, so making it `true` changes nothing. A mutant that takes
+another's verdict says whose: `compiles to the same code as <id>, which ran
+for both`.
+
+The markdown and HTML reports fold them into a section of their own, apart
+from the survivors. A file that does not compile (a syntax Supercov's parser
+does not take) is named, and its mutants run as before:
+`could not compile 1 file(s) to compare their mutants' code, so their mutants run as before: src/legacy.js`. So is a file
+whose mutants would take longer to compile than to run, such as a
+generated file with thousands of mutants.
 
 ### How this differs from coverage
 
@@ -104,17 +160,105 @@ summary gives the mutation score, every verdict counted, and ends with the
 mutants the tests let survive.
 
 - **Unchanged checkout.** The next `supercov mutants` reads the same run again
-  and runs nothing it already decided.
-- **After an edit.** It measures the checkout again and keeps an earlier
-  verdict for each mutant whose file is as it was and whose candidate tests,
-  and their test files, nothing changed could reach, as `runs latest tests
-  affected` reads a change: a test file's edit reaches its tests, a source's
-  edit the tests that ran the changed code. The rest run, and the summary says
-  how many verdicts were kept and from which run.
+  and runs nothing it already decided. With `--shard` it saves into a run of
+  its own, so that each job's share is saved into a run no other job writes:
+  made from the newest run of the checkout whose command passed, without
+  measuring again (`not measuring: the checkout is unchanged since run r4, so
+  this shard saves its verdicts into run r9, made from it`), or, where none
+  passed, from the newest whose command failed only because tests failed,
+  which are no candidates (`continuing from run r4, whose command failed: 1
+  test failed while measuring and is not a candidate: checkout > pays`), or
+  measured where there is none, saying why (see
+  [A pass split across jobs](#a-pass-split-across-jobs)).
+  An earlier run measured on the same files, byte for byte, keeps every
+  verdict a pass reached, whatever the two measurements recorded: a test
+  whose path depends on the time, or that failed in one of them, moves no
+  verdict.
+- **A baseline of the checkout.** Where no run of the command can be read or
+  continued, a run of the checkout as it is that holds the tests the command
+  runs is: a merge of a suite measured in parts on several machines (a
+  weekly baseline restored into `.supercov/runs`), or a run of the whole
+  suite. The pass's run is made from it with those tests' records alone, as
+  measuring them would record, and nothing is measured (`not measuring: run
+  r4 of this checkout holds the tests the command runs (18 test(s) in 6 of
+  its 61 test file(s)); this pass saves its verdicts into run r9, made from
+  it with those tests alone`). The command's tests are every test of a merge
+  whose runs were each measured with the command itself, and otherwise those
+  of the test files the command names, by path or by the end of one
+  (`tests/e2e/billing.spec.ts`, `billing.spec.ts`), anywhere in its words,
+  where the run holds every one of them that any run holds; a command that
+  names none is measured. The baseline must be of the checkout
+  as it is, by its fingerprint: on a pull request, whose checkout differs, the
+  command is measured, so narrow it to the specs `tests affected --files`
+  names; the change's own mutants are run only by tests that ran changed
+  code, which those are. A test that failed in the baseline is no candidate.
+  It needs a merged run made by this release, which keeps what its runs
+  answer with.
+- **After an edit.** A new commit runs only the mutants whose verdict could
+  have changed. `supercov mutants` measures the checkout again and keeps an
+  earlier run's verdict for each mutant where nothing it depends on changed;
+  the earlier runs are those of the same command, dependencies and
+  configuration in `.supercov/runs` (a baseline restored there among them),
+  newest first, so a pass split across jobs, each holding part of the
+  verdicts in its own run, is kept whole. A verdict is found by its mutant's
+  code, not its line: a line added above a function keeps its mutants'
+  verdicts. A kill is kept where the test that killed it still reaches the
+  mutated code and runs as it did; a survival where every candidate test it
+  has now ran with it then and runs as it did; a timeout, an error, a kill
+  no record names a test for, and a mutant whose own declaration changed run
+  again. A test runs as it did where nothing changed that it could run with
+  the mutant switched on, which may be code it never ran without (a function
+  no test calls that a mutant sends a test into counts): for a JavaScript or
+  TypeScript test run in its runner's process (Jest, Vitest, Mocha, ...),
+  nothing its imports load and its code can name; for a Rust test, nothing
+  its own function can name in any Rust file (a trait implementation's
+  method counts where its type is named, as the language calls it
+  unnamed); for a Python or Ruby test, no code its imports load; for any other (a Playwright test, a mutant a
+  server starts with), `runs latest tests affected` finds it unaffected and
+  no code but tests' changed. The summary says how many verdicts were kept,
+  from which runs and commits (`26 verdict(s) kept from run r5 (commit
+  1a2b3c4), which took 25 test run(s) to reach: nothing they depend on
+  changed`), and
+  how many were not, by why (`13 earlier verdict(s) not kept, so run again:
+  13 a test that could kill them loads code that changed, which they could
+  lead it into`); `runs <id> mutants` says where each kept verdict was
+  reached (`carried from run r5 (commit 1a2b3c4)`). On a fixture's eight
+  commits it ran 72 mutants where passes from nothing ran 201, every verdict
+  the same; `docs/design/strong-mutation.md` ("After an edit") has the rules
+  and why they hold.
 - **Interrupted.** Each verdict is saved as it is made. A pass stopped by
   Ctrl-C, a killed job or a test worker that never ended keeps what it
-  decided, Ctrl-C stops every process the pass started, and the next pass runs
-  only the rest.
+  decided, and the next pass runs only the rest. Sent SIGINT or SIGTERM, the
+  pass stops every process it started and ends within seconds: one that has
+  not ended 8 s after the signal is ended, what it decided saved first.
+- **Order and budget.** The cheapest mutants run first, by the recorded times
+  of the tests each runs against, so a pass cut short has decided as many as
+  it could. `--budget <seconds>` is the whole command's, measuring and
+  planning included: once it is spent the pass stops and ends as a finished
+  one, its verdicts saved, so a job ends when its budget says. Nothing is
+  judged once the pass begins to stop: a test the stop cut short says nothing
+  of its mutant, which is left for the next pass. The summary
+  says how many mutants it left for the next pass (`budget of 2400 s spent:
+  812 mutant(s) left without a verdict, for the next pass`), and, where
+  measuring took half the budget or more, what it took (`measuring took 310 s
+  of the 450 s budget, which leaves the pass 140 s`). A measurement is never
+  cut short, since one stopped halfway records nothing: one that outlasts the
+  budget leaves the pass nothing, and the pass runs nothing.
+- **Partial progress.** A mutant a pass left open keeps the candidate tests
+  that already passed with it, saved with the run's verdicts, and the next
+  pass runs it only against the rest (`37 mutant(s) resume where earlier
+  passes left them, with 4 of 15 candidates left (the median)`): a kill needs
+  one failing candidate, a survivor every candidate passing, and the ones
+  that passed did. The candidates are kept as verdicts are, after an edit, a
+  merge and in a later round: a candidate a change could reach runs again.
+  The Playwright driver records them.
+- **A first tier.** A Playwright mutant with more candidates than its first
+  tier holds (32, or more where the run's kills come later, or as many as
+  take 60 s of their tests' time, at least four, whichever comes first)
+  runs against that tier first, every such mutant before any runs the rest. One the tier
+  lets live is `survived-so-far` until the rest runs, in the same pass where
+  it has the time: listed with the survivors as such, never in the score
+  (`docs/design/strong-mutation.md`, A first tier, then the rest).
 - **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
   finds a mutant; `2`, after the answer, when the measured command failed (a
   failing test kills nothing, so the verdicts cannot gate) or no mutant could
@@ -167,12 +311,22 @@ npx supercov mutants --diff origin/main --fail-on survived
 npx supercov mutants --diff origin/main --format markdown --output mutants.md
 ```
 
-- `--format markdown` writes a table for a pull request's comment: the counts,
-  then up to 25 mutants left alive with where they are, what they change and
-  why, and the command that lists the rest. Once a strong pass gave verdicts,
-  it has the mutation score and lists the survivors. `supercov mutants` takes
-  `--format markdown` and `--output <file>` too, and writes its own answer
-  that way.
+- `--format markdown` writes a pull request's comment, ready to post as it
+  is: the counts, the change's lines of code no test ran, then up to 25
+  mutants left alive with where they are, what they change, how many of the
+  run's tests ran their line and why, and the command that lists the rest.
+  Once a strong pass gave verdicts, it has the mutation score and lists the
+  survivors. Those that only change a log line are folded in a `<details>` of
+  their own, and so are those `survived so far` (counted apart, never with
+  the survivors). `supercov mutants` takes `--format markdown` and
+  `--output <file>` too, and writes its own answer that way.
+- A survivor that only changes a log line (its change lies wholly inside the
+  arguments of `console.*`, of a method named `info`, `warn`, `error`,
+  `debug`, `trace` or `log`, or of what makes a logger: `createLogger(...)`,
+  `getLogger(...)`, `pino(...)`, and `.child(...)` of a logger) is still
+  `survived`, but marked `(only changes a log line)` (`logOnly` in JSON) and
+  counted on its own: `survived 185 (109 only change a log line)`. Triage can
+  set those aside.
 - `--fail-on` exits `1` when a mutant asked about has one of the statuses
   given. On `runs latest mutants` they are weak statuses, from the run alone;
   on `supercov mutants` and `mutants test` they are verdicts: `survived`,
@@ -208,7 +362,15 @@ npx supercov runs latest mutants test --plan --json
 
 - `--critical <glob>` (repeatable): every mutant in those files must be killed
   or accepted, or the command fails.
-- `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
+- `--shard k/n` runs one of n shares of the mutants, of about the same cost,
+  for parallel jobs (see
+  [A pass split across jobs](#a-pass-split-across-jobs)).
+- `--budget <seconds>` stops the pass once that time is spent since the
+  command started, its verdicts saved, and leaves the rest for the next pass.
+- `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) sets a
+  Playwright test's time limit when it runs with a mutant: x times its
+  baseline, + 5 s (default 1.5, StrykerJS's `timeoutFactor`). See
+  [Playwright](#javascript-and-typescript).
 - `--plan` prints what would run, and runs nothing.
 
 Some mutants no test can tell apart from the original. Accept them in
@@ -224,6 +386,102 @@ An accepted mutant still runs, is shown as accepted, and never fails the
 command. An entry whose mutant is killed or no longer exists is listed as
 stale. A mutant's id is its file, its span, its mutator and what it becomes,
 and stays the same while that code does.
+
+### A pass split across jobs
+
+A large application suite's strong pass can be split across machines. Each
+job measures the whole suite and runs its share of the mutants; a last job
+merges the runs, and the merged run holds every job's verdicts. A pass whose
+budgets leave mutants undecided goes on in another round, the same workflow run
+again on the same commit, and later commits go on from where the last round
+ended:
+
+```yaml
+# Each of four jobs (matrix.shard 1 to 4):
+- uses: actions/cache/restore@v4
+  with:
+    path: .supercov/runs
+    key: mutants-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    restore-keys: |
+      mutants-${{ github.sha }}-
+      mutants-
+- run: npx supercov mutants --shard ${{ matrix.shard }}/4 --budget 2400 -- npm test
+- uses: actions/upload-artifact@v4
+  with: { name: "mutants-${{ matrix.shard }}", path: .supercov/runs, include-hidden-files: true }
+# Then one job:
+- uses: actions/download-artifact@v4
+  with: { pattern: "mutants-*", path: .supercov/runs, merge-multiple: true }
+- run: npx supercov merge
+- run: npx supercov runs latest mutants --status survived
+- run: npx supercov runs clean --keep 5 # this round's four runs and their merge
+- uses: actions/cache/save@v4
+  with:
+    path: .supercov/runs
+    key: mutants-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+```
+
+The cache key names the round, so each round saves its own; a round restores
+the latest one saved for its commit, or else the latest one saved.
+
+`supercov mutants --shard k/n -- <command>` is `supercov -- <command>` with
+the mutants' probes on, then `runs latest mutants test --shard k/n`, keeping
+earlier verdicts as after an edit. On a checkout unchanged since a run it
+restored, it measures nothing, as below. Name the command after `--`: without it,
+`supercov mutants` takes the latest run's, which after a merge is the merge.
+Every job must measure the same commit with the same dependencies, as for any
+merge ([CLI reference](cli.md#combine-shards)).
+
+- **The shares.** Each job computes the same split from its own run: the
+  mutants to run are dealt in turn, back and forth, most costly first, so
+  every share gets its part of the costly ones. A mutant's cost there is what
+  the plan lists of it, the copies of test files it starts and the tests they
+  run, not the tests' times, which differ between jobs.
+- **The budget.** `--budget <seconds>` ends a job in time without a
+  `timeout` around it: it counts from the command's start, measuring
+  included, and past it the pass stops, saves what it decided, and exits as
+  a finished pass. Within a pass the cheapest mutants
+  run first, so a job cut short has decided as many as it could, and the
+  mutants it left run in the next commit's pass, where the restored runs lend
+  the rest of their verdicts.
+
+- **The merge.** `supercov merge` keeps the strong verdicts of the runs it
+  merges, mutant by mutant, and says how many and from which runs. A kill in
+  any run is a kill. A survival stands where the run that let the mutant
+  survive measured every test of the merged suite that could kill it, as
+  shards of one suite each do; where another run's tests could kill it and
+  that run has no verdict for it, as a unit run merged with an end-to-end run
+  can, the mutant is left undecided, and a pass over the merged run runs it.
+  Verdicts of another mutant set are not kept, and the merge says whose.
+- **Another round.** On the commit the restored runs measured, each job saves
+  into a run of its own: `supercov mutants --shard` never saves into a run it
+  restored, of which every job of the round holds a copy. It makes that run
+  from the newest restored run that recorded its mutants' values and whose
+  command passed, or failed only in tests that failed, without measuring
+  again: the run holds that run's evidence
+  under an id of its own. It keeps every verdict a pass reached that the
+  restored runs hold (`1317 verdict(s) kept from runs r8, r7, r6, r5: the
+  checkout is unchanged since them`), and the shares are of what is left.
+  Mutants the plan decides without running, such as a survivor no test
+  infected, are decided again, not kept. Each job's run replaces the
+  restored ones of its command, so the last job's `supercov merge` takes this
+  round's runs, whose verdicts hold the earlier rounds'. It says how many
+  verdicts came from each run (`1265 strong verdict(s) kept from runs r8, r7,
+  r6, r5: 802 from r8, 151 from r7, 160 from r6, 140 from r5, 12 the merged
+  run's plan decides`): a verdict two runs hold alike, as every job's copy of
+  the earlier rounds' verdicts, counts for the first run named.
+- **The next pass.** The restored runs lend their verdicts on a later
+  commit: each job keeps every verdict nothing changed could move, from
+  whichever earlier job's run holds it, and the shares are of what is left.
+  Keep the merged run's parts with it: a merged run's `tests affected` is
+  answered from them.
+- **Copies of one run.** Up to 4.29.5, `supercov mutants --shard` on a
+  checkout unchanged since the runs it restored saved into the latest of them,
+  so every job of a second round wrote its share into a copy of one run. The
+  copies share an id, one directory of `.supercov/runs` holds one of them, and
+  `supercov merge` refuses a run named more than once, saying so. Run that
+  round again: each job now saves into a run of its own. In 4.29.6 that run
+  was measured again, which cost each job the suite's time and could drop a
+  verdict where a test failed in one of the measurements.
 
 ### Runners without a driver
 
@@ -283,7 +541,7 @@ no mutants shows none of this.
 | --- | --- |
 | JavaScript, TypeScript | Vitest, Vitest Browser Mode, Playwright, Jest, `node:test`, Mocha, AVA, node-tap, `bun:test` |
 | Python (preview) | pytest, `python -m unittest` |
-| Rust (preview) | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
+| Rust | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
 | Go (preview) | `go test` |
 | Ruby (preview) | RSpec, Minitest, test-unit, Cucumber |
 
@@ -295,12 +553,75 @@ no mutants shows none of this.
   stopping at its first failing test.
 - **Playwright** carries each test's mutant with its requests, so one server
   serves different mutants to different workers. A mutant of a server's
-  start-up runs with the server started again for it. StrykerJS has no
+  start-up runs with the server started again for it. A mutant in a
+  module-level object or array literal (a translation table, a menu) runs
+  against the tests that read its value, which a run measured with the
+  mutants' probes records, not every test whose server loaded the module;
+  the plan says how many were narrowed and by how much
+  (`docs/design/strong-mutation.md`, Module-level values). A mutant whose
+  code ran only for requests that named no test (a webhook a mock server
+  sends while tests run) runs against the tests that were running then, not
+  every test. A survivor whose code its candidates' servers ran, but which no
+  test's request ran with its mutant in the pass (work in a route's
+  `after()`, a worker process the first request started), is not trusted: it
+  runs again alone, with the server started with it switched on, and the pass
+  warns about it. A test runs without a mutant only after a failure, to confirm
+  it; a failure before any such run passed on its server (a cold server)
+  runs the mutant again once one has. StrykerJS has no
   Playwright runner, so Playwright's verdicts are checked by hand (see below).
+  A test run with a mutant gets StrykerJS's time limit: its baseline (the
+  longest of its measured run and its runs without a mutant in the pass)
+  × 1.5 + 5 s, or its own timeout where that is shorter. Playwright's test
+  timeout is set to it, and a `test.setTimeout()` or `test.slow()` in the
+  test may shorten it but not lengthen it, so a click or an `expect` that
+  waits for an element the mutant broke ends there, not at its own 30 s. A
+  test that runs out of its limit makes its mutant a `timeout`, which counts
+  as detected; the summary says how many, and against what limit. An attempt
+  ends sooner, a `timeout` too, once it has stalled: its test's own code has
+  run for longer than any run of the test that passed (baseline × 1.5 + 1 s)
+  and waits on a Playwright call that cannot end by its own timeout before the
+  limit, its pages quiet for a second with nothing left in them that could
+  end the wait before the limit: no timer, animation frame or ending
+  animation due before it, no request unanswered, no WebSocket open, no
+  worker. An `expect` that gives up before the limit still fails the test, a
+  kill; a page still sending requests runs on; and so does one that would
+  poll again on a timer before the limit, to its limit, where a later poll
+  may answer the wait (a timeout there says it `ran to its limit to
+  confirm`, and the summary counts those). Nothing needs setting. Each timeout's verdict says what it waited on and
+  where, for example `stopped at 2.5 s of its 6.5 s time limit, ..., waiting
+  on Locator.click (#save) at tests/save.spec.ts:12:20`, and the summary says
+  how much time ending them early saved. A worker is kept after a mutant
+  fails its test, so the next test does not wait for a new worker and
+  browser; a test that fails without any mutant still gets a new one.
+  `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) changes the
+  1.5: a suite whose tests' times vary widely between runs may want 2 or 3.
+  A mutant tries its candidates cheapest to a kill first (a test's time over
+  how likely it is to kill: one that infected the mutant counts as four
+  times likelier than one that only reached it), and a slow test runs it only
+  once its cheaper candidates let it live; a file's tests take one mutant
+  each in turn, so mutants are decided one after another rather than all at
+  the end. The progress lines name the tests with the most work left (how
+  many mutants wait for each, and its time a run) and the time the round
+  has left. A candidate in a project others start from (a login `setup`)
+  never runs with a mutant: a mutant no other test kills is an `error` that
+  says so.
+- **A harness with slots.** A harness may run several `playwright test`
+  processes at once (slots, each with its own server and database) and keep
+  a spec file with a serial describe whole, in one slot. In a strong pass
+  such a file runs in every slot whose command names spec files, and each
+  slot takes its own mutants of it from a queue the pass's slots share, so one
+  slot no longer runs all of them. Nothing in the harness or the command
+  changes: Supercov's preload adds the file to each invocation's file filters
+  before Playwright reads them, and leaves `--list` as it is. Each slot runs
+  the file's tests once without a mutant before its first mutant there. A
+  file it cannot spread (one that sets its serial mode in a helper of its
+  own) is named in the progress lines, with what it costs (`"e2e/buy.spec.ts"
+  has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s)
+  wait about 12m00s there, the others about 1m00s`).
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.
-- Rust compiled to wasm and loaded by these tests is mutated too (preview):
+- Rust compiled to wasm and loaded by these tests is mutated too:
   the command builds the wasm with the mutants switched in, and each wasm
   instance, in Node or in a Playwright page, runs the test's mutant.
 - Limits: wasm loaded in Vitest Browser Mode's pages is not measured, so its
@@ -320,20 +641,43 @@ own script (`TextTestRunner().run`) rather than `unittest.main` has its
 mutants recorded `error`. mutmut's `do_not_mutate_patterns` and
 `mutate_only_covered_lines` are not read.
 
-### Rust (preview)
+### Rust
 
 Every mutant of a pass is built in one switched copy, and each test runs by
 its exact name in a process of its own; doctests run through `cargo test
 --doc`. Under cargo-nextest each test runs through nextest with the project's
-configuration. A mutant the compiler refuses is `unviable`, as cargo-mutants
-reports it; a mutant in code the compiler evaluates (`const`, `static`,
-`const fn`) is built on its own.
+configuration. Each mutant is the program cargo-mutants' replacement text
+makes, regrouping included (`a - b * c` with `*` made `+` is `(a - b) + c`).
+A mutant the compiler refuses is `unviable`, as cargo-mutants reports it,
+those no test reaches included; a mutant in code the compiler evaluates
+(`const`, `static`, `const fn`) is built on its own.
+
+- **Time limits** are cargo-mutants': a test's baseline × 5, at least 20 s.
+  A test past its limit beside other tests runs again alone, after a run of
+  it without the mutant sets its limit, so a busier machine makes no
+  timeout.
+- **Stopping**: `--budget` and a signal stop the pass at once, its test
+  processes with it; nothing a stop cut short is judged, and each candidate a
+  mutant already passed is kept for the next pass.
+- **After an edit**, a Rust test keeps a verdict where nothing its own
+  function can name changed, a trait implementation's methods counting
+  where its type or trait is named; a doctest keeps one only where no code
+  changed (`docs/design/rust-mutation.md`, After an edit).
 
 Limits: tests built for wasm run against mutants in Node, under WASI and in
 Chrome; tests run in Firefox, Safari or Edge have their mutants recorded
 `error`. Value probes do not cover `&&`, `||`, struct fields and returns that
 are not numbers or booleans: those mutants stay `unknown` where they ran, and
-the strong pass decides them.
+the strong pass decides them. Equivalent mutants are not detected for Rust:
+an equivalent mutant survives, as under cargo-mutants, and is accepted in
+`supercov.accepted.json` (Critical code and accepted mutants).
+
+A merged run's mutants run under its parts' test command; parts that differ
+only in the test names after `--` (`cargo test -- --exact a b`) give it
+without those names, since the pass names each test it runs. A test the
+measured run skipped (`#[ignore]`, unless the command asked for
+`--ignored` or `--include-ignored`) is recorded `skipped`, not failed, and
+is never a candidate.
 
 ### Go (preview)
 
@@ -442,23 +786,64 @@ each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
 | parse 1.22.4 | 1,306 | 56.5 s | 1.4 + 12.6 s |
 | humanize 4.17.0 | 1,348 | 152.3 s | 4.6 + 19.8 s |
 
-### Rust (preview), against cargo-mutants 27.1.0
+### Rust, against cargo-mutants 27.1.0
 
-On 16-CPU Linux machines (AWS c8a and m8a.4xlarge), one a job, 2026-11-22,
-cargo-mutants with `-j 8` in shards, Supercov's strong pass with its default 8
-workers:
+Eleven public crates pinned to a tag (`benchmarks/mutation/rust/`), every
+mutant of each joined by id: cargo-mutants runs the package's whole suite
+for each mutant; Supercov measures the suite and runs its strong pass. Both
+on GitHub's `ubuntu-latest` (4 vCPUs), two mutants at a time, 2026-11-27:
+cargo-mutants in shards of a crate's mutants, Supercov's `supercov mutants
+--shard k/n` (measuring included) with its shards merged. Times are summed
+over each tool's jobs (wall / CPU seconds), each job repeating its own build
+and baseline, or its own measured run.
 
-| Crate | Mutants | Agree | Soundness violations | Viability disagreements | cargo-mutants (shards summed) | Supercov strong pass |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| strsim-rs 0.11.1 | 363 | 363 | 0 | 0 | 60.3 s | 15.7 s |
-| rust-hex 0.4.3 | 104 | 102 | 0 | 2 | 74.2 s | 22.5 s |
-| semver 1.0.27 | 365 | 362 | 0 | 3 | 43.0 s | 15.8 s |
+| Crate | Shape | Mutants joined | Agree | Soundness violations | Other disagreements | cargo-mutants | Supercov |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| strsim 0.11.1 | small library, doctests | 363 | 363 | 0 | 0 | 195 / 529 s | 97 / 201 s |
+| hex 0.4.3 | deny-by-default lints | 104 | 102 | 0 | 2 lint | 131 / 434 s | 88 / 216 s |
+| semver 1.0.27 | `const` code, integration tests | 365 | 363 | 0 | 2 lint | 163 / 405 s | 136 / 185 s |
+| itoa 1.0.15 | generic over integer types | 46 | 46 | 0 | 0 | 8 / 17 s | 2 / 2 s |
+| smallvec 1.15.1 | unsafe collection | 458 | 458 | 0 | 0 | 301 / 876 s | 181 / 368 s |
+| unicode-width 0.2.1 | generated tables | 383 | 383 | 0 | 0 | 576 / 1,598 s | 218 / 410 s |
+| bitflags 2.9.1 | macro-generated code | 107 | 107 | 0 | 0 | 267 / 577 s | 134 / 309 s |
+| anyhow 1.0.98 | build script, `deny(dead_code)` | 201 | 192 | 0 | 9 lint | 218 / 796 s | 74 / 238 s |
+| fastrand 2.3.0 | under cargo-nextest | 211 | 203 | 0 | 8 lint | 501 / 1,555 s | 828 / 616 s |
+| regex-syntax 0.8.5 | workspace member, parser | 1,301 | 1,301 | 0 | 0 | 13,679 / 50,595 s (39 jobs) | 3,611 / 8,964 s |
+| base64 0.22.1 | randomized round trips | 305 of 619 | 305 | 0 | 0 | 15,249 / 50,394 s (48 jobs) | 5,684 / 17,390 s (16 jobs) |
 
-Four of the five viability disagreements are mutants cargo-mutants' build
-refuses on a deny-by-default lint, which Supercov caps as a measured run does
-(the mutant then builds and is killed); the fifth is in a `const` no test
-reaches, which cargo-mutants' build refuses and Supercov records as no
-coverage. None is a mutant one tool kills and the other calls survived.
+No mutant one tool detects is one the other lets live. The other
+disagreements, each applied by hand:
+
+- **Lints** (hex, semver, anyhow, fastrand): cargo-mutants' build fails on a lint the
+  crate denies (`arithmetic_overflow` after `+` made `*`, anyhow's
+  `#![deny(dead_code, unused_imports)]` once a body is replaced); Supercov
+  caps lints as a measured run does, builds the mutant, and its tests kill
+  it, or none reaches it.
+- **`vec!` in a `no_std` crate** (fastrand, 2): a body replaced by `vec![]`
+  where no `vec!` is in scope does not compile, an error rustc gives no code.
+  4.29.18 reads that error as the mutant's own and calls them `unviable`, as
+  cargo-mutants does: in the fastrand row, measured with it, they agree.
+- **Time limits**: a test's limit is cargo-mutants' rule applied to that test,
+  5 × its baseline and at least 20 s, where cargo-mutants applies it to the
+  whole suite. A mutant of fastrand that makes rejection sampling loop far
+  longer ended its one test past 20 s in one run, within 5 × the suite: a
+  `timeout` here, missed there; in another run it ended in time, as there.
+
+Mutants the table does not join were left by a job's time limit (6
+minutes of mutants per job, to keep each job under ten): base64's tests
+are slow under mutation, so cargo-mutants' 48 jobs decided 509 of its 619
+mutants and Supercov's 16 left 204 of those without a verdict; under
+fastrand, which runs each test through nextest, Supercov left 21. Every
+mutant both tools decided is in the table, and none of them is a soundness
+violation; joining the rest needs about twice the jobs. Supercov's wall time
+is the larger on fastrand: nextest starts a process per test, against
+cargo-mutants' one per mutant; its CPU time is two fifths. cargo-mutants
+runs under a 10 GiB address-space cap: one of base64's mutants made a test
+allocate without end, which took the runner, and every outcome of its job,
+down twice. Each earlier gap the benchmark found is fixed and held by a test (`CHANGELOG.md`,
+4.29.18): a probe that failed `u128` tests, `const fn` mutants read as never
+run, operator mutants that regroup their expression, unviable mutants no
+test reaches.
 
 ### Go (preview), against Gremlins 0.6.0
 

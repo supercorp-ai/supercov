@@ -38,6 +38,8 @@ const output =
 mkdirSync(output, { recursive: true });
 const logs = join(output, 'logs');
 mkdirSync(logs, { recursive: true });
+// Each run's answers (scripts/speed/answers.mjs), uploaded with the samples.
+mkdirSync(join(output, 'samples'), { recursive: true });
 
 function run(cwd, command, args, label, extra = {}, mayFail = false) {
   const started = process.hrtime.bigint();
@@ -222,6 +224,35 @@ export default {
       },
     };
   },
+  // A large Next.js app, generated (benchmarks/large-app/generate.mjs): heavy
+  // client chunks, pages read from node:sqlite, and 300 tests of six page
+  // loads or navigations each, every one in a context of its own. A suite of
+  // that size runs in parts on many machines, so SPEED_SHARD (`k/n`) runs
+  // one part, as a CI matrix's job does.
+  large() {
+    const project = join(output, 'large-app');
+    if (!existsSync(project)) {
+      run(output, process.execPath, [new URL('../benchmarks/large-app/generate.mjs', import.meta.url).pathname, project], 'generate');
+      run(project, 'git', ['init', '-q'], 'git-init');
+      run(project, 'npm', ['install', '--no-audit', '--no-fund'], 'install');
+      run(project, 'git', ['add', '-A'], 'git-add');
+      run(project, 'git', ['-c', 'user.name=speed', '-c', 'user.email=speed@example.com', 'commit', '-qm', 'generated'], 'git-commit');
+    }
+    run(project, 'npx', ['playwright', 'install', 'chromium'], 'browser');
+    return {
+      project,
+      browserProfile: true,
+      description: process.env.SPEED_SHARD ? `part ${process.env.SPEED_SHARD} of the generated suite` : 'the generated suite once',
+      suites: [
+        {
+          name: 'e2e',
+          mayFail: true,
+          command: ['npx', 'playwright', 'test', '--config', 'tests/playwright.config.ts', ...(process.env.SPEED_SHARD ? ['--shard', process.env.SPEED_SHARD] : [])],
+        },
+      ],
+      reset() {},
+    };
+  },
   // Excalidraw, a large Vite app: its Vitest suite, and its Vite production
   // build alone, the build a measured end-to-end run serves its app from.
   excalidraw() {
@@ -308,6 +339,29 @@ function keepTraces(label) {
   rmSync(join(project, 'test-results'), { recursive: true, force: true });
 }
 
+// perf, where it can count: Linux, with perf installed and allowed to count
+// a user's own processes (`kernel.perf_event_paranoid` 2 or less).
+// SPEED_PERF names the perf binary when the one on PATH is a wrapper that
+// refuses a kernel it was not built for (speed.yml finds one).
+// A virtual machine that hides the processor's counters cannot count
+// instructions: there perf counts CPU time (task-clock, milliseconds), noisier
+// than instructions and still steadier than wall time. Each sample says which.
+const perfStat = (() => {
+  if (process.platform !== 'linux') return undefined;
+  const perf = process.env.SPEED_PERF || 'perf';
+  for (const event of ['instructions:u', 'task-clock']) {
+    const probe = spawnSync(perf, ['stat', '-e', event, '-x', ',', '--', 'true'], { encoding: 'utf8' });
+    if (probe.status === 0 && probe.stderr.includes(event.split(':')[0]) && !/not supported|not counted/.test(probe.stderr)) return { perf, event };
+  }
+  return undefined;
+})();
+function retiredInstructions(file, event) {
+  if (!existsSync(file)) return undefined;
+  const line = readFileSync(file, 'utf8').split('\n').find((text) => text.includes(event.split(':')[0]));
+  const count = Number(line?.split(',')[0]);
+  return Number.isFinite(count) ? count : undefined;
+}
+
 function suiteRun(round, variant, suite, binary) {
   reset(`${round}-${variant}-${suite.name}`);
   // Every run builds from nothing, as on a fresh CI checkout: Supercov's copy
@@ -315,11 +369,24 @@ function suiteRun(round, variant, suite, binary) {
   // one the run before it left and built warm.
   for (const built of outputs) rmSync(join(project, built), { recursive: true, force: true });
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
+  // Playwright's transform cache starts empty too, as on a fresh CI machine:
+  // kept in the machine's temporary directory, a plain run found the specs
+  // the round before it had compiled, and a binary the instrumented specs
+  // the binary before it had, while the first of each compiled them.
+  const transformCache = join(output, 'transform-cache');
+  rmSync(transformCache, { recursive: true, force: true });
   // Supercov's copy is kept, for the traces of the tests that failed in it.
-  const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1' };
-  const [command, ...args] = binary
+  const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1', PWTEST_CACHE_DIR: transformCache };
+  const [plainCommand, ...plainArgs] = binary
     ? [binary, '--', ...suite.command]
     : suite.command;
+  // The instructions every process of the run retired, in user space: a
+  // count a busy or slow machine barely moves, where wall time moves by
+  // several percent from one round to the next.
+  const counts = join(output, `instructions-${round}-${variant}-${suite.name}.csv`);
+  const [command, ...args] = perfStat
+    ? [perfStat.perf, 'stat', '-e', perfStat.event, '-x', ',', '-o', counts, '--', plainCommand, ...plainArgs]
+    : [plainCommand, ...plainArgs];
   // CPU by kind of process (scripts/speed/cpu-sampler.py), on Linux.
   const cpuFile = join(output, `cpu-${round}-${variant}-${suite.name}.json`);
   const sampler = process.platform === 'linux'
@@ -335,6 +402,8 @@ function suiteRun(round, variant, suite, binary) {
   );
   sampler?.kill();
   const extra = existsSync(report) ? flowTimes(report) : {};
+  const count = perfStat ? retiredInstructions(counts, perfStat.event) : undefined;
+  if (count !== undefined) extra[perfStat.event === 'task-clock' ? 'cpuMs' : 'instructions'] = count;
   sample(round, variant, suite.name, seconds, extra);
   keepTraces(`${round}-${variant}-${suite.name}`);
   if (!binary || suite.build) return;
@@ -346,6 +415,17 @@ function suiteRun(round, variant, suite, binary) {
   // flakes the samples count are no reason to stop measuring.
   const id = latest.run ?? latest.id ?? latest.runId;
   assert.ok(id, `${variant} ${suite.name} published no run`);
+  // Every answer the run gives, in its first two rounds: two runs of one
+  // binary say how far the suite itself varies, and a binary against
+  // another, whether either measures differently (scripts/speed/answers.mjs).
+  if (round <= 2) {
+    run(
+      project,
+      process.execPath,
+      [new URL('./speed/answers.mjs', import.meta.url).pathname, binary, project, id, join(output, 'samples', `answers-${round}-${variant}-${suite.name}.json`), '--quick'],
+      `${round}-${variant}-${suite.name}-answers`,
+    );
+  }
   // The newest binary's first unit run, kept as it was published: its
   // evidence, published again by `publish_profile`, profiles Supercov's
   // post-run work on a real suite away from CI.
@@ -429,7 +509,8 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     "for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => process.exit(0));\n",
   );
   const profiled = {};
-  for (const [variant, binary] of [['plain'], [name, path]]) {
+  // Every binary, so one binary's change shows against the other's.
+  for (const [variant, binary] of [['plain'], ...binaries.map((entry) => [entry.name, entry.path])]) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
     for (const suite of suites) {
       reset(`profile-${variant}-${suite.name}`);
@@ -440,7 +521,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       // The browser's pages too, for a suite that drives one.
       const pages = browserProfile && suite.name === 'e2e' ? join(output, `browser-profile-${variant}.json`) : undefined;
       const pageProfiler = pages
-        ? spawn(process.execPath, [new URL('./speed/renderer-profile.mjs', import.meta.url).pathname, '9333', pages], { stdio: 'inherit' })
+        ? spawn(process.execPath, [new URL('./speed/renderer-profile.mjs', import.meta.url).pathname, '9333', pages, application === 'large' ? '2000' : '15000'], { stdio: 'inherit' })
         : undefined;
       try {
         run(project, command, args, `profile-${variant}-${suite.name}`, {
@@ -720,6 +801,7 @@ const of = (variant, suite, field = 'seconds') =>
       .filter((value) => value !== undefined),
   );
 const rows = [];
+const instructionRows = [];
 const plainTotal = suites.reduce((sum, suite) => sum + of('plain', suite.name), 0);
 const failures = (variant) =>
   samples
@@ -737,6 +819,21 @@ for (const variant of ['plain', ...binaries.map(({ name }) => name)]) {
   const flowRatio = flowSuite ? ` ${(of(variant, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |` : '';
   rows.push(`| ${variant} | ${cells.join(' | ')} |${flow} ${variant === 'plain' ? '' : merge.toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} |${flowRatio}`);
 }
+// Instructions retired, where perf could count them: each variant's median
+// and its spread over the rounds, against plain's median.
+for (const suite of suites) {
+  const field = perfStat?.event === 'task-clock' ? 'cpuMs' : 'instructions';
+  const counts = (variant) => samples.filter((entry) => entry.variant === variant && entry.suite === suite.name && entry[field] !== undefined).map((entry) => entry[field]);
+  const plain = counts('plain');
+  if (plain.length === 0) continue;
+  for (const variant of ['plain', ...binaries.map(({ name }) => name)]) {
+    const values = counts(variant);
+    if (values.length === 0) continue;
+    const ratio = (value) => (value / median(plain)).toFixed(4);
+    instructionRows.push(`| ${suite.name} | ${variant} | ${field === 'cpuMs' ? `${(median(values) / 1000).toFixed(1)} CPU s` : `${(median(values) / 1e9).toFixed(2)} billion`} | ${ratio(median(values))} | ${ratio(Math.min(...values))}–${ratio(Math.max(...values))} |`);
+  }
+}
+const instructionTable = instructionRows.length === 0 ? '' : ['', `| ${perfStat?.event === 'task-clock' ? 'CPU time (no counters here)' : 'Instructions'} | Variant | Median | × plain | Range over rounds |`, '|---|---|---|---|---|', ...instructionRows].join('\n');
 // CPU seconds by kind of process, for the first round's runs.
 const cpu = Object.fromEntries(
   readdirSync(output)
@@ -750,9 +847,39 @@ const cpuTable = Object.keys(cpu).length === 0 ? '' : [
   `|---|${Object.keys(cpu).map(() => '---').join('|')}|`,
   ...cpuKinds.map((kind) => `| ${kind} | ${Object.values(cpu).map((totals) => (totals[kind] ?? 0).toFixed(1)).join(' | ')} |`),
 ].join('\n');
+// Whether the binaries measured alike: each suite's answers, round against
+// round for one binary and binary against binary in a round, as the number
+// of lines that differ. A speed change meant to change nothing has the same
+// count between binaries as between one binary's two rounds: none, where the
+// suite runs alike each time.
+const answerLines = (round, variant, suite) => {
+  const file = join(output, 'samples', `answers-${round}-${variant}-${suite}.json`);
+  return existsSync(file) ? readFileSync(file, 'utf8').split('\n') : undefined;
+};
+const differing = (left, right) => {
+  if (!left || !right) return 'missing';
+  const counts = new Map();
+  for (const line of left) counts.set(line, (counts.get(line) ?? 0) + 1);
+  let unmatched = 0;
+  for (const line of right) {
+    const count = counts.get(line) ?? 0;
+    if (count > 0) counts.set(line, count - 1);
+    else unmatched += 1;
+  }
+  return unmatched + [...counts.values()].reduce((sum, count) => sum + count, 0);
+};
+const answerRows = [];
+for (const suite of suites.filter((entry) => !entry.build)) {
+  for (const { name } of binaries)
+    answerRows.push(`| ${suite.name} | ${name} round 1 | ${name} round 2 | ${differing(answerLines(1, name, suite.name), answerLines(2, name, suite.name))} |`);
+  for (const { name } of binaries.slice(1))
+    for (const round of [1, 2])
+      answerRows.push(`| ${suite.name} | ${binaries[0].name} round ${round} | ${name} round ${round} | ${differing(answerLines(round, binaries[0].name, suite.name), answerLines(round, name, suite.name))} |`);
+}
+const answersTable = answerRows.length === 0 ? '' : ['', '| Answers | Run | Against | Lines that differ |', '|---|---|---|---|', ...answerRows].join('\n');
 const machineFile = join(process.env.RUNNER_TEMP ?? output, 'machine.txt');
 const machine = existsSync(machineFile) ? readFileSync(machineFile, 'utf8').trim().replace(/\s+/g, ' ') : 'unknown machine';
-const table = `${application}: medians of ${rounds} rounds, ${description}; ${machine}.\n\n${rows.join('\n')}\n${cpuTable}\n`;
+const table = `${application}: medians of ${rounds} rounds, ${description}; ${machine}.\n\n${rows.join('\n')}\n${instructionTable}\n${cpuTable}\n${answersTable}\n`;
 writeFileSync(join(output, 'summary.md'), table);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, table);
 console.log(table);

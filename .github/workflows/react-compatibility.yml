@@ -1,17 +1,13 @@
 name: React compatibility
 
+# The slow tier's (slow-tier.yml): a pull request ready to merge, every push
+# to a release pull request, and each night on main, the jobs a pull request
+# never runs among them -- a gate whose own pull requests are rare goes stale
+# where nothing runs it, and a release then finds it broken. Whether the
+# change can affect the focused job is the plan's to say.
 on:
+  workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'crates/**'
-      - 'Cargo*'
-      - 'runtime/javascript/**'
-      - 'scripts/**'
-      - 'tests/**'
-      - 'examples/react-verification/**'
-      - 'package*.json'
-      - '.github/workflows/react-compatibility.yml'
 
 permissions:
   contents: read
@@ -19,11 +15,29 @@ permissions:
   actions: write
 
 concurrency:
-  group: react-compatibility-${{ github.ref }}
+  group: react-compatibility-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: true
 
 jobs:
+  # Whether this change can affect the job (scripts/ci-affected.mjs), as in
+  # CI: the step summary says why it runs or not.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: react
+
   focused:
+    needs: plan
+    if: ${{ fromJSON(needs.plan.outputs.jobs)['focused'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -37,11 +51,14 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+      # One Rust cache for every job on this toolchain, kept by main
+      # (dependency-caches.yml), never saved by a pull request: each job
+      # saving its own, per pull request, filled the 10 GB the repository
+      # has and evicted main's caches.
       - uses: Swatinem/rust-cache@v2
         with:
-          # The two Node versions build the same Rust: one cache.
-          shared-key: react-focused
-          save-if: ${{ matrix.node == 24 }}
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # Chromium's system libraries, once and from the Actions cache (fetched
       # from the Ubuntu mirror, they took six minutes of a run), and the
@@ -69,7 +86,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   native:
-    if: github.event_name != 'pull_request'
+    # Not on a pull request ready to merge, but on a release's, and each night.
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -83,7 +101,11 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
+      # The toolchain's one Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build -p supercov
       - run: node scripts/react-native-compatibility.mjs
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -91,7 +113,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   real-apps:
-    if: github.event_name != 'pull_request'
+    # Not on a pull request ready to merge, but on a release's, and each night.
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

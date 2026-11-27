@@ -1,0 +1,35 @@
+src/shop/price.py
+
+Uncovered
+  Lines not executed              4
+  Statements not executed         4
+  Functions not called            1
+  Branch outcomes not taken       5
+  MC/DC conditions not shown      3
+  Measurement limitations         0
+
+Tests touching this file: 4
+
+Gaps
+  NOT COVERED = line never executed; PARTIAL = line executed but some behavior remains untested
+ LINE  STATUS        SOURCE
+    3  PARTIAL       member and amount > 100
+       Unobserved: `amount > 100` was never false; needs `member` true, `amount > 100` false, decision false
+       Inspect: npx supercov runs 'run_7f9113ff2467fa22' line 'src/shop/price.py:3'
+   11  PARTIAL       total > 50
+       Unobserved: decision never false
+       Unobserved: `total > 50` was never false; needs `total > 50` false, decision false
+       Inspect: npx supercov runs 'run_7f9113ff2467fa22' line 'src/shop/price.py:11'
+   14  PARTIAL       unused
+       Unobserved: function not called
+       Inspect: npx supercov runs 'run_7f9113ff2467fa22' line 'src/shop/price.py:14'
+   15  NOT COVERED   for item in values:
+       Unobserved: zero-iteration outcome not observed
+       Unobserved: branch outcome not observed: entered
+   16  NOT COVERED   item < 0
+       Unobserved: decision never true
+       Unobserved: decision never false
+       Unobserved: `item < 0` was never evaluated
+   17  NOT COVERED   return False
+   18  NOT COVERED   return True
+showing 1-7 of 7 gap lines

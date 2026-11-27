@@ -1929,6 +1929,10 @@ const ASSERTION_RUNTIME: &str = "globalThis.__SUPERCOV_DIRECT_RUNTIME__";
 /// Where each recognised assertion is wrapped or bound, as text edits.
 struct AssertionEdits<'s> {
     source: &'s str,
+    /// The file's own accessor of the runtime, `name()`: a function declared
+    /// at its end, which reads `globalThis.__SUPERCOV_DIRECT_RUNTIME__` when
+    /// it is called, as the global's name in full at every assertion did.
+    runtime: String,
     sites: HashMap<SpanKey, (String, String, bool)>,
     edits: Vec<TextEdit>,
     /// In TypeScript the call runs in place, under these two names, instead
@@ -1942,17 +1946,19 @@ struct AssertionEdits<'s> {
 }
 
 impl AssertionEdits<'_> {
-    fn opening(helper: &str, operation: &str, source: &str) -> String {
+    fn opening(&self, helper: &str, operation: &str, source: &str) -> String {
         format!(
-            "{ASSERTION_RUNTIME}.{helper}({}, {}, ",
+            "{}.{helper}({}, {}, ",
+            self.runtime,
             serde_json::to_string(operation).expect("a string serializes"),
             serde_json::to_string(source).expect("a string serializes")
         )
     }
 
-    fn open(operation: &str, source: &str) -> String {
+    fn open(&self, operation: &str, source: &str) -> String {
         format!(
-            "{ASSERTION_RUNTIME}.openNodeAssertionPhase({}, {})",
+            "{}.openNodeAssertionPhase({}, {})",
+            self.runtime,
             serde_json::to_string(operation).expect("a string serializes"),
             serde_json::to_string(source).expect("a string serializes")
         )
@@ -1970,13 +1976,13 @@ impl AssertionEdits<'_> {
                 format!("(({phase}) => {{ try {{ return {phase}.close("),
                 format!(
                     "); }} catch ({error}) {{ throw {phase}.fail({error}); }} }})({})",
-                    Self::open(operation, source)
+                    self.open(operation, source)
                 ),
             ),
             None => (
                 format!(
                     "{}() => (",
-                    Self::opening("withNodeAssertionPhase", operation, source)
+                    self.opening("withNodeAssertionPhase", operation, source)
                 ),
                 "))".into(),
             ),
@@ -2000,7 +2006,7 @@ impl AssertionEdits<'_> {
         let width = (end - start) as i64;
         let opening = format!(
             "{{ const {phase} = {}; try {{ ",
-            Self::open(operation, source)
+            self.open(operation, source)
         );
         let closing = format!(
             " }} catch ({error}) {{ throw {phase}.fail({error}); }} finally {{ {phase}.close(); }} }}"
@@ -2045,7 +2051,7 @@ impl AssertionEdits<'_> {
     fn bind(&mut self, call: &CallExpression<'_>, operation: &str, source: &str) {
         let callee = call.callee.span();
         let width = (callee.end - callee.start) as i64;
-        let opening = Self::opening("bindNodeAssertionPhase", operation, source);
+        let opening = self.opening("bindNodeAssertionPhase", operation, source);
         self.edits
             .push(TextEdit::insert(callee.start as usize, -width, opening));
         match &call.callee {
@@ -2837,9 +2843,12 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// process, container, or VM while constructing a fresh environment. Static
 /// imports preserve ESM evaluation ordering and do not depend on runner-specific
 /// environment forwarding.
-/// The body of the function [`runtime_loader`] calls: where Node runs, it
-/// requires the bootstrap relative to the file the stack's first frame names.
-const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
+/// The body of the function [`runtime_loader`] calls, with the stack as `s`
+/// and the bootstrap's specifier as `p`: where Node runs, it requires the
+/// bootstrap relative to the file the stack's first frame names. Every
+/// instrumented module carries it as a string, which a minifier leaves as it
+/// is, so it is written short: a large app's client chunks held it 240 times.
+const RUNTIME_LOADER_BODY: &str = r#""const h=globalThis.process;if(!h||!h.getBuiltinModule)return;const f=/(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(s));if(f)h.getBuiltinModule(\"node:module\").createRequire(f[0].startsWith(\"file:\")?f[0]:f[1])(p)""#;
 
 /// Where a file's own code starts, as tools other than the engine that runs
 /// it read the file: a shebang stays on the first line, a test runner reads
@@ -2901,7 +2910,7 @@ pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT
 pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
     format!(
-        "{RUNTIME_LOADER_START} new Function(\"stack\", \"specifier\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
+        "{RUNTIME_LOADER_START} new Function(\"s\", \"p\", {RUNTIME_LOADER_BODY})(new Error().stack, {specifier}); }} catch {{}}"
     )
 }
 
@@ -2939,6 +2948,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         ));
     }
     let mut assertions = 0;
+    let mut runtime_accessor: Option<String> = None;
     let mut edits = Vec::new();
 
     if assertion_candidate {
@@ -2955,15 +2965,19 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
         if assertions > 0 {
-            let in_place = source_type.is_typescript().then(|| {
-                let mut names = CandidateNames::new(source);
-                (
-                    names.allocate("__supercovAssertionPhase"),
-                    names.allocate("__supercovAssertionError"),
-                )
-            });
+            // Short names: they stand at every assertion of every test file,
+            // which the runner's transform reads and maps.
+            let mut names = CandidateNames::new(source);
+            // `__cov…`: a name babel-plugin-jest-hoist lets a `jest.mock`
+            // factory read, as it lets istanbul's counters be read there.
+            let accessor = names.allocate("__covSupercov");
+            let in_place = source_type
+                .is_typescript()
+                .then(|| (names.allocate("__supercovP"), names.allocate("__supercovE")));
+            runtime_accessor = Some(accessor.clone());
             let mut located = AssertionEdits {
                 source,
+                runtime: format!("{accessor}()"),
                 sites: collector.sites,
                 edits: Vec::new(),
                 in_place,
@@ -3042,6 +3056,16 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
                 "\ndeclare var __SUPERCOV_DIRECT_RUNTIME__: {ASSERTION_RUNTIME_TYPE};\n"
             ));
         }
+    }
+    // The accessor every assertion reads the runtime through. A function
+    // declaration is hoisted, initialised before any of the file's code runs
+    // (an import cycle that calls into the file early included), and it
+    // returns before the helper is called, so the helper is still called from
+    // the assertion's own frame and no stack trace gains a frame.
+    if let Some(accessor) = runtime_accessor {
+        code.push_str(&format!(
+            "\nfunction {accessor}() {{ return {ASSERTION_RUNTIME}; }}\n"
+        ));
     }
     let map = map.to_json_string();
     code.push_str("\n//# sourceMappingURL=data:application/json;base64,");
@@ -4352,7 +4376,15 @@ impl<'a> Visit<'a> for EqualityValueSites {
 }
 
 /// The runtime's probe helpers, in the order a file imports them.
-const PROBE_HELPERS: [&str; 5] = ["compareV2", "arithV2", "assignV2", "methodV2", "valueV2"];
+const PROBE_HELPERS: [&str; 7] = [
+    "compareV2",
+    "arithV2",
+    "assignV2",
+    "methodV2",
+    "valueV2",
+    "trackV2",
+    "resumeV2",
+];
 
 /// The probes' helpers, each named the first time a site of its kind is
 /// probed. Named with the file's other helpers' suffix counter and after
@@ -5863,6 +5895,17 @@ fn instrument_candidate_with_binding(
             ),
         )
     });
+    // The literals module-level mutants are read through, found on the
+    // program as written, where the probes are placed: a run without them
+    // records no read, and its mutants are linked to none.
+    let value_reads = match &mutant_facts {
+        Some((ledger, _)) if probes_enabled() => {
+            crate::js_value_reads::analyze(&parsed.program, source, file, ledger)
+        }
+        _ => crate::js_value_reads::ValueReads::default(),
+    };
+    let top_level_awaits =
+        probes_enabled() && crate::js_value_reads::awaits_at_top_level(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
         &allocator,
         &mut parsed.program,
@@ -5970,6 +6013,8 @@ fn instrument_candidate_with_binding(
     let probe_hits_v2 = names.allocate("__supercovHits");
     // The file's own hit, bound to it: a statement probe calls it by place.
     let probe_hit_at_v2 = names.allocate("__supercovHitAt");
+    // The file's own decision end, bound to it like its hit.
+    let probe_end_v2 = names.allocate("__supercovEnd");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
@@ -6058,6 +6103,9 @@ fn instrument_candidate_with_binding(
     let try_targets = extra.allocate(&extended_analysis.try_targets, |target| {
         vec![target.first_id.clone(), target.second_id.clone()]
     });
+    // The reads' points, last: no other place moves for them.
+    let reads_base = extra.next();
+    extra.ids.extend(value_reads.ids.iter().cloned());
     let statement_targets = point_analysis
         .statement_targets
         .into_iter()
@@ -6195,8 +6243,7 @@ fn instrument_candidate_with_binding(
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
-        mcdc_end_v2: mcdc_end_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
+        probe_end_v2: probe_end_v2.clone(),
         names,
         scope_declarations: Vec::new(),
         decision_index: 0,
@@ -6275,7 +6322,29 @@ fn instrument_candidate_with_binding(
     if probes_enabled() {
         infection_transformer.visit_program(&mut parsed.program);
     }
-    let probe_helpers = infection_transformer.helpers.named;
+    let mut helpers = infection_transformer.helpers;
+    if !value_reads.nodes.is_empty() {
+        let mut name = |export| helpers.name(export);
+        crate::js_value_reads::ReadTransformer {
+            ast,
+            file: probe_file_v2.clone(),
+            helper: &mut name,
+            base: reads_base,
+            nodes: &value_reads.nodes,
+            done: HashSet::default(),
+        }
+        .visit_program(&mut parsed.program);
+    }
+    if top_level_awaits {
+        let mut name = |export| helpers.name(export);
+        crate::js_value_reads::ResumeTransformer {
+            ast,
+            file: probe_file_v2.clone(),
+            helper: &mut name,
+        }
+        .visit_program(&mut parsed.program);
+    }
+    let probe_helpers = helpers.named;
     let mutants = mutant_facts.map_or_else(Vec::new, |(ledger, facts)| {
         crate::js_mutant_links::link(
             file,
@@ -6288,6 +6357,7 @@ fn instrument_candidate_with_binding(
                 branches: &branches,
                 comparisons: &comparison_transformer.placed,
                 probes: &infection_transformer.placed,
+                reads: &value_reads.links,
             },
         )
     });
@@ -6351,10 +6421,19 @@ fn instrument_candidate_with_binding(
         "key": "",
         "points": point_ids.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "defaultCount": default_count,
-        "selectionPoints": [selection_first, selection_count],
-        "selectionTrees": &logical_transformer.trees,
     });
+    // Every module registers itself, so what the runtime reads as absent --
+    // no defaults, no selections, no trees -- is left out rather than
+    // written as zero or empty.
+    if default_count > 0 {
+        registration["defaultCount"] = serde_json::json!(default_count);
+    }
+    if selection_count > 0 {
+        registration["selectionPoints"] = serde_json::json!([selection_first, selection_count]);
+    }
+    if !logical_transformer.trees.is_empty() {
+        registration["selectionTrees"] = serde_json::json!(&logical_transformer.trees);
+    }
     // Places that repeat an earlier place's id -- a selection's two short
     // outcomes are one point -- as pairs of the place and the first: the
     // runtime records them as that one point, as it did by id.
@@ -6393,28 +6472,54 @@ fn instrument_candidate_with_binding(
     };
     parsed.program.body.insert(
         0,
-        Statement::VariableDeclaration(ast.alloc_variable_declaration(
-            Span::default(),
-            runtime_declaration_kind,
-            ast.vec_from_array([
-                ast.variable_declarator(
-                    Span::default(),
-                    runtime_declaration_kind,
-                    ast.binding_pattern_binding_identifier(
-                        Span::default(),
-                        ast.ident(&probe_file_v2),
-                    ),
-                    NONE,
-                    Some(registration_call),
-                    false,
+        Statement::VariableDeclaration(
+            ast.alloc_variable_declaration(
+                Span::default(),
+                runtime_declaration_kind,
+                ast.vec_from_iter(
+                    [
+                        ast.variable_declarator(
+                            Span::default(),
+                            runtime_declaration_kind,
+                            ast.binding_pattern_binding_identifier(
+                                Span::default(),
+                                ast.ident(&probe_file_v2),
+                            ),
+                            NONE,
+                            Some(registration_call),
+                            false,
+                        ),
+                        probe_part(&probe_clock_v2, "clock"),
+                        probe_part(&probe_hits_v2, "hitEpochs"),
+                        probe_part(&probe_hit_at_v2, "hit"),
+                    ]
+                    .into_iter()
+                    .chain((!decision_ids.is_empty()).then(|| probe_part(&probe_end_v2, "end"))),
                 ),
-                probe_part(&probe_clock_v2, "clock"),
-                probe_part(&probe_hits_v2, "hitEpochs"),
-                probe_part(&probe_hit_at_v2, "hit"),
-            ]),
-            false,
-        )),
+                false,
+            ),
+        ),
     );
+    // Where the probes are placed, the end of the module's top level: a
+    // read of a module-level value until then is one made as modules load
+    // (`js_value_reads`), from its registration on.
+    if probes_enabled() {
+        parsed.program.body.push(ast.statement_expression(
+            Span::default(),
+            ast.expression_call(
+                Span::default(),
+                Expression::from(ast.member_expression_static(
+                    Span::default(),
+                    ast.expression_identifier(Span::default(), ast.ident(&probe_file_v2)),
+                    ast.identifier_name(Span::default(), "loaded"),
+                    false,
+                )),
+                NONE,
+                ast.vec(),
+                false,
+            ),
+        ));
+    }
     let mut runtime_imports = vec![
         ("mcdcBegin", &mcdc_begin),
         ("mcdcCondition", &mcdc_condition),
@@ -6451,9 +6556,12 @@ fn instrument_candidate_with_binding(
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
+    // The runtime's global, bound once for the helpers after the first.
+    let runtime_object = name_base.fresh().allocate("__supercovRuntimeObject");
     let runtime_locals = runtime_imports
         .iter()
         .map(|(_, local)| (*local).clone())
+        .chain([runtime_object.clone()])
         .collect::<Vec<_>>();
     insert_runtime_bindings(
         &allocator,
@@ -6461,6 +6569,7 @@ fn instrument_candidate_with_binding(
         runtime_binding,
         runtime_declaration_kind,
         runtime_imports,
+        &runtime_object,
     );
 
     if let Some(wrapper) = capability_wrapper {
@@ -6650,6 +6759,7 @@ fn instrument_strong<'a>(
             branches: &[],
             comparisons: &[],
             probes: &[],
+            reads: &HashMap::default(),
         },
     );
     for (mutant, strong) in mutants.iter_mut().zip(placed) {
@@ -6707,12 +6817,14 @@ fn instrument_strong<'a>(
         )),
     );
     runtime_imports.push(("strongSlot", &strong_slot));
+    let runtime_object = names.allocate("__supercovRuntimeObject");
     insert_runtime_bindings(
         allocator,
         program,
         runtime_binding,
         runtime_declaration_kind,
         runtime_imports,
+        &runtime_object,
     );
     if let Some(wrapper) = capability_wrapper {
         transform_capability_imports(allocator, program, source, wrapper);
@@ -6772,6 +6884,7 @@ fn insert_runtime_bindings<'a>(
     runtime_binding: RuntimeBinding,
     runtime_declaration_kind: VariableDeclarationKind,
     runtime_imports: Vec<(&str, &String)>,
+    runtime_object: &str,
 ) {
     let ast = AstBuilder::new(allocator);
     let typescript = program.source_type.is_typescript();
@@ -6783,41 +6896,70 @@ fn insert_runtime_bindings<'a>(
         // the program instead collided with the declaration every rewritten
         // test file carries for its assertion helpers.
         let typed = typescript && runtime_binding == RuntimeBinding::DirectGlobal;
-        let declarators =
-            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+        let global_runtime = || {
+            Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                Span::default(),
+                ast.expression_identifier(Span::default(), ast.ident("globalThis")),
+                ast.identifier_name(
+                    Span::default(),
+                    ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
+                        "__SUPERCOV_DIRECT_RUNTIME__"
+                    } else {
+                        "__supercovRuntime"
+                    }),
+                ),
+                false,
+            ))
+        };
+        // The first helper is read off the global, where the JavaScript
+        // frontend's loaders look for it; the global itself is bound once
+        // after it, and every other helper read from that binding: the
+        // global's name is long, a minifier keeps it, and a module that
+        // named it for each helper carried it several times over.
+        let shared = runtime_imports.len() > 2;
+        // Every file binds the first helper at least: a declaration per
+        // helper, and the global's own after the first where it is shared.
+        let declarators = ast.vec_from_iter(runtime_imports.into_iter().enumerate().flat_map(
+            |(position, (imported, local))| {
                 let annotation = typed
                     .then(|| runtime_helper_type(allocator, program.source_type, imported))
                     .flatten();
-                let global_runtime =
-                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                        Span::default(),
-                        ast.expression_identifier(Span::default(), ast.ident("globalThis")),
-                        ast.identifier_name(
-                            Span::default(),
-                            ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
-                                "__SUPERCOV_DIRECT_RUNTIME__"
-                            } else {
-                                "__supercovRuntime"
-                            }),
-                        ),
-                        false,
-                    ));
+                let object = if shared && position > 0 {
+                    ast.expression_identifier(Span::default(), ast.ident(runtime_object))
+                } else {
+                    global_runtime()
+                };
                 let runtime_helper =
                     Expression::StaticMemberExpression(ast.alloc_static_member_expression(
                         Span::default(),
-                        global_runtime,
+                        object,
                         ast.identifier_name(Span::default(), ast.ident(imported)),
                         false,
                     ));
-                ast.variable_declarator(
+                let helper = ast.variable_declarator(
                     Span::default(),
                     runtime_declaration_kind,
                     ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
                     annotation,
                     Some(runtime_helper),
                     false,
-                )
-            }));
+                );
+                let global = (shared && position == 0).then(|| {
+                    ast.variable_declarator(
+                        Span::default(),
+                        runtime_declaration_kind,
+                        ast.binding_pattern_binding_identifier(
+                            Span::default(),
+                            ast.ident(runtime_object),
+                        ),
+                        NONE,
+                        Some(global_runtime()),
+                        false,
+                    )
+                });
+                std::iter::once(helper).chain(global)
+            },
+        ));
         program.body.insert(
             0,
             Statement::VariableDeclaration(ast.alloc_variable_declaration(
@@ -9698,8 +9840,9 @@ struct ControlProbeV2Transformer<'a, 's> {
     mcdc_begin: String,
     mcdc_condition: String,
     mcdc_end: String,
-    mcdc_end_v2: String,
-    probe_file_v2: String,
+    /// The file's own decision end, bound to it: `end(decision, vector)`
+    /// records the false outcome, `end(decision, vector, 1)` the true one.
+    probe_end_v2: String,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     decision_index: usize,
@@ -9731,6 +9874,25 @@ struct AppliedDecision {
     frame: String,
     values: Vec<String>,
     inline: bool,
+    /// By outcome, false then true: the vector every evaluation that ends in
+    /// it has, where there is only one. Such an outcome is recorded with that
+    /// number rather than one computed from the temporaries, which then hold
+    /// nothing anyone reads (`ValueShape::forced_vector`).
+    forced: [Option<u64>; 2],
+}
+
+/// What a decision's caller reads of its temporaries besides the vectors.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DecisionReads {
+    /// The values, for a decision whose outcome is read back from them once
+    /// its tree has been evaluated (`record_value_outcomes`).
+    Values,
+    /// The frame, which says whether a test ran whose outcome is not yet
+    /// recorded: an `if` without an `else`, a loop.
+    Frame,
+    /// Nothing: an `if` with an `else`, a conditional expression, where each
+    /// outcome is recorded where its branch starts.
+    Nothing,
 }
 
 impl<'a> ControlProbeV2Transformer<'a, '_> {
@@ -9894,11 +10056,26 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         index: usize,
     ) -> Expression<'a> {
         let mut steps = self.ast.vec();
+        // A decision whose every vector is known from its outcome keeps no
+        // values: its one condition sets the frame, if anything reads it, and
+        // stays as written, last, where it narrows.
+        let Some(value) = applied.values.get(index) else {
+            if applied.frame.is_empty() {
+                return expression;
+            }
+            steps.push(self.assign(&applied.frame, self.number(1)));
+            steps.push(expression);
+            return self.ast.expression_sequence(Span::default(), steps);
+        };
         if index == 0 {
             steps.push(self.assign(&applied.frame, self.number(1)));
-            for name in &applied.values[1..] {
-                steps.push(self.assign(name, self.number(0)));
-            }
+            // A decision that keeps its values has two conditions at least:
+            // a lone condition keeps none, and a value decision is compound.
+            steps.extend(
+                applied.values[1..]
+                    .iter()
+                    .map(|name| self.assign(name, self.number(0))),
+            );
         } else {
             steps.push(self.ast.expression_assignment(
                 Span::default(),
@@ -9907,7 +10084,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
                 self.number(3_u64.pow(index as u32)),
             ));
         }
-        steps.push(self.assign(&applied.values[index], expression));
+        steps.push(self.assign(value, expression));
         self.ast.expression_sequence(Span::default(), steps)
     }
 
@@ -10014,27 +10191,9 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         steps.push(self.assign(&result, value));
         let mut names = Vec::new();
         pending.iter().for_each(|(applied, shape)| {
-            let truth = self.ast.expression_unary(
-                Span::default(),
-                UnaryOperator::LogicalNot,
-                self.ast.expression_unary(
-                    Span::default(),
-                    UnaryOperator::LogicalNot,
-                    self.shape_bits(shape, applied),
-                ),
-            );
-            steps.push(self.ast.expression_call(
-                Span::default(),
-                self.identifier(&self.mcdc_end_v2),
-                NONE,
-                self.ast.vec_from_array([
-                    Argument::from(self.identifier(&self.probe_file_v2)),
-                    Argument::from(self.number(applied.index as u64)),
-                    Argument::from(self.encoded(applied)),
-                    Argument::from(truth),
-                ]),
-                false,
-            ));
+            // The outcome as 0 or 1, which the end reads as false or true.
+            let truth = self.shape_bits(shape, applied);
+            steps.push(self.end_call(applied.index, self.encoded(applied), Some(truth)));
             if applied.inline {
                 names.push(applied.frame.clone());
                 names.extend(applied.values.iter().cloned());
@@ -10096,19 +10255,37 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
     }
 
     fn outcome(&self, applied: &AppliedDecision, outcome: bool) -> Expression<'a> {
+        // Where the outcome says which conditions were evaluated and what
+        // each was, the vector is that number: what the temporaries would sum
+        // to at every evaluation that reaches this call.
+        let vector = match applied.forced[usize::from(outcome)] {
+            Some(vector) => self.number(vector),
+            None => self.encoded(applied),
+        };
+        self.end_call(applied.index, vector, outcome.then(|| self.number(1)))
+    }
+
+    /// `end(decision, vector)` for a false outcome, `end(decision, vector,
+    /// outcome)` otherwise: the file's own decision end, which records what
+    /// `mcdcEndV2(file, decision, vector, outcome)` does. A missing outcome is
+    /// false, and `1` true, as a boolean literal was: shorter in every
+    /// outcome of every decision a page parses.
+    fn end_call(
+        &self,
+        decision: usize,
+        vector: Expression<'a>,
+        outcome: Option<Expression<'a>>,
+    ) -> Expression<'a> {
+        let mut arguments = self.ast.vec_from_array([
+            Argument::from(self.number(decision as u64)),
+            Argument::from(vector),
+        ]);
+        arguments.extend(outcome.map(Argument::from));
         self.ast.expression_call(
             Span::default(),
-            self.identifier(&self.mcdc_end_v2),
+            self.identifier(&self.probe_end_v2),
             NONE,
-            self.ast.vec_from_array([
-                Argument::from(self.identifier(&self.probe_file_v2)),
-                Argument::from(self.number(applied.index as u64)),
-                Argument::from(self.encoded(applied)),
-                Argument::from(
-                    self.ast
-                        .expression_boolean_literal(Span::default(), outcome),
-                ),
-            ]),
+            arguments,
             false,
         )
     }
@@ -10257,6 +10434,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         &mut self,
         test: &mut Expression<'a>,
         plan: DecisionPlan,
+        reads: DecisionReads,
     ) -> Option<AppliedDecision> {
         if plan.condition_count > 32 {
             let frame_name = self.scratch_for("_supercovF", plan.inline_frame);
@@ -10304,13 +10482,34 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             return None;
         }
 
+        // Numbered as `instrument_conditions` numbers them, on the same tree.
+        let shape = value_shape(test, &mut 0);
+        let forced = [shape.forced_vector(false), shape.forced_vector(true)];
+        // Both outcomes forced: one condition, whose value is the outcome.
+        // Nothing reads its value, and the frame only where the caller does.
+        let keeps_values = reads == DecisionReads::Values || forced.contains(&None);
+        let frame = if keeps_values || reads == DecisionReads::Frame {
+            self.scratch_for("_supercovF", plan.inline_frame)
+        } else {
+            String::new()
+        };
+        let values = if keeps_values {
+            (0..plan.condition_count)
+                .map(|_| self.scratch_for("_supercovV", plan.inline_frame))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let applied = AppliedDecision {
             index: plan.index,
-            frame: self.scratch_for("_supercovF", plan.inline_frame),
-            values: (0..plan.condition_count)
-                .map(|_| self.scratch_for("_supercovV", plan.inline_frame))
-                .collect(),
+            frame,
+            values,
             inline: plan.inline_frame,
+            forced: if reads == DecisionReads::Values {
+                [None, None]
+            } else {
+                forced
+            },
         };
         let mut next_index = 0;
         self.instrument_conditions(test, &applied, &mut next_index);
@@ -10431,7 +10630,7 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         // A value decision has at most 32 conditions, and so is applied.
         if let Some((root, plan, shape)) = value {
             let applied = self
-                .apply_decision(expression, plan)
+                .apply_decision(expression, plan, DecisionReads::Values)
                 .expect("a value decision fits the encoding");
             self.pending_values
                 .entry(root)
@@ -10450,7 +10649,12 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let plan = decision_outcome_is_variable(&statement.test)
             .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        let reads = if statement.alternate.is_some() {
+            DecisionReads::Nothing
+        } else {
+            DecisionReads::Frame
+        };
+        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan, reads));
         self.visit_statement(&mut statement.consequent);
         if let Some(alternate) = &mut statement.alternate {
             self.visit_statement(alternate);
@@ -10480,7 +10684,9 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let plan = decision_outcome_is_variable(&expression.test)
             .then(|| self.reserve_decision(&expression.test));
         self.visit_expression(&mut expression.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut expression.test, plan));
+        let applied = plan.and_then(|plan| {
+            self.apply_decision(&mut expression.test, plan, DecisionReads::Nothing)
+        });
         self.visit_expression(&mut expression.consequent);
         self.visit_expression(&mut expression.alternate);
         let Some(applied) = applied else {
@@ -10505,7 +10711,8 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
                 .ast
                 .expression_sequence(Span::default(), self.ast.vec_from_array([record, value]));
         }
-        if applied.inline {
+        // A decision that keeps no temporaries needs no frame to declare them.
+        if applied.inline && !applied.frame.is_empty() {
             let mut names = vec![applied.frame];
             names.extend(applied.values);
             self.inline_names = Some(names);
@@ -10516,7 +10723,8 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let plan = decision_outcome_is_variable(&statement.test)
             .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        let applied = plan
+            .and_then(|plan| self.apply_decision(&mut statement.test, plan, DecisionReads::Frame));
         self.visit_statement(&mut statement.body);
         if let Some(applied) = applied {
             self.loop_outcomes(&mut statement.body, &applied, false);
@@ -10528,7 +10736,8 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
             .then(|| self.reserve_decision(&statement.test));
         self.visit_statement(&mut statement.body);
         self.visit_expression(&mut statement.test);
-        let applied = plan.and_then(|plan| self.apply_decision(&mut statement.test, plan));
+        let applied = plan
+            .and_then(|plan| self.apply_decision(&mut statement.test, plan, DecisionReads::Frame));
         if let Some(applied) = applied {
             self.loop_outcomes(&mut statement.body, &applied, true);
         }
@@ -10546,7 +10755,7 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         let mut applied = None;
         if let (Some(test), Some(plan)) = (&mut statement.test, plan) {
             self.visit_expression(test);
-            applied = self.apply_decision(test, plan);
+            applied = self.apply_decision(test, plan, DecisionReads::Frame);
         }
         if let Some(update) = &mut statement.update {
             self.visit_expression(update);
@@ -12323,6 +12532,37 @@ enum ValueShape {
     Not(Box<ValueShape>),
 }
 
+impl ValueShape {
+    /// The vector, encoded as the runtime decodes it, that every evaluation
+    /// ending in `outcome` has, when there is only one: each condition is
+    /// evaluated and its value follows from the outcome. That is so for a
+    /// lone condition, either way, for the true outcome of conditions joined
+    /// by `&&` alone, and for the false outcome of conditions joined by `||`
+    /// alone (and so on through `!`). Anywhere else an outcome has more than
+    /// one vector, and the temporaries say which.
+    fn forced_vector(&self, outcome: bool) -> Option<u64> {
+        let mut vector = 0;
+        self.force(outcome, &mut vector).then_some(vector)
+    }
+
+    fn force(&self, outcome: bool, vector: &mut u64) -> bool {
+        match self {
+            // Evaluated, and true or false: a digit of 2 or 1.
+            ValueShape::Condition(index) => {
+                *vector += 3_u64.pow(*index as u32) * if outcome { 2 } else { 1 };
+                true
+            }
+            ValueShape::Not(inner) => inner.force(!outcome, vector),
+            ValueShape::And(left, right) => {
+                outcome && left.force(true, vector) && right.force(true, vector)
+            }
+            ValueShape::Or(left, right) => {
+                !outcome && left.force(false, vector) && right.force(false, vector)
+            }
+        }
+    }
+}
+
 fn value_shape(expression: &Expression<'_>, next: &mut usize) -> ValueShape {
     match expression {
         Expression::ParenthesizedExpression(parenthesized) => {
@@ -12538,7 +12778,7 @@ pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usiz
     (line, column)
 }
 
-fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
+pub(crate) fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
     let start = utf16_offset(source, span.start as usize);
     let end = utf16_offset(source, span.end as usize);
     let digest = Sha256::digest(format!("{file}:{kind}:{start}:{end}:{suffix}").as_bytes());
@@ -13223,7 +13463,7 @@ export const r = v && w && q;
         for (source, export) in [
             (
                 "function handleRequest(r) { return r; }\nexport default handleRequest;\n",
-                "export default __supercovWithRequestPhase14(handleRequest);",
+                "export default __supercovWithRequestPhase15(handleRequest);",
             ),
             (
                 "export default class Entry {}\n",
@@ -13744,6 +13984,8 @@ export function shapes(n: number): unknown {
                 let bound = code
                     .find(&format!("{helper} as "))
                     .or_else(|| code.find(&format!("__supercovRuntime.{helper}")))
+                    // Helpers after the first read the global's one binding.
+                    .or_else(|| code.find(&format!("__supercovRuntimeObject.{helper}")))
                     .unwrap_or_else(|| panic!("{file} binds no {helper}:\n{code}"));
                 assert!(
                     bound < first_user_code,
@@ -14404,18 +14646,17 @@ export function shapes(n: number): unknown {
         let lines: Vec<&str> = code.lines().collect();
         assert!(
             lines[2].starts_with(
-                "  { const __supercovAssertionPhase: typeof assert.ok = globalThis.__SUPERCOV_DIRECT_RUNTIME__.bindNodeAssertionPhase("
+                "  { const __supercovP1: typeof assert.ok = __covSupercov().bindNodeAssertionPhase("
             ),
             "{code}"
         );
         assert!(
-            lines[2]
-                .ends_with(", assert, \"ok\"); __supercovAssertionPhase(user, await value()); }"),
+            lines[2].ends_with(", assert, \"ok\"); __supercovP1(user, await value()); }"),
             "{code}"
         );
         assert!(lines[3].contains(": typeof assert.equal = "), "{code}");
         assert_eq!(
-            lines[4], "     \"equal\"); __supercovAssertionPhase(await value(), 1) }",
+            lines[4], "     \"equal\"); __supercovP1(await value(), 1) }",
             "{code}"
         );
         assert_eq!(lines[5], "}", "{code}");
@@ -15299,13 +15540,17 @@ export function shapes(n: number): unknown {
 
     fn decision_shape(source: &str, file: &str) -> String {
         let output = without_probes(source, file);
-        let runtime = output.runtime.as_ref().expect("candidate runtime binding");
-        let call = format!("{}(", runtime.mcdc_end_v2);
-        let start = output.code.find(&call).expect("an outcome is recorded") + call.len();
-        let probe_file = &output.code[start..start + output.code[start..].find(',').unwrap()];
-        let code = output
+        // The file's own end, `__supercovEnd<n>`, bound beside its hit.
+        let bound = output
             .code
-            .replace(&format!("{call}{probe_file}, "), "END(");
+            .find("= __supercovFile")
+            .and_then(|_| output.code.find("__supercovEnd"))
+            .expect("an outcome is recorded");
+        let length = output.code[bound..]
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap();
+        let call = format!("{}(", &output.code[bound..bound + length]);
+        let code = output.code.replace(&call, "END(");
         let mut names: Vec<&str> = Vec::new();
         let mut shaped = String::new();
         let mut rest = code.as_str();
@@ -15369,15 +15614,19 @@ export function shapes(n: number): unknown {
         for expected in [
             // The bookkeeping rides inside the first condition, and every
             // condition ends in the assignment of its own value.
-            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, t0 + +!!t1 + 3 * +!!t2, true), t0 = 0;",
+            // The true outcome of `&&` alone has one vector, both conditions
+            // true (2 + 3 * 2), and is recorded as that number.
+            "if ((t0 = 1, t2 = 0, t1 = client) && (t0 += 3, t2 = strict)) {\n\t\t\tEND(0, 8, 1), t0 = 0;",
             // Without an `else` there is nowhere inside the statement for the
             // false outcome, and an `else` made for it would be a branch to
             // a coverage tool the tests run: it is recorded after the `if`,
             // when the frame says it has not been.
-            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1 + 3 * +!!t2, false);\n\t}",
-            "if (t3 = 1, t4 = !list) {\n\t\tEND(1, t3 + +!!t4, true);",
-            "} else {\n\t\tEND(1, t3 + +!!t4, false);",
-            "return (t5 = 1, t6 = list) ? (void END(2, t5 + +!!t6, true), list[0]) : (void END(2, t5 + +!!t6, false), undefined);",
+            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1 + 3 * +!!t2);\n\t}",
+            // A lone condition's value is the outcome: each branch records its
+            // one vector, and the test is left as written.
+            "if (!list) {\n\t\tEND(1, 2, 1);",
+            "} else {\n\t\tEND(1, 1);",
+            "return list ? (void END(2, 2, 1), list[0]) : (void END(2, 1), undefined);",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
@@ -15402,17 +15651,96 @@ export function shapes(n: number): unknown {
         );
         for expected in [
             // The label stays on its loop, for `continue walk`.
-            "{\n\t\twalk: while (t0 = 1, t1 = i < limit) {\n\t\t\tEND(0, t0 + +!!t1, true), t0 = 0;",
-            "\t\t}\n\t\tt0 && END(0, t0 + +!!t1, false);\n\t}",
+            // A lone condition keeps only the frame, which says a test ran
+            // whose outcome is not yet recorded.
+            "{\n\t\twalk: while (t0 = 1, i < limit) {\n\t\t\tEND(0, 2, 1), t0 = 0;",
+            "\t\t}\n\t\tt0 && END(0, 1);\n\t}",
             // A `do … while` body runs before its test: the frame says whether
             // one came before this iteration, and starts cleared.
-            "{\n\t\tt4 = 0;\n\t\tdo {\n\t\t\tt4 && (END(2, t4 + +!!t5, true), t4 = 0);",
-            "} while (t4 = 1, t5 = i > 0);\n\t\tt4 && END(2, t4 + +!!t5, false);\n\t}",
-            "for (let j = 0; t6 = 1, t7 = j < limit; j++) {\n\t\t\tEND(3, t6 + +!!t7, true), t6 = 0;",
-            "\t\t}\n\t\tt6 && END(3, t6 + +!!t7, false);\n\t}",
+            "{\n\t\tt2 = 0;\n\t\tdo {\n\t\t\tt2 && (END(2, 2, 1), t2 = 0);",
+            "} while (t2 = 1, i > 0);\n\t\tt2 && END(2, 1);\n\t}",
+            "for (let j = 0; t3 = 1, j < limit; j++) {\n\t\t\tEND(3, 2, 1), t3 = 0;",
+            "\t\t}\n\t\tt3 && END(3, 1);\n\t}",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
+    }
+
+    #[test]
+    fn a_forced_vector_is_the_only_vector_its_outcome_has() {
+        // Every evaluation of each shape, short-circuited as JavaScript does,
+        // and the vectors each outcome is reached with: the instrumenter
+        // writes a number for an outcome exactly when there is one vector.
+        fn evaluate(shape: &ValueShape, values: &[bool], vector: &mut u64) -> bool {
+            match shape {
+                ValueShape::Condition(index) => {
+                    let value = values[*index];
+                    *vector += 3_u64.pow(*index as u32) * if value { 2 } else { 1 };
+                    value
+                }
+                ValueShape::Not(inner) => !evaluate(inner, values, vector),
+                ValueShape::And(left, right) => {
+                    evaluate(left, values, vector) && evaluate(right, values, vector)
+                }
+                ValueShape::Or(left, right) => {
+                    evaluate(left, values, vector) || evaluate(right, values, vector)
+                }
+            }
+        }
+        for source in [
+            "a",
+            "!a",
+            "!!a",
+            "a && b",
+            "a || b",
+            "!(a && b)",
+            "!(a || b)",
+            "a && b && c",
+            "a || b || c",
+            "(a || b) && c",
+            "a && (b || c)",
+            "!(a && b) || c",
+            "!a && !b",
+            "a ?? b",
+            "(a && b) && (c && d)",
+            "!((a || b) || !(c && d))",
+        ] {
+            let allocator = Allocator::default();
+            let expression = Parser::new(&allocator, source, SourceType::mjs())
+                .parse_expression()
+                .expect("a decision parses");
+            let mut count = 0;
+            let shape = super::value_shape(&expression, &mut count);
+            for outcome in [false, true] {
+                let mut reached = std::collections::BTreeSet::new();
+                for bits in 0..1_u32 << count {
+                    let values = (0..count)
+                        .map(|index| bits >> index & 1 == 1)
+                        .collect::<Vec<_>>();
+                    let mut vector = 0;
+                    if evaluate(&shape, &values, &mut vector) == outcome {
+                        reached.insert(vector);
+                    }
+                }
+                let only = (reached.len() == 1).then(|| *reached.first().unwrap());
+                assert_eq!(shape.forced_vector(outcome), only, "{source} {outcome}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_condition_in_a_parameter_default_needs_no_frame() {
+        // Nothing is read back from a lone condition's temporaries, so the
+        // arrow that declares a parameter default's temporaries is not made.
+        let shaped = decision_shape(
+            "export function pick(n: number, tag = n > 5 ? 'high' : 'low') {\n  return tag;\n}\n",
+            "src/defaults.ts",
+        );
+        assert!(
+            shaped.contains("n > 5 ? (void END(0, 2, 1), \"high\") : (void END(0, 1), \"low\")"),
+            "{shaped}"
+        );
+        assert!(!shaped.contains("=> {"), "{shaped}");
     }
 
     #[test]
@@ -15422,7 +15750,7 @@ export function shapes(n: number): unknown {
                 "export function pick(\n",
                 "  n: number,\n",
                 "  kind = class { static label = 'none'; static { if (n > 1) this.label = 'some'; } },\n",
-                "  tag = n > 5 ? 'high' : 'low',\n",
+                "  tag = n > 5 && n < 9 ? 'high' : 'low',\n",
                 ") {\n",
                 "  return [kind.label, tag];\n",
                 "}\n",
@@ -15430,12 +15758,12 @@ export function shapes(n: number): unknown {
             "src/defaults.ts",
         );
         for expected in [
-            "static {\n\t\tlet t0, t1;\n",
-            "if (t0 = 1, t1 = n > 1) {\n\t\t\t\tEND(0, t0 + +!!t1, true), t0 = 0;",
+            "static {\n\t\tlet t0;\n",
+            "if (t0 = 1, n > 1) {\n\t\t\t\tEND(0, 2, 1), t0 = 0;",
             // A parameter default has no body to declare in: the arrow holds
             // the whole conditional expression, so its branches still see
             // what the test narrowed.
-            "(() => {\n\tlet t2, t3;\n\treturn (t2 = 1, t3 = n > 5) ? (void END(1, t2 + +!!t3, true), \"high\") : (void END(1, t2 + +!!t3, false), \"low\");\n})()",
+            "(() => {\n\tlet t1, t2, t3;\n\treturn (t1 = 1, t3 = 0, t2 = n > 5) && (t1 += 3, t3 = n < 9) ? (void END(1, 8, 1), \"high\") : (void END(1, t1 + +!!t2 + 3 * +!!t3), \"low\");\n})()",
         ] {
             assert!(shaped.contains(expected), "{expected}\n{shaped}");
         }
@@ -15483,7 +15811,12 @@ export function shapes(n: number): unknown {
         assert!(output.limitations.is_empty());
         assert_eq!(output.supported_surface, "complete-js-instrumenter-v1");
         let runtime = output.runtime.expect("candidate runtime binding");
-        assert!(output.code.contains(&runtime.mcdc_end_v2));
+        // Outcomes go through the file's own end, bound beside its hit.
+        assert!(
+            output
+                .code
+                .contains(&format!("= {}.end", runtime.probe_file_v2))
+        );
         assert!(output.code.contains("_supercovF"));
         assert!(output.code.contains("_supercovV"));
         assert_eq!(output.decisions.len(), 1);
@@ -15896,7 +16229,8 @@ export function shapes(n: number): unknown {
 
     /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are
     /// on otherwise, and a file with no site of a kind imports nothing for
-    /// it, its every name as it was with them off.
+    /// it, its every name as it was with them off; a file with none is as
+    /// with them off but for the call that ends its top level.
     #[test]
     fn probes_are_on_unless_turned_off_and_only_where_a_file_has_sites() {
         let instrumented = |on: bool, source: &str| {
@@ -15908,7 +16242,9 @@ export function shapes(n: number): unknown {
         // No comparison, arithmetic, method or arrow site.
         let siteless = "export function f(a: boolean, b: boolean) {\n  if (a && b) {\n    return 'both';\n  }\n  const o = a ? { x: 1 } : null;\n  return o?.x;\n}\n";
         let (on, off) = (instrumented(true, siteless), instrumented(false, siteless));
-        assert_eq!(on.code, off.code);
+        // But for the end of the module's top level, marked for the reads
+        // of module-level values (`js_value_reads`).
+        assert_eq!(on.code, format!("{}__supercovFile7.loaded();\n", off.code));
         assert!(!on.mutants.is_empty());
         assert!(off.mutants.is_empty());
         // A file with only arithmetic imports its helper alone, and no other
@@ -16075,6 +16411,7 @@ export function shapes(n: number): unknown {
             "(c) => (c.a ? f() : 2)",
             "(c) => (c.a ? 1 : f())",
             "(c) => !f()",
+            "(c) => c.a === f()",
         ] {
             assert!(!pure(text), "{text} is not pure");
         }
@@ -16288,8 +16625,10 @@ export function shapes(n: number): unknown {
             // operand is a decision too: its conditions are recorded in the
             // leaves and its outcome after the tree, from their values with
             // `&`, so the tree stays one tree and narrows as written.
-            "(s1 = 0, _supercovF28 = 1, _supercovV30 = 0, _supercovV29 = total > 0) && (s1 = 1, _supercovF28 += 3, _supercovV30 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
-            "!!(+!!_supercovV29 & +!!_supercovV30)), _supercovR31;",
+            "(s1 = 0, _supercovF29 = 1, _supercovV31 = 0, _supercovV30 = total > 0) && (s1 = 1, _supercovF29 += 3, _supercovV31 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            // The outcome is passed as 0 or 1, which the file's end reads as
+            // false or true.
+            "+!!_supercovV30 & +!!_supercovV31), _supercovR32;",
             "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
@@ -16656,6 +16995,41 @@ export function shapes(n: number): unknown {
         assert!(!code.contains("__supercovRawother"), "{code}");
         let code = wrap("function launch(options) {}\nlaunch({ hostPath: 1, guestPath: 2 });\n");
         assert!(!code.contains("wrapImportedCapability"), "{code}");
+    }
+
+    #[test]
+    fn a_declaration_with_nothing_to_map_selects_no_capability() {
+        // A declarator with no initializer, or one that destructures, names
+        // no mapping variable; the call beside it still selects its root.
+        let code = instrument_with_import_policy(
+            concat!(
+                "import { launch } from './sdk.mjs';\n",
+                "let pending;\n",
+                "const { cwd } = process;\n",
+                "launch({ hostPath: cwd(), guestPath: '/workspace' }, pending);\n",
+            ),
+            "src/run.mjs",
+            "./capability.mjs",
+            false,
+        )
+        .unwrap()
+        .code;
+        assert!(code.contains("__supercovRawlaunch"), "{code}");
+    }
+
+    #[test]
+    fn a_mutant_probe_leaves_the_arrow_a_parameter_default_is_measured_in() {
+        // A parameter default's compound decision is evaluated in an arrow
+        // the instrumenter adds to declare its temporaries. That arrow is no
+        // site of the source, and the mutant probes pass over it.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
+        let output = instrument_candidate(
+            "export function pick(n, tag = n > 5 && n < 9 ? 'high' : 'low') {\n  return [n].map((x) => x + tag);\n}\n",
+            "src/defaults.mjs",
+        )
+        .unwrap();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        assert!(output.code.contains("(() => {"), "{}", output.code);
     }
 
     #[test]

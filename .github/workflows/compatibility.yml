@@ -1,6 +1,16 @@
 name: Compatibility
 
 on:
+  # The slow tier's (slow-tier.yml): a pull request ready to merge, every push
+  # to a release pull request, and each night on main.
+  workflow_call:
+    inputs:
+      only:
+        default: ""
+        type: string
+      os:
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       only:
@@ -11,14 +21,17 @@ on:
         description: "JSON list of runners for the per-OS jobs. Empty runs all five."
         default: ""
         type: string
-  # Every language on every platform, on a pull request ready for review.
-  # The per-OS legs exist because what breaks is usually a path, a shell or a
-  # line ending rather than logic, and finding that after a merge costs more
-  # than the runners do. A draft gets CI only: some eighty jobs per draft,
-  # ten drafts open, held every job at the runner limit for hours. Marking a
-  # pull request ready starts the matrix.
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  # Every language on every platform, in the slow tier: a pull request ready
+  # to merge, and each night on main, the released binary's job among them,
+  # which nothing else runs. The per-OS legs exist because what breaks is
+  # usually a path, a shell or a line ending rather than logic, and finding
+  # that after a merge costs more than the runners do. A draft, and a push
+  # before the pull request is ready, get CI only: some eighty jobs per
+  # draft, ten drafts open, held every job at the runner limit for hours.
+  # A pull request runs the Linux legs alone, of the jobs its change can
+  # affect; a release pull request, or the `full-ci` label, runs every
+  # platform (scripts/ci-affected.mjs). A change to the corpus alone runs
+  # none: CI's check job reads its records.
 permissions:
   contents: read
   # The stop-on-failure step cancels this commit's runs.
@@ -27,15 +40,33 @@ permissions:
 # A push to a pull request replaces the run of the commit before it. A run started by hand is left
 # to finish.
 concurrency:
-  group: compatibility-${{ github.ref }}
+  group: compatibility-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Each test step has a limit of its own, about twice its slowest run:
   # a hang fails there, in minutes, with the step named, instead of
   # running to its job's limit and saying only that it was cancelled.
+  # Which jobs this change can affect (scripts/ci-affected.mjs), as in CI:
+  # the step summary says why each runs in full, in part, or not at all.
+  plan:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: compatibility
+
   node:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) && fromJSON(needs.plan.outputs.jobs)['node'].run }}
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -63,7 +94,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   runners:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) && fromJSON(needs.plan.outputs.jobs)['runners'].run }}
     name: ${{ matrix.name }} runners
     # The oldest Playwright supported predates the Ubuntu 26.04 that
     # ubuntu-latest is now, and has no browser builds for it: the minimum leg
@@ -121,7 +153,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   browsers:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,')) && fromJSON(needs.plan.outputs.jobs)['browsers'].run }}
     name: Playwright ${{ matrix.browser }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -152,7 +185,8 @@ jobs:
   # Linux x64 is left out: CI's check job runs the workspace tests and clippy
   # there, and engine-integrations the supervision and crash scripts.
   filesystems:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,')) && fromJSON(needs.plan.outputs.jobs)['filesystems'].run }}
     name: Filesystem safety (${{ matrix.os }}, ${{ matrix.partition }})
     runs-on: ${{ matrix.os }}
     # Windows builds the workspace in about 7 minutes and ran its tests in
@@ -162,8 +196,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
-        partition: [1, 2, 3]
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).filesystems.os }}
+        # Three parts of every test, or one of the affected tests alone.
+        partition: ${{ fromJSON(needs.plan.outputs.jobs).filesystems.matrix.partition }}
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).filesystems.mode == 'partial' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -173,13 +210,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # One Rust cache per platform, saved by the job that builds the whole
-      # workspace and restored by the rest: every job compiled from nothing.
+      # The Compatibility jobs' Rust cache, kept by main
+      # (dependency-caches.yml), never saved by a pull request.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: ${{ matrix.partition == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
+      # The workspace's tests run Maven and Gradle where a JDK is found, and
+      # every runner here has one. Restored only: the JDK jobs below keep
+      # what the platform's builds fetch, one cache per platform rather than
+      # one per job.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
       # The only clippy pass that sees Windows- and macOS-only code.
       - if: matrix.partition == 1
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -188,8 +232,26 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
-      - run: cargo nextest run --workspace --no-fail-fast --partition hash:${{ matrix.partition }}/3
+      # The affected tests and every test of a file the change touched, as
+      # in CI's check job.
+      - if: env.AFFECTED == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: affected-selection-compatibility
+      - if: env.AFFECTED == 'true'
+        shell: bash
+        run: |
+          cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
+          node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      # A test that fails runs once more, as in CI's check job: one that then
+      # passes is named, one that fails twice fails the job.
+      - run: cargo nextest run --workspace ${{ env.AFFECTED == 'true' && '--profile affected' || '' }} --retries 1 --no-fail-fast --no-tests=pass --partition hash:${{ matrix.partition }}/${{ env.AFFECTED == 'true' && 1 || 3 }}
         timeout-minutes: 30
+      - if: ${{ !cancelled() }}
+        uses: ./.github/actions/flaky-tests
+        with:
+          job: Filesystem safety (${{ matrix.os }}, ${{ matrix.partition }})
+          id: filesystems-${{ matrix.os }}-${{ matrix.partition }}
       - if: matrix.partition == 1
         run: cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs
         timeout-minutes: 20
@@ -198,16 +260,17 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   python:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',python,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',python,')) && fromJSON(needs.plan.outputs.jobs)['python'].run }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
     # 3.9 has no build for the Ubuntu 26.04 ubuntu-latest is now; it is
     # still measured on Linux, on the last Ubuntu that has one.
     runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.9' && 'ubuntu-24.04' || matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).python.os }}
         python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -223,11 +286,18 @@ jobs:
           python-version: ${{ matrix.python }}
           architecture: ${{ matrix.os == 'windows-11-arm' && (matrix.python == '3.9' || matrix.python == '3.10') && 'x64' || '' }}
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo build -p supercov
+        timeout-minutes: 25
       # Every interpreter measures itself: the gate refuses to fall back to
       # another Python on the runner, and asserts the version it measured.
       - run: npm run test:python
@@ -254,14 +324,15 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   ruby:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,')) && fromJSON(needs.plan.outputs.jobs)['ruby'].run }}
     name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).ruby.os }}
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
@@ -276,10 +347,11 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       # Before Ruby, and that order is the whole point. `ruby/setup-ruby`
       # installs an MSYS2 toolchain on arm64 Windows and puts its clang on
@@ -298,14 +370,15 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   rust:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,')) && fromJSON(needs.plan.outputs.jobs)['rust'].run }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).rust.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -316,16 +389,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: ${{ matrix.os == 'ubuntu-latest' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # One of the nextest releases the gate runs under; it fetches the other,
       # 0.9.148, itself. Any release from 0.9.138 is accepted.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo build -p supercov
+        timeout-minutes: 25
       - run: npm run test:rust-public-cargo
         timeout-minutes: 15
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -333,7 +413,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   go:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',go,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',go,')) && fromJSON(needs.plan.outputs.jobs)['go'].run }}
     # Go 1.22 on the newest macOS is not a thing that can work: its linker
     # writes no LC_UUID and macOS 26's dyld refuses to load a binary without
     # one, so every test binary the toolchain builds aborts before `main`.
@@ -343,11 +424,11 @@ jobs:
     # retired macOS 14 in November 2026.
     name: Go ${{ matrix.go }} (${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-15' || matrix.os }})
     runs-on: ${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-15' || matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).go.os }}
         # 1.22 is the oldest the generated harness targets; the rest is what
         # projects are actually on. 1.26 earns its place on its own: it is the
         # release that let `new` take a value, which the grammar Supercov
@@ -364,11 +445,18 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo test --no-run -p supercov-engine --test go_frontend --test go_run && cargo build -p supercov
+        timeout-minutes: 25
       - run: npm run test:go
         timeout-minutes: 15
         env:
@@ -395,14 +483,15 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   jvm:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,')) && fromJSON(needs.plan.outputs.jobs)['jvm'].run }}
     name: JDK ${{ matrix.java }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).jvm.os }}
         # 17 is the floor the documentation claims; 21 is the current LTS.
         java: ["17", "21"]
         exclude:
@@ -419,10 +508,12 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
-      - uses: gradle/actions/setup-gradle@v5
-      # The platform's own console runner, which one test drives directly to
-      # prove the listener attributes through the platform rather than through
-      # anything Maven or Gradle does around it.
+      # What the tests' Maven and Gradle builds fetch, kept; and their own
+      # retries turned up for the rest. Here rather than setup-gradle's
+      # cache, which a pull request only reads and nothing here ever wrote.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
       # Not preinstalled on any runner. One test compiles Kotlin with the
       # standalone compiler rather than through Gradle, so that what the
       # rewriter produces is known to be Kotlin the compiler accepts and not
@@ -431,16 +522,26 @@ jobs:
         shell: bash
         run: |
           version=2.2.20
-          curl -sSL --retry 3 -o "$RUNNER_TEMP/kotlin.zip" \
-            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip"
+          bash .github/fetch-verified.sh \
+            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip" \
+            "$RUNNER_TEMP/kotlin.zip" sha256 \
+            || { echo "SUPERCOV_INFRA_FAILURE=the Kotlin compiler could not be fetched" >> "$GITHUB_ENV"; exit 1; }
           unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/kotlinc/bin" >> "$GITHUB_PATH"
+      # The platform's own console runner, which one test drives directly to
+      # prove the listener attributes through the platform rather than through
+      # anything Maven or Gradle does around it. In the local Maven
+      # repository, kept with the rest, and checked against its SHA-1: fetched
+      # bare, a refusal's page was once taken for the jar.
       - name: Fetch the JUnit Platform console runner
         shell: bash
         run: |
-          jar="$RUNNER_TEMP/junit-platform-console-standalone.jar"
-          curl -sSL --retry 3 -o "$jar" \
-            https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          path=org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          jar="$HOME/.m2/repository/$path"
+          bash .github/fetch-verified.sh "https://repo1.maven.org/maven2/$path" "$jar" sha1 \
+            || { echo "SUPERCOV_INFRA_FAILURE=the JUnit console runner could not be fetched" >> "$GITHUB_ENV"; exit 1; }
+          # A path Windows reads, not the shell's /c/... one.
+          [ "$RUNNER_OS" = Windows ] && jar=$(cygpath -w "$jar")
           echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
       # Apache Ant, which no runner ships, and the jars its builds are given
       # on their command lines rather than resolving: JUnit 4 for <junit>, the
@@ -449,15 +550,28 @@ jobs:
       # where the tests look, without Maven, which not every runner has.
       - uses: ./.github/actions/apache-ant
       - uses: dtolnay/rust-toolchain@stable
+      # The Compatibility jobs' Rust cache, kept by main; restored only.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo test --no-run -p supercov-engine --test jvm_frontend --test jvm_run && cargo build -p supercov
+        timeout-minutes: 25
       - run: npm run test:jvm
         timeout-minutes: 28
         env:
           SUPERCOV_REQUIRE_JVM: "1"
+      # What this run fetched, kept for the next, even after a failure; by
+      # one JDK of the two, which fetch the same.
+      - if: ${{ !cancelled() && matrix.java == '21' }}
+        uses: ./.github/actions/jvm-dependencies
+        with:
+          step: save
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -465,7 +579,8 @@ jobs:
   # The binary we ship, on the machine it is shipped for. Three of the eight
   # native packages had never executed anywhere but the cross-compiler.
   released:
-    if: ${{ contains(format(',{0},', inputs.only), ',released,') }}
+    # Each night on main (the slow tier's schedule), and by hand.
+    if: ${{ github.event_name == 'schedule' || contains(format(',{0},', inputs.only), ',released,') }}
     name: Released binary (${{ matrix.native }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -498,3 +613,28 @@ jobs:
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
+
+  # Not a gate: the tests this run passed only when it ran them again, added
+  # to the open issue labelled `flaky-tests` (scripts/flaky-tests.mjs).
+  # Nothing here fails the run.
+  flaky-tests:
+    needs: filesystems
+    if: ${{ !cancelled() && needs.filesystems.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: flaky-*
+          path: ${{ runner.temp }}/flaky
+      - run: node scripts/flaky-tests.mjs report "$RUNNER_TEMP/flaky"
+        env:
+          GH_TOKEN: ${{ github.token }}

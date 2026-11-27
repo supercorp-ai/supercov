@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -22,7 +23,9 @@ function waitFor(path, timeoutMs = 5_000) {
   const started = Date.now();
   return new Promise((resolveReady, reject) => {
     const poll = () => {
-      if (existsSync(path)) return resolveReady();
+      // The program writes its marker with one small write after creating the file, so an empty
+      // file is one caught between the two: wait for its content, not just its name.
+      if (existsSync(path) && statSync(path).size > 0) return resolveReady();
       if (Date.now() - started >= timeoutMs)
         return reject(new Error(`timed out waiting for ${path}`));
       setTimeout(poll, 10);

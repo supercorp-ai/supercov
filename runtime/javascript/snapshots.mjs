@@ -122,6 +122,35 @@ export function expandSnapshot(value) {
     return snapshot;
 }
 /**
+ * A snapshot read as columns (runtime.mjs, coverageSnapshotColumns) with its
+ * events as objects again, each as the runtime built it (hitEvent,
+ * decisionEvent): what mergeSnapshots reads. columnarEvents gives the columns
+ * back. Anything else is returned as it is.
+ */
+export function eventsOfColumns(snapshot) {
+    const columns = snapshot?.eventColumns;
+    if (!columns || typeof columns !== "object")
+        return snapshot;
+    const { eventColumns: _columns, ...rest } = snapshot;
+    const events = [];
+    let timestampMs = 0;
+    for (let position = 0; position < columns.id.length; position += 1) {
+        const raw = columns.id[position];
+        const id = typeof raw === "number" ? rest.hits[raw] : raw;
+        const type = columns.types[columns.type[position]];
+        const phase = columns.phase[position];
+        const environment = columns.environments[columns.environment[position]];
+        timestampMs += columns.t[position];
+        const event = type === "hit" ? { type, id } : { type, id, vector: columns.vector[position] };
+        event.timestampMs = timestampMs;
+        if (phase !== -1)
+            event.phaseId = columns.phases[phase];
+        event.environment = environment;
+        events.push(event);
+    }
+    return { ...rest, events };
+}
+/**
  * A snapshot's events as columns: each event's type, phase and environment
  * as an index into a table of the distinct ones, its time as the difference
  * from the event before it, and its id, where it is one of the snapshot's
@@ -167,4 +196,27 @@ export function columnarEvents(snapshot) {
             ...columns,
         },
     };
+}
+/**
+ * The text each snapshot was read as, where it is the snapshot's own
+ * JSON.stringify: a page's runtime writes it so (runtime.mjs,
+ * `__SUPERCOV_COLUMNS_SNAPSHOT__`), and parsing JSON that JSON.stringify
+ * wrote and writing it again gives the same text. A test's record holds its
+ * pages' snapshots, hundreds of kilobytes on a large frontend, and writing
+ * them again was most of what writing the record cost.
+ */
+const snapshotTexts = new WeakMap();
+/** Keep `text`, the JSON.stringify of `snapshot` its page wrote, for `recordLine`. */
+export function keepSnapshotText(snapshot, text) {
+    snapshotTexts.set(snapshot, text);
+}
+const RECORD_SNAPSHOTS = "\u0000supercov-snapshots\u0000";
+/** `JSON.stringify(record)`, with its `browser` snapshots' kept texts. */
+export function recordLine(record) {
+    const snapshots = record.browser;
+    const text = JSON.stringify({ ...record, browser: RECORD_SNAPSHOTS });
+    const placeholder = `"browser":${JSON.stringify(RECORD_SNAPSHOTS)}`;
+    const at = text.indexOf(placeholder);
+    const written = `[${snapshots.map((snapshot) => snapshotTexts.get(snapshot) ?? JSON.stringify(snapshot) ?? "null").join(",")}]`;
+    return `${text.slice(0, at)}"browser":${written}${text.slice(at + placeholder.length)}`;
 }

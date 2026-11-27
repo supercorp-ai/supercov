@@ -20,7 +20,8 @@ function resolves(target) {
   const result = spawnSync(
     'cargo',
     ['tree', '-p', 'supercov', '--target', target, '--prefix', 'none', '--no-dedupe'],
-    { encoding: 'utf8' },
+    // The tree without deduplication runs past spawnSync's 1 MiB default.
+    { encoding: 'utf8', maxBuffer: 64 << 20 },
   );
   assert.equal(result.status, 0, `cargo tree ${target}\n${result.stderr}`);
   return result.stdout;

@@ -35,10 +35,21 @@ var COVERAGE_SCOPE_SITE_COOKIE = "__supercov_scope_site";
 var COVERAGE_PHASE_SITE_COOKIE = "__supercov_phase_site";
 var COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 var DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
+// Supercov gives a process its evidence root when it starts it, so the root
+// is read once per environment object, as SUPERCOV_CONTEXT is: a read of
+// process.env is an interceptor's call, and a server made one for every
+// record it wrote. A suite that swaps process.env for another object is read
+// again.
+var configuredRoot = { env: void 0, root: DEFAULT_SERVER_EVIDENCE_ROOT };
 function configuredServerEvidenceRoot() {
-  var _a8;
-  const configured = typeof process !== "undefined" ? (_a8 = process.env) == null ? void 0 : _a8["SUPERCOV_SERVER_EVIDENCE_ROOT"] : void 0;
-  return configured ? configured : DEFAULT_SERVER_EVIDENCE_ROOT;
+  const env = typeof process !== "undefined" ? process.env : void 0;
+  if (env === void 0 || env === null)
+    return DEFAULT_SERVER_EVIDENCE_ROOT;
+  if (env === configuredRoot.env)
+    return configuredRoot.root;
+  const configured = env["SUPERCOV_SERVER_EVIDENCE_ROOT"];
+  configuredRoot = { env, root: configured ? configured : DEFAULT_SERVER_EVIDENCE_ROOT };
+  return configuredRoot.root;
 }
 function nonEmpty(value) {
   return typeof value === "string" && value.length > 0;
@@ -169,6 +180,7 @@ for (const name of [
   "__SUPERCOV_BUFFER_EXIT_INSTALLED__",
   "__SUPERCOV_BUFFER_FLUSHERS__",
   "__SUPERCOV_CHILD_PATCHED__",
+  "__SUPERCOV_COLUMNS_SNAPSHOT__",
   "__SUPERCOV_COMPACT_SNAPSHOT__",
   "__SUPERCOV_COVERAGE_SNAPSHOT__",
   "__SUPERCOV_DIRECT_RUNTIME__",
@@ -254,7 +266,10 @@ function createState() {
     eventKeys: /* @__PURE__ */ new Map(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
-    persistedServerRecords: /* @__PURE__ */ new Set(),
+    // The records written for each attempt, by attempt (attemptKey): a hit's
+    // by its phase and then its id, any other by its serverRecordKey. One key
+    // joining them all was built and hashed for every record.
+    persistedServerRecords: /* @__PURE__ */ new Map(),
     backgroundBuffers: /* @__PURE__ */ new Map(),
     backgroundWriters: /* @__PURE__ */ new Map(),
     backgroundShardSizes: /* @__PURE__ */ new Map(),
@@ -322,6 +337,37 @@ var _a6;
 var serverPhaseStorage = (_a6 = serverPhaseStorages.get(runtimeInstance)) != null ? _a6 : createServerPhaseStorage();
 if (serverPhaseStorage)
   serverPhaseStorages.set(runtimeInstance, serverPhaseStorage);
+// A request's work, until its response has finished: what an attempt's
+// request set off and left running after it was answered -- a promise no one
+// awaits, a poller a first request started that later requests' work runs
+// in -- keeps the request's context, and ran as that test's long after the
+// test, or any request of it, waited for it. Such work is no test's: it is
+// recorded as work no request named, and a strong pass switches no
+// request's mutant on there, so it runs with the server started with it
+// (docs/design/strong-mutation.md). A context carries its request's
+// lifetime under this key, which spreads copy and JSON leaves out.
+var REQUEST_LIFETIME = Symbol.for("supercov.requestLifetime");
+function answered(context) {
+  const lifetime = context[REQUEST_LIFETIME];
+  return lifetime !== void 0 && lifetime.answered;
+}
+// The request's lifetime, made by whichever copy of the runtime sees the
+// request first. It ends once the response has finished (or its connection
+// closed) and the listeners of that event have run: what they start goes
+// on after it, and is no longer the request's.
+function requestLifetime(request, response) {
+  let lifetime = request[REQUEST_LIFETIME];
+  if (lifetime !== void 0)
+    return lifetime;
+  lifetime = { answered: false };
+  Object.defineProperty(request, REQUEST_LIFETIME, { __proto__: null, value: lifetime, configurable: true });
+  const answer = () => queueMicrotask(() => {
+    lifetime.answered = true;
+  });
+  for (const event of ["finish", "close"])
+    response.once(event, answer);
+  return lifetime;
+}
 function probeV2ContextKey(context) {
   var _a8, _b;
   const phase = (_a8 = context.phaseId) != null ? _a8 : "unscoped";
@@ -366,13 +412,18 @@ function activateProbeV2Key(key, force = false) {
 // The async hook activates the current request's context before every
 // callback the server runs, and building its key and looking it up was most of
 // a Next server's time in the hook. A request's context object is never
-// changed once made, and its key is made of it alone, so each keeps the epoch
-// it was given until the epochs are cleared.
+// changed once made but for its request's lifetime, and its key is made of it
+// alone, so each keeps the epoch it was given until the epochs are cleared or
+// its request is answered.
 // Every copy of the runtime in a process shares one state, and the hook is the
 // first copy's, so the cache and its generation live on that state too: a
 // reset from another copy has to reach them.
 var emptyProbeV2Context = Object.freeze({});
 function activateProbeV2Context(context) {
+  // What a request left running after its answer is no request's: only its
+  // lifetime changes once the context is made, and is looked at first.
+  if (answered(context))
+    context = emptyProbeV2Context;
   // Work no request owns is keyed by the test running when it runs, which
   // changes under the same context: only a request's context keeps its epoch.
   if (!context.scope)
@@ -644,6 +695,13 @@ function compactSnapshotText(snapshot) {
   return JSON.stringify({ supercovCompactSnapshot: 1, order: keys, rest, strings, shapes, rows, hits });
 }
 runtimeGlobal.__SUPERCOV_COMPACT_SNAPSHOT__ = compactSnapshotText;
+// The text of a snapshot as the Playwright collector stores it: what
+// JSON.stringify(columnarEvents(coverageSnapshot())) writes, made from the
+// columns the events are kept in. Read through compactSnapshotText, every
+// event became an object, then a row, and the collector made each an object
+// again and then a column: on a page of 30,000 events, 26 ms at the end of
+// each test against 7.
+runtimeGlobal.__SUPERCOV_COLUMNS_SNAPSHOT__ = () => JSON.stringify(coverageSnapshotColumns());
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
 // A dedicated worker blocked in `Atomics.wait` runs no evaluation, so the
 // test runner could not read its evidence and reported the test as a lower
@@ -1379,13 +1437,69 @@ function flushServerAppends() {
         makeEvidenceDirectory(fs, entry.directory);
         state.createdEvidenceDirectories.add(entry.directory);
       }
-      fs.appendFileSync(path, entry.lines.join(""));
+      appendAttemptLines(fs, path, entry.lines.join(""));
     } catch (cause) {
       const failure = serverTransportError(entry.runId, cause);
       state.serverTransportFailure = failure;
       throw failure;
     }
   }
+}
+// An attempt's file, appended to through a descriptor kept open: opening
+// and closing it for every turn's lines was most of what a server's first
+// hits cost (a Next server renders a page over hundreds of turns). The bytes
+// and their order are the same. A file removed since it was opened -- a
+// test's fixture clears its attempt's file before the test starts -- is
+// opened again, so nothing is written where no one reads it; a descriptor
+// that fails is opened again once. Windows cannot remove a file a process
+// holds open, so there each turn's lines are appended as before.
+var ATTEMPT_DESCRIPTORS_KEPT = 32;
+function appendAttemptLines(fs, path, text) {
+  if (process.platform === "win32" || typeof fs.openSync !== "function") {
+    fs.appendFileSync(path, text);
+    return;
+  }
+  const descriptors = state.attemptDescriptors || (state.attemptDescriptors = /* @__PURE__ */ new Map());
+  let descriptor = descriptors.get(path);
+  if (descriptor !== void 0 && !descriptorLinked(fs, descriptor)) {
+    closeAttemptDescriptor(fs, path);
+    descriptor = void 0;
+  }
+  const bytes = capturedBuffer.from(text);
+  if (descriptor !== void 0) {
+    try {
+      writeAllSync(fs, descriptor, bytes);
+      return;
+    } catch (e) {
+      closeAttemptDescriptor(fs, path);
+    }
+  }
+  descriptor = fs.openSync(path, "a");
+  // The oldest attempt's file is closed once a server holds more than a few:
+  // its test has ended, and what comes later for it opens it again.
+  if (descriptors.size >= ATTEMPT_DESCRIPTORS_KEPT)
+    closeAttemptDescriptor(fs, descriptors.keys().next().value);
+  descriptors.set(path, descriptor);
+  writeAllSync(fs, descriptor, bytes);
+}
+function descriptorLinked(fs, descriptor) {
+  try {
+    return fs.fstatSync(descriptor).nlink > 0;
+  } catch (e) {
+    return false;
+  }
+}
+function closeAttemptDescriptor(fs, path) {
+  const descriptor = state.attemptDescriptors.get(path);
+  state.attemptDescriptors.delete(path);
+  try {
+    fs.closeSync(descriptor);
+  } catch (e) {
+  }
+}
+function writeAllSync(fs, descriptor, bytes) {
+  for (let written = 0; written < bytes.length; )
+    written += fs.writeSync(descriptor, bytes, written, bytes.length - written);
 }
 function enqueueServerAppend(directory, path, line, runId) {
   // Fail closed with the original context: after one transport failure the
@@ -1421,6 +1535,103 @@ function scheduleServerFlush() {
     });
   }
 }
+// An attempt's key, made once per scope object: a request's scope is one
+// object for all of the request's records.
+var attemptKeys = /* @__PURE__ */ new WeakMap();
+function cachedAttemptKey(scope) {
+  let key = attemptKeys.get(scope);
+  if (key === void 0) {
+    key = attemptKey(scope);
+    attemptKeys.set(scope, key);
+  }
+  return key;
+}
+// What an attempt's records are kept apart by (state.persistedServerRecords).
+function persistedOf(scope) {
+  const key = cachedAttemptKey(scope);
+  let persisted = builtinMapGet.call(state.persistedServerRecords, key);
+  if (persisted === void 0) {
+    persisted = { hits: /* @__PURE__ */ new Map(), other: /* @__PURE__ */ new Set() };
+    builtinMapSet.call(state.persistedServerRecords, key, persisted);
+  }
+  return persisted;
+}
+function persistedHitsOf(persisted, phaseId) {
+  let ids = builtinMapGet.call(persisted.hits, phaseId);
+  if (ids === void 0) {
+    ids = /* @__PURE__ */ new Set();
+    builtinMapSet.call(persisted.hits, phaseId, ids);
+  }
+  return ids;
+}
+// The set a record of a scope with a phase is kept in, and its key there
+// (persistedKey): what serverRecordKey tells apart, told apart.
+function persistedRecordsOf(scope, record) {
+  const persisted = persistedOf(scope);
+  return plainHit(record) ? persistedHitsOf(persisted, record.phaseId) : persisted.other;
+}
+function plainHit(record) {
+  return record.type === "hit" && record.outcome === void 0 && !record.request;
+}
+function persistedKey(record) {
+  return plainHit(record) ? record.id : serverRecordKey(record);
+}
+// Where a record of the current request goes, when it names its test and
+// phase and its attempt's file already has its first line: what appendServer
+// works out with an object or two per record, a server's first hits and
+// decision vectors in every phase of every test, a Next server's page
+// thousands. Anything else -- no test, no phase, a buffered attempt, a
+// snapshot-kept run, an attempt file's first line -- goes through
+// appendServer.
+function scopedRecordTarget(phaseId) {
+  if (!phaseId || state.runtimeSnapshots)
+    return void 0;
+  const scope = currentRequestContext().scope;
+  if (scope === void 0 || !scope.runId || !getFs())
+    return void 0;
+  if (state.bufferedAttempts.size !== 0 && state.bufferedAttempts.has(cachedAttemptKey(scope)))
+    return void 0;
+  const location = scopedEvidenceLocation(scope);
+  return scopedPathsWritten.has(location.path) ? { scope, location } : void 0;
+}
+function enqueueScopedLine(target, line) {
+  try {
+    enqueueServerAppend(target.location.directory, target.location.path, line, target.scope.runId);
+  } catch (cause) {
+    if (cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED")
+      throw cause;
+    throw serverTransportError(target.scope.runId, cause);
+  }
+}
+// A first hit, written as appendServer writes `{ type: "hit", id, timestampMs,
+// phaseId }`: the same line, byte for byte.
+function appendServerHit(id, timestampMs, phaseId) {
+  const target = scopedRecordTarget(phaseId);
+  if (target === void 0) {
+    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
+    return;
+  }
+  const ids = persistedHitsOf(persistedOf(target.scope), phaseId);
+  if (builtinSetHas.call(ids, id))
+    return;
+  enqueueScopedLine(target, `{"type":"hit","id":${JSON.stringify(id)},"timestampMs":${JSON.stringify(timestampMs)},"phaseId":${JSON.stringify(phaseId)}}\n`);
+  builtinSetAdd.call(ids, id);
+}
+// A decision's vector, as appendServer writes it: the record's own keys, in
+// their order.
+function appendServerDecision(record) {
+  const target = scopedRecordTarget(record.phaseId);
+  if (target === void 0) {
+    appendServer(record);
+    return;
+  }
+  const other = persistedOf(target.scope).other;
+  const key = serverRecordKey(record);
+  if (builtinSetHas.call(other, key))
+    return;
+  enqueueScopedLine(target, `${JSON.stringify(record)}\n`);
+  builtinSetAdd.call(other, key);
+}
 function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
@@ -1449,7 +1660,7 @@ function appendServer(record) {
     // Work done while handling a request that named no test -- a webhook a
     // mock server sends -- says so, with the request's number.
     const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
-    const unscopedRequest = !scope && stored && stored.request ? { request: stored.request } : {};
+    const unscopedRequest = !scope && stored && stored.request && !answered(stored) ? { request: stored.request } : {};
     const serialized = __spreadValues(__spreadValues(__spreadValues({}, record), scope ? { scope } : {}), unscopedRequest);
     if (scope && state.bufferedAttempts.has(attemptKey(scope))) {
       const key = attemptKey(scope);
@@ -1463,16 +1674,17 @@ function appendServer(record) {
       state.serverBuffers.set(key, buffered);
       return;
     }
-    const deduplicationKey = scope && serialized.phaseId ? `${attemptKey(scope)}:${serverRecordKey(serialized)}` : void 0;
-    if (deduplicationKey && state.persistedServerRecords.has(deduplicationKey))
+    const persisted = scope && serialized.phaseId ? persistedRecordsOf(scope, serialized) : void 0;
+    const recordKey = persisted !== void 0 ? persistedKey(serialized) : void 0;
+    if (persisted !== void 0 && builtinSetHas.call(persisted, recordKey))
       return;
     if (!path) {
       appendDurableBackgroundRecord(fs, runId, serialized);
       return;
     }
     enqueueServerAppend(directory, path, serverLine(serialized, path) + "\n", runId);
-    if (deduplicationKey)
-      state.persistedServerRecords.add(deduplicationKey);
+    if (persisted !== void 0)
+      builtinSetAdd.call(persisted, recordKey);
   } catch (cause) {
     if (cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED")
       throw cause;
@@ -1500,7 +1712,7 @@ function environmentRequestContext() {
 function currentRequestContext() {
   const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
   if (stored !== void 0) {
-    if (stored.scope || stored.phaseId)
+    if ((stored.scope || stored.phaseId) && !answered(stored))
       return stored;
     return runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ ? { scope: runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ } : {};
   }
@@ -1519,15 +1731,15 @@ function activateCoverageScope(scope) {
 }
 function coverageCarrier() {
   const context = currentRequestContext();
-  return __spreadValues(__spreadValues({
+  return __spreadValues(__spreadValues(__spreadValues({
     version: 1
-  }, context.scope ? { scope: context.scope } : {}), context.phaseId ? { phaseId: context.phaseId } : {});
+  }, context.scope ? { scope: context.scope } : {}), context.phaseId ? { phaseId: context.phaseId } : {}), context[REQUEST_LIFETIME] ? { [REQUEST_LIFETIME]: context[REQUEST_LIFETIME] } : {});
 }
 function withCoverageCarrier(carrier, callback) {
   const decoded = typeof carrier === "string" ? decodeCoverageCarrier(carrier) : carrier;
   if (!serverPhaseStorage || !decoded)
     return callback();
-  const context = __spreadValues(__spreadValues({}, decoded.scope ? { scope: decoded.scope } : {}), decoded.phaseId ? { phaseId: decoded.phaseId } : {});
+  const context = __spreadValues(__spreadValues(__spreadValues({}, decoded.scope ? { scope: decoded.scope } : {}), decoded.phaseId ? { phaseId: decoded.phaseId } : {}), decoded[REQUEST_LIFETIME] ? { [REQUEST_LIFETIME]: decoded[REQUEST_LIFETIME] } : {});
   return serverPhaseStorage.run(context, () => withProbeV2Context(context, callback));
 }
 function assertionPhaseState(scope) {
@@ -2129,6 +2341,9 @@ function installNodeRequestPropagation() {
     // the report credits its work to the test running when it came.
     if (incoming && serverPhaseStorage && !(context && (context.scope || context.phaseId)))
       context = { request: nextUnscopedRequest() };
+    // Until its response has finished.
+    if (incoming && context && request && typeof request === "object" && response && typeof response.once === "function")
+      context = __spreadValues(__spreadValues({}, context), { [REQUEST_LIFETIME]: requestLifetime(request, response) });
     // Node emits a request's body and its response's events outside the
     // handler's context, so a handler that reads the body -- `req.on('end')`
     // -- ran as no test's. The request and response carry it with them.
@@ -2175,10 +2390,20 @@ function installNodeRequestPropagation() {
 }
 installNodeRequestPropagation();
 
+// The context of a request this process is serving, made as it came in
+// (`owningRequest`): it carries the request's lifetime.
+function servedRequestContext(context) {
+  return context !== void 0 && context[REQUEST_LIFETIME] !== void 0 ? context : void 0;
+}
 function withRequestPhase(handler, event) {
   if (!serverPhaseStorage)
     return handler;
-  const registeredContext = currentRequestContext();
+  // A handler wrapped while a request was being served -- a route module a
+  // framework loads on its first request, as Next.js does -- belongs to no
+  // test: that request was one attempt's, and every later request naming no
+  // test (a webhook from a mock) ran as that attempt's, in a strong pass with
+  // its mutant rather than the one of the test that set the request off.
+  const registeredContext = servedRequestContext(serverPhaseStorage.getStore()) ? {} : currentRequestContext();
   return function coverageRequestPhase(...args) {
     var _a8, _b, _c, _d;
     const requestContext = args.map((argument) => requestCoverageContext(argument)).find((context2) => context2 !== void 0);
@@ -2188,6 +2413,16 @@ function withRequestPhase(handler, event) {
     const context = __spreadValues(__spreadValues({}, ((_a8 = requestContext == null ? void 0 : requestContext.scope) != null ? _a8 : inheritedContext.scope) ? { scope: (_b = requestContext == null ? void 0 : requestContext.scope) != null ? _b : inheritedContext.scope } : {}), ((_c = requestContext == null ? void 0 : requestContext.phaseId) != null ? _c : inheritedContext.phaseId) ? { phaseId: (_d = requestContext == null ? void 0 : requestContext.phaseId) != null ? _d : inheritedContext.phaseId } : {});
     if (requestContext !== void 0 && !context.scope)
       context.request = nextUnscopedRequest();
+    let lifetime = requestContext !== void 0 ? args.map((argument) => argument && typeof argument === "object" ? argument[REQUEST_LIFETIME] : void 0).find((found) => found !== void 0) : void 0;
+    // A framework's own request object -- the web `Request` a Next.js route
+    // handler is given -- carries no lifetime, and work the handler left
+    // running after the answer (`after()`) stayed the request's. The request
+    // being served, whose context the handler is called in, has it.
+    const served = servedRequestContext(serverPhaseStorage.getStore());
+    if (lifetime === void 0 && requestContext !== void 0 && served !== void 0 && (context.scope ? served.scope !== void 0 && served.scope.attemptId === context.scope.attemptId : served.scope === void 0))
+      lifetime = served[REQUEST_LIFETIME];
+    if (lifetime !== void 0)
+      context[REQUEST_LIFETIME] = lifetime;
     const invoke = () => {
       if (event === "connection" && context.scope && args[0] &&
           typeof args[0] === "object" && typeof args[0].emit === "function")
@@ -2278,7 +2513,7 @@ function recordCoverageHit(id) {
     // record: an object built per first hit only to be read once.
     recordBrowserEvent("hit", id, void 0, timestampMs, phaseId, "server");
   } else {
-    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
+    appendServerHit(id, timestampMs, phaseId);
   }
 }
 // A first hit's event, built as one literal in the order the spread helpers
@@ -2346,6 +2581,17 @@ function registerProbeV2(definition) {
     none: optionalCallEmptySpread
   };
   rememberProbeV2File(file);
+  // The module registering is loading until its top level ends: see trackV2.
+  try {
+    markModuleLoading(file);
+  } catch {
+  }
+  file.loaded = () => {
+    try {
+      valueReadState().loading.delete(file);
+    } catch {
+    }
+  };
   // What a probe calls: this file's hit, by place alone. Outside a loop the
   // probe is the call alone and this makes its check, so it stays small
   // enough for V8 to inline where the code is hot. The epoch is NaN wherever
@@ -2356,6 +2602,21 @@ function registerProbeV2(definition) {
   file.hit = (index) => {
     if (hitEpochs[index] !== clock.e)
       recordCoverageHitV2(file, index);
+  };
+  // What a decision's outcome calls: this file's end, by decision alone, with
+  // its vector and the outcome, which a false one leaves out (`end(3, 1)`,
+  // `end(3, 2, 1)`). It records what mcdcEndV2(file, ...) does, and makes the
+  // same check first, so the call stays as small as the probe.
+  const decisionEpochs = file.decisionEpochs;
+  file.end = (decisionIndex, encoded, outcome) => {
+    if (encoded === 0)
+      return;
+    if (clock.fast) {
+      const seen = decisionEpochs[decisionIndex];
+      if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (outcome ? 1 : 0)] === clock.e)
+        return;
+    }
+    recordMcdcEndV2(file, decisionIndex, encoded, outcome);
   };
   if (isBrowser) {
     state.probeV2Clock.fast = true;
@@ -2725,6 +2986,174 @@ function valueV2(site, value) {
   }
   return value;
 }
+// Module-level values (docs/design/strong-mutation.md, "Module-level
+// values"). An object or array literal a module's top level makes, holding a
+// module-level mutant, is read through a proxy: each read is a hit of a point
+// of the literal -- one for any read, one for each key a mutant is under --
+// credited as every hit is, to the test whose work read it. A read while a
+// module loads is a hit of the literal's other points, its escapes: what that
+// read took (a copy, a lookup table built from it) outlives the read, and the
+// plan then takes every test that loaded the module, as without the proxies.
+// The state is on the global object, so copies of this runtime in one realm
+// agree on whether a module is loading.
+const valueReadStateKey = Symbol.for("supercov.valueReads");
+const capturedQueueMicrotask = typeof queueMicrotask === "function" ? queueMicrotask : void 0;
+function valueReadState() {
+  let reads = globalThis[valueReadStateKey];
+  if (reads === void 0) {
+    reads = { loading: /* @__PURE__ */ new Set(), resetQueued: false, targets: /* @__PURE__ */ new WeakMap(), cloneWrapped: false };
+    try {
+      Object.defineProperty(globalThis, valueReadStateKey, { __proto__: null, value: reads, configurable: true });
+    } catch {
+      return reads;
+    }
+  }
+  return reads;
+}
+// A module is loading from its registration, the first thing its code does,
+// to the end of its top level, where it calls its file's `loaded()`. One that
+// throws there never gets to it: no module is loading once the code that
+// loaded it gives up the thread, as module graphs evaluate synchronously, and
+// the first microtask after runs once they are done. A module's top-level
+// await gives it up too, and `resumeV2` marks it loading again where it
+// resumes.
+function markModuleLoading(file) {
+  const reads = valueReadState();
+  reads.loading.add(file);
+  if (reads.resetQueued)
+    return;
+  reads.resetQueued = true;
+  const reset = () => {
+    reads.loading.clear();
+    reads.resetQueued = false;
+  };
+  if (capturedQueueMicrotask !== void 0)
+    capturedQueueMicrotask(reset);
+  else
+    Promise.resolve().then(reset);
+}
+function resumeV2(file, value) {
+  try {
+    markModuleLoading(file);
+  } catch {
+  }
+  return value;
+}
+// `file`'s points from `base`: any read, any read while loading, then a read
+// and a read while loading for each of `keys`.
+function trackV2(file, base, keys, value) {
+  if (value === null || typeof value !== "object" && typeof value !== "function")
+    return value;
+  let reads;
+  try {
+    reads = valueReadState();
+    wrapStructuredClone(reads);
+  } catch {
+    return value;
+  }
+  const places = /* @__PURE__ */ new Map();
+  for (let place = 0; place < keys.length; place += 1)
+    places.set(keys[place], place);
+  const note = (key) => {
+    try {
+      const place = typeof key === "string" ? places.get(key) : void 0;
+      const loading = reads.loading.size > 0 ? 1 : 0;
+      file.hit(base + loading);
+      if (place !== void 0)
+        file.hit(base + 2 + 2 * place + loading);
+    } catch {
+    }
+  };
+  const proxy = new Proxy(value, {
+    __proto__: null,
+    get(target, key, receiver) {
+      note(key);
+      return Reflect.get(target, key, receiver);
+    },
+    has(target, key) {
+      note(key);
+      return Reflect.has(target, key);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      note(key);
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    ownKeys(target) {
+      note(void 0);
+      return Reflect.ownKeys(target);
+    },
+    set(target, key, assigned, receiver) {
+      note(key);
+      return Reflect.set(target, key, assigned, receiver === proxy ? target : receiver);
+    },
+    defineProperty(target, key, descriptor) {
+      note(key);
+      return Reflect.defineProperty(target, key, descriptor);
+    },
+    deleteProperty(target, key) {
+      note(key);
+      return Reflect.deleteProperty(target, key);
+    }
+  });
+  reads.targets.set(proxy, value);
+  return proxy;
+}
+// structuredClone refuses a proxy. A value the program clones, which holds
+// a tracked literal, is cloned as a copy read through it: every value the
+// clone holds is read, as the clone reads it without the proxies.
+function wrapStructuredClone(reads) {
+  if (reads.cloneWrapped)
+    return;
+  reads.cloneWrapped = true;
+  const native = globalThis.structuredClone;
+  if (typeof native !== "function")
+    return;
+  const cloning = function structuredClone(value, options) {
+    try {
+      return arguments.length > 1 ? native(value, options) : native(value);
+    } catch (error) {
+      const copies = /* @__PURE__ */ new Map();
+      let held = false;
+      const copy = (inner) => {
+        if (inner === null || typeof inner !== "object")
+          return inner;
+        if (copies.has(inner))
+          return copies.get(inner);
+        const tracked = reads.targets.has(inner);
+        held || (held = tracked);
+        if (!tracked && !Array.isArray(inner) && Object.getPrototypeOf(inner) !== Object.prototype && !(inner instanceof Map) && !(inner instanceof Set))
+          return inner;
+        if (inner instanceof Map) {
+          const made2 = /* @__PURE__ */ new Map();
+          copies.set(inner, made2);
+          for (const [key, entry] of inner)
+            made2.set(copy(key), copy(entry));
+          return made2;
+        }
+        if (inner instanceof Set) {
+          const made2 = /* @__PURE__ */ new Set();
+          copies.set(inner, made2);
+          for (const entry of inner)
+            made2.add(copy(entry));
+          return made2;
+        }
+        const made = Array.isArray(inner) ? new Array(inner.length) : {};
+        copies.set(inner, made);
+        for (const key of Object.keys(inner))
+          made[key] = copy(inner[key]);
+        return made;
+      };
+      const unwrapped = copy(value);
+      if (!held)
+        throw error;
+      return arguments.length > 1 ? native(unwrapped, options) : native(unwrapped);
+    }
+  };
+  try {
+    Object.defineProperty(globalThis, "structuredClone", { __proto__: null, value: cloning, writable: true, configurable: true, enumerable: false });
+  } catch {
+  }
+}
 // Strong mutation (mutant schemata). A file instrumented in strong mode has
 // every listed mutant behind a switch and reads one record from here when
 // it loads, `strongSlot(file)`, with `file` its path from the project root
@@ -2877,6 +3306,8 @@ function strongHit() {
       const key = `${attemptId}\0${mutant.key}`;
       const hits = (strong.requestHits.get(key) || 0) + 1;
       strong.requestHits.set(key, hits);
+      if (hits === 1)
+        noteRequestHit(mutant.key, attemptId);
       if (hits > strong.limit) {
         noteMutantTimeout(mutant.file, mutant.index, attemptId);
         throw new MutantTimeoutError(mutant.file, mutant.index, hits);
@@ -2887,6 +3318,47 @@ function strongHit() {
   if (++strong.hits > strong.limit) {
     noteMutantTimeout(strong.file, strong.index);
     throw new MutantTimeoutError(strong.file, strong.index, strong.hits);
+  }
+  if (strong.hits === 1)
+    noteEverywhereHit(strong);
+}
+// An attempt's own mutant ran here, in work one of its requests set off: the
+// pass trusts a survivor of a shared server only where an attempt of it ran
+// it (playwrightStrongReporter.mjs). A mutant its candidates reached when
+// measured, which none of its attempts ran, ran where the request's switch
+// never reached; it runs again alone, with the server started with it.
+function noteRequestHit(mutant, attemptId) {
+  try {
+    if (isBrowser || typeof process === "undefined" || !process.env)
+      return;
+    const results = process.env["SUPERCOV_STRONG_RESULTS"];
+    const fs = results ? getFs() : void 0;
+    if (fs)
+      fs.appendFileSync(`${results}.reached.jsonl`, JSON.stringify({ attemptId, mutant }) + "\n");
+  } catch (e) {
+  }
+}
+// A process started with a mutant switched on everywhere, in a round where
+// each Playwright invocation runs one mutant of its own (its runner set
+// SUPERCOV_ACTIVE_MUTANT for the processes it starts, the app's server among
+// them): the mutant ran here, in a process that is neither the runner nor
+// one of its workers. The round trusts a survivor only where its own server
+// ran it.
+function noteEverywhereHit(strong) {
+  try {
+    if (isBrowser || typeof process === "undefined" || !process.env)
+      return;
+    const env = process.env;
+    const invocation = env["SUPERCOV_PLAYWRIGHT_INVOCATION"];
+    const results = env["SUPERCOV_STRONG_RESULTS"];
+    if (!invocation || !results || env["TEST_WORKER_INDEX"] !== void 0 || String(process.pid) === invocation)
+      return;
+    if (env["SUPERCOV_ACTIVE_MUTANT"] !== `${strong.file}#${strong.index}`)
+      return;
+    const fs = getFs();
+    if (fs)
+      fs.appendFileSync(`${results}.everywhere.jsonl`, JSON.stringify({ pid: process.pid, invocation, mutant: env["SUPERCOV_ACTIVE_MUTANT"] }) + "\n");
+  } catch (e) {
   }
 }
 function strongSlot(file) {
@@ -3366,7 +3838,7 @@ function mcdcEnd(frame, value) {
   } else if (state.runtimeSnapshots) {
     recordBrowserEvent("decision", decision.id, vector, timestampMs, phaseId, "server");
   } else {
-    appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
+    appendServerDecision(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
   return value;
 }
@@ -3420,6 +3892,8 @@ const directRuntimeApi = {
   assignV2,
   methodV2,
   valueV2,
+  trackV2,
+  resumeV2,
   strongSlot,
   setActiveMutant,
   clearActiveMutant,
@@ -3502,6 +3976,8 @@ export {
   assignV2,
   methodV2,
   valueV2,
+  trackV2,
+  resumeV2,
   strongSlot,
   setActiveMutant,
   clearActiveMutant,

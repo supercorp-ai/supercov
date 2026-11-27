@@ -87,8 +87,8 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
 const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown|stryker|pit [--output <file>]]
 
 Weak mutation: for each mutant the language's established tool would make
-(StrykerJS for JavaScript and TypeScript; in preview, mutmut for Python,
-cargo-mutants for Rust, Gremlins for Go and mutant for Ruby), whether a test
+(StrykerJS for JavaScript and TypeScript, cargo-mutants for Rust;
+in preview, mutmut for Python, Gremlins for Go and mutant for Ruby), whether a test
 ran the mutated code (reach) and whether its value differed there
 (infection), read from the run without running anything. A run lists its
 mutants from its sources the first time they are asked for.
@@ -507,6 +507,7 @@ fn parse_options(
                                 name.as_str(),
                                 "killed"
                                     | "survived"
+                                    | "survived-so-far"
                                     | "timeout"
                                     | "no-coverage"
                                     | "error"
@@ -528,7 +529,7 @@ fn parse_options(
                                     )
                                 } else {
                                     format!(
-                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent, or a strong verdict: killed, survived, timeout, no-coverage, error or unviable"
+                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent, or a strong verdict: killed, survived, survived-so-far, timeout, no-coverage, error or unviable"
                                     )
                                 };
                                 return Err(PublicQueryError::invalid(
@@ -959,6 +960,7 @@ fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
     // The directory given first, then each found below it.
     let mut directory = directory.to_path_buf();
     loop {
+        // fault-site: public-query.json-files
         for entry in supercov_engine::fault_fs::read_dir(&directory)? {
             let path = entry?.path();
             if path.is_dir() {

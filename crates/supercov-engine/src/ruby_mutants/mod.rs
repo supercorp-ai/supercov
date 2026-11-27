@@ -768,6 +768,7 @@ pub(crate) fn candidates(
     let mut out = Vec::new();
     for (mutant, start, end, descriptor) in described(source, enumeration) {
         out.push(crate::mutant_list::CandidateMutant {
+            log_only: false,
             id: String::new(),
             mutator: mutant.mutator.to_owned(),
             replacement: descriptor,
@@ -795,6 +796,7 @@ pub(crate) fn candidates(
             arrow: None,
             equivalent: None,
             untestable: None,
+            reads: None,
             is_static: false,
             unplaceable: None,
         });

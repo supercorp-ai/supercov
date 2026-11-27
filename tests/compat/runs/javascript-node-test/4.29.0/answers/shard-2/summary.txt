@@ -1,11 +1,11 @@
-run run_5bbf31d15febf55c
+run run_c9dcb2d47c050b76
 command: node --test test/label.test.js
 
 Coverage
   Lines      15.38% (2/13)
   Branches   10.00% (1/10)
   MC/DC      0.00% (0/5)
-Assertions   not assessed — npx supercov runs run_5bbf31d15febf55c assertions assess
+Assertions   not assessed — npx supercov runs run_c9dcb2d47c050b76 assertions assess
 
 By test kind
   unit            1 test(s)  lines  15.38%  branches  10.00%  MC/DC   0.00%
@@ -27,9 +27,9 @@ Remaining
   Files with measurement limits     0
 
 Commands
-  npx supercov runs 'run_5bbf31d15febf55c' files
-  npx supercov runs 'run_5bbf31d15febf55c' gaps
-  npx supercov runs 'run_5bbf31d15febf55c' kinds
-  npx supercov runs 'run_5bbf31d15febf55c' runners
-  npx supercov runs 'run_5bbf31d15febf55c' scope
-  npx supercov runs run_5bbf31d15febf55c --help
+  npx supercov runs 'run_c9dcb2d47c050b76' files
+  npx supercov runs 'run_c9dcb2d47c050b76' gaps
+  npx supercov runs 'run_c9dcb2d47c050b76' kinds
+  npx supercov runs 'run_c9dcb2d47c050b76' runners
+  npx supercov runs 'run_c9dcb2d47c050b76' scope
+  npx supercov runs run_c9dcb2d47c050b76 --help

@@ -27,10 +27,14 @@ def kind(comm, cmd):
         return 'browser main'
     if 'postgres' in comm or 'postgres' in cmd:
         return 'postgres'
+    # Next names its server's process `next-server (v…)`, and its build's
+    # workers run jest-worker's child script.
+    if 'next-server' in comm or 'next-server' in cmd:
+        return 'node next server'
     if comm.startswith('node') or comm == 'MainThread' or 'node' in cmd.split(' ')[0]:
-        if 'next start' in cmd or 'next-server' in comm or 'next-server' in cmd or 'start-server' in cmd:
+        if 'next start' in cmd or 'start-server' in cmd:
             return 'node next server'
-        if 'next build' in cmd or 'build' in cmd.split(' ')[1:3]:
+        if 'next build' in cmd or 'build' in cmd.split(' ')[1:3] or 'jest-worker' in cmd:
             return 'node next build'
         if 'playwright' in cmd:
             return 'node playwright'
@@ -64,7 +68,12 @@ def sample(first):
         if first:
             start[key] = used
         else:
-            seen[key] = (kind(comm, cmd), used - start.get(key, 0))
+            # A process that has exited and not been reaped yet shows no
+            # command line: it keeps the kind it was first seen as, where its
+            # last sample counted it as 'node other ?' before.
+            known = seen.get(key)
+            what = known[0] if known and not cmd else kind(comm, cmd)
+            seen[key] = (what, used - start.get(key, 0))
 
 
 sample(True)

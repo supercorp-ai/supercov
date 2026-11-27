@@ -1,7 +1,7 @@
 {
-  "id": "run_105873fc19828e4a",
-  "startedAt": "2026-11-22T23:28:28.330Z",
-  "durationMs": 102.9,
+  "id": "run_78c3b98d82fe1a5e",
+  "startedAt": "2026-11-23T08:10:00.533Z",
+  "durationMs": 232.2,
   "command": [
     "python3",
     "-m",
@@ -24,9 +24,9 @@
       "tests": "b1e71d06068bbc5c7111bf9366dc29464c1c349d025f2b971ccbc1d341acc727",
       "dependencies": "14bff2a5f80f439287b6961b035410bd48e99e21664e10f06a3fa041a44375ed",
       "configuration": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "instrumenter": "51dfaa0732960142a7f51ee8c0e32ed29fe10ffb2d0ca72c0bff8926b4d71e77",
+      "instrumenter": "45f38415e2469bd1f6f22fc58f6a1fc07f9b94f365d6a7aac83edd126fd896b2",
       "execution": "8ce097181eda6e39523468854f6609f48df2cae72124501283f1029e3d784744",
-      "combined": "7d5ecb11aafef0b92f1636da67ed3db7fffa43af3edc3175ed5b7cee74e774f9",
+      "combined": "49d286caed6a20cea55d409144a8a77ca6ec987e25a266b7f1df7436b6ac9fb2",
       "sourceFiles": 2,
       "testFiles": 2
     }
@@ -37,14 +37,14 @@
     "file": "evidence.raw.gz",
     "files": 6,
     "uncompressedBytes": 13398,
-    "compressedBytes": 5399
+    "compressedBytes": 5408
   },
   "timings": {
-    "initializationMs": 0.7,
+    "initializationMs": 0.1,
     "workspacePreparationMs": 0,
-    "adapterSetupMs": 9.4,
+    "adapterSetupMs": 6.3,
     "instrumentedBuildMs": 0,
-    "testCommandMs": 89.2,
+    "testCommandMs": 222.2,
     "evidencePublicationMs": 3.4
   },
   "recordedBy": "4.29.0"

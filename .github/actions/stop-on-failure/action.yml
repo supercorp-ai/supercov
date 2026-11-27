@@ -1,8 +1,13 @@
 name: Stop on a failure
 description: >-
-  A pull request's job failed: cancel every other unfinished run of the same
-  commit, then this run, so the failure is the answer at once instead of after
-  the slowest leg of every workflow.
+  A job failed: say which job and which step. In a pull request, also cancel every
+  other unfinished run of the same commit, so the failure is the answer at
+  once instead of after the slowest leg of every workflow. This job's own run
+  is left to finish: cancelling it would end this job as cancelled, not
+  failed, and hide the failure it reports. A job that failed only because a
+  download did not come whole after every retry (a setup step says so in
+  SUPERCOV_INFRA_FAILURE) fails alone: it says nothing about the commit, and
+  the other runs go on to say what they can.
 runs:
   using: composite
   steps:
@@ -11,9 +16,45 @@ runs:
         GH_TOKEN: ${{ github.token }}
         SHA: ${{ github.event.pull_request.head.sha }}
       run: |
-        echo "A job failed: stopping the other runs of $SHA."
+        # This job and the step that failed, from the run's record of its
+        # jobs: the one this runner is running. The record says a step failed
+        # a few seconds after the step ends, so it is asked again until it
+        # does, for half a minute at most.
+        for attempt in 1 2 3 4 5 6; do
+          failed=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
+              --jq ".jobs[] | select(.runner_name == \"$RUNNER_NAME\" and .status == \"in_progress\")
+                  | \"\(.name)\t\([.steps[] | select(.conclusion == \"failure\") | .name] | first // \"\")\"" \
+              2>/dev/null | head -1) || true
+          job=$(printf '%s' "$failed" | cut -f1)
+          step=$(printf '%s' "$failed" | cut -f2)
+          [ -n "$step" ] && break
+          sleep 5
+        done
+        job=${job:-$GITHUB_JOB}
+        step=${step:-a step}
+        if [ -n "${SUPERCOV_INFRA_FAILURE:-}" ]; then
+          echo "::warning title=$job failed on a download::$step failed because $SUPERCOV_INFRA_FAILURE, not because of the commit. The other runs of $SHA go on."
+          exit 0
+        fi
+        # Outside a pull request (a dispatch, a push, a release's own jobs)
+        # there is no commit of its own to stop: `gh run list --commit ""`
+        # lists the newest runs of every branch, and cancelling those stopped
+        # unrelated work. Say what failed and stop nothing.
+        if [ -z "$SHA" ]; then
+          echo "::error title=$job failed::$step failed."
+          echo "### $job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Step **$step** failed in job **$job**." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        echo "::error title=$job failed::$step failed. The other runs of $SHA are stopped; this run finishes."
+        {
+          echo "### $job failed"
+          echo
+          echo "Step **$step** failed in job **$job**. The other unfinished runs of \`$SHA\` were cancelled, so their jobs show as cancelled: this job is the one to read."
+        } >> "$GITHUB_STEP_SUMMARY"
         for id in $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$SHA" --limit 50 \
             --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId'); do
           [ "$id" = "$GITHUB_RUN_ID" ] || gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
         done
-        gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" || true
