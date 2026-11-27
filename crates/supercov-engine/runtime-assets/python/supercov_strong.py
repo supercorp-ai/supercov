@@ -1167,7 +1167,11 @@ def _only():
 
 def run_only(runner) -> None:
     """Runs one mutant's tests in this interpreter, the mutant on from its
-    start, and reports each to the driver that started it."""
+    start, and reports each to the driver that started it. A SIGTERM, as an
+    interrupt, says it heard the pass's stop."""
+    import signal
+
+    signal.signal(signal.SIGTERM, _interrupt)
     only = _only()
     os.environ.pop(PLAN_ENV, None)
     os.environ.pop(ONLY_ENV, None)
