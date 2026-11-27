@@ -355,7 +355,7 @@ pub(crate) fn run_doctests(
                 &project.workspace_root,
                 &package.manifest_dir.join(path_in_package),
             )
-            .unwrap_or_else(|_| path_in_package.to_owned());
+            .unwrap_or_else(|_| path_in_package.replace('\\', "/"));
             if case.status == "failed" && !reported.contains(&case.name) {
                 let _ = writeln!(diagnostics, "[supercov] Rust doctest failed: {}", case.name);
             }
@@ -795,8 +795,12 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
     }
 
     let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "package".into());
+    // Canonical, as the workspace root it is placed under is: on Windows
+    // Cargo's spelling (no `\\?\`, a temporary directory's short name) is
+    // not, and a doctest's file read relative to its package then.
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
+        .map(|directory| fs::canonicalize(&directory).unwrap_or(directory))
         .unwrap_or_default();
     let sequence = next_sequence(&root.join("packages"), "")?;
     let package_dir = root.join("packages").join(format!("{sequence:08}"));

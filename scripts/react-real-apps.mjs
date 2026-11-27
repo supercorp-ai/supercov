@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 const repository = resolve(import.meta.dirname, '..');
@@ -88,6 +88,27 @@ const react = clone(
 const web = join(react, 'apps/react-vite');
 run(web, join(bin, 'yarn'), ['install', '--frozen-lockfile'], 'react-install');
 copyFileSync(join(web, '.env.example'), join(web, '.env'));
+// The pinned discussions test looks for its new row by the minute of a date
+// it made before typing the discussion, while the row shows the minute the
+// mock server saved it: a run that crosses a minute fails, Supercov or not
+// (`react-baseline` on 2026-11-27, 7:05 AM expected, a row of 7:06). The row
+// is found by its title and actions with any date between them; the rest of
+// the test is unchanged.
+const discussions = join(
+  web,
+  'src/app/routes/app/discussions/__tests__/discussions.test.tsx',
+);
+const minuteBound =
+  'name: `${newDiscussion.title} ${formatDate(newDiscussion.createdAt)} View Delete Discussion`,';
+const source = readFileSync(discussions, 'utf8');
+assert.equal(source.split(minuteBound).length, 2, discussions);
+writeFileSync(
+  discussions,
+  source.replace(
+    minuteBound,
+    "name: new RegExp(`^${newDiscussion.title.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\\\S.* View Delete Discussion$`),",
+  ),
+);
 // Explicitly scope application code; generators and the mock worker are tooling.
 verify(
   web,
