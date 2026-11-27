@@ -335,6 +335,7 @@ mod tests {
             span: None,
             runnable: true,
             failed: false,
+            skipped: false,
         }
     }
 

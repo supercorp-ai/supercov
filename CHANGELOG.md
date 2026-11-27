@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `supercov runs latest mutants test` on a merged run now runs under its parts' test command. A merged run's own command is `supercov merge …`, so a Rust pass refused it ("does not expose a stable Cargo invocation") and a JavaScript pass ran `supercov merge` as its tests, every mutant an `error`. Parts that ran one command give it; Cargo parts that differ only in the test names after `--` give it without those names; parts of different commands are refused, naming them, with `-- <test command>` to give one.
+- A test the measured run skipped (`#[ignore]`, `test.skip`) is no longer counted among those that did not pass. Named after `cargo test -- --exact`, an ignored test was recorded as `passed: false` and nothing else, and when the command failed for another reason the strong pass said it "did not pass" ("12 of its 1558 test(s) did not pass … cannot gate", 10 of them ignored). Its record now says `skipped`, and the pass counts only tests that failed.
+
 ## 4.29.18
 
 **Fixed**
