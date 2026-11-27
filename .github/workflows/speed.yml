@@ -126,6 +126,22 @@ jobs:
       # Which machine this was: the ratio moves with it.
       - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
       - run: npx -y playwright@1.49.1 install-deps chromium
+      # perf, to count the instructions each run retires (scripts/speed-benchmark.mjs).
+      # The package built for the runner's own kernel is missing on some images:
+      # any linux-tools perf counts a user's instructions, so the first found is
+      # the one used.
+      - run: |
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" >/dev/null 2>&1 || true
+          sudo sysctl kernel.perf_event_paranoid=1
+          perf=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          # The benchmark counts instructions where the machine shows its
+          # counters, and CPU time where it does not.
+          if [ -n "$perf" ] && "$perf" stat -e task-clock -x , -- true; then
+            echo "SPEED_PERF=$perf" >> "$GITHUB_ENV"
+          else
+            echo "perf cannot count here: the runs are timed alone"
+          fi
       # samply, for a native profile of Supercov's own work.
       # Optional: a download that fails leaves the pass without it.
       - if: matrix.diagnose == 1
