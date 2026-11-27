@@ -6896,45 +6896,49 @@ fn insert_runtime_bindings<'a>(
         // global's name is long, a minifier keeps it, and a module that
         // named it for each helper carried it several times over.
         let shared = runtime_imports.len() > 2;
-        let mut declarators = ast.vec_with_capacity(runtime_imports.len() + 1);
-        for (position, (imported, local)) in runtime_imports.into_iter().enumerate() {
-            let annotation = typed
-                .then(|| runtime_helper_type(allocator, program.source_type, imported))
-                .flatten();
-            let object = if shared && position > 0 {
-                ast.expression_identifier(Span::default(), ast.ident(runtime_object))
-            } else {
-                global_runtime()
-            };
-            let runtime_helper =
-                Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                    Span::default(),
-                    object,
-                    ast.identifier_name(Span::default(), ast.ident(imported)),
-                    false,
-                ));
-            declarators.push(ast.variable_declarator(
-                Span::default(),
-                runtime_declaration_kind,
-                ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
-                annotation,
-                Some(runtime_helper),
-                false,
-            ));
-            if shared && position == 0 {
-                declarators.push(ast.variable_declarator(
+        // Every file binds the first helper at least: a declaration per
+        // helper, and the global's own after the first where it is shared.
+        let declarators = ast.vec_from_iter(runtime_imports.into_iter().enumerate().flat_map(
+            |(position, (imported, local))| {
+                let annotation = typed
+                    .then(|| runtime_helper_type(allocator, program.source_type, imported))
+                    .flatten();
+                let object = if shared && position > 0 {
+                    ast.expression_identifier(Span::default(), ast.ident(runtime_object))
+                } else {
+                    global_runtime()
+                };
+                let runtime_helper =
+                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                        Span::default(),
+                        object,
+                        ast.identifier_name(Span::default(), ast.ident(imported)),
+                        false,
+                    ));
+                let helper = ast.variable_declarator(
                     Span::default(),
                     runtime_declaration_kind,
-                    ast.binding_pattern_binding_identifier(
-                        Span::default(),
-                        ast.ident(runtime_object),
-                    ),
-                    NONE,
-                    Some(global_runtime()),
+                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
+                    annotation,
+                    Some(runtime_helper),
                     false,
-                ));
-            }
-        }
+                );
+                let global = (shared && position == 0).then(|| {
+                    ast.variable_declarator(
+                        Span::default(),
+                        runtime_declaration_kind,
+                        ast.binding_pattern_binding_identifier(
+                            Span::default(),
+                            ast.ident(runtime_object),
+                        ),
+                        NONE,
+                        Some(global_runtime()),
+                        false,
+                    )
+                });
+                std::iter::once(helper).chain(global)
+            },
+        ));
         program.body.insert(
             0,
             Statement::VariableDeclaration(ast.alloc_variable_declaration(
