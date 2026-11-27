@@ -1,0 +1,165 @@
+name: Mutation pipeline
+
+# What a strong pass costs and decides on the mutation corpora of every
+# language, from one binary: mutants, those decided without running a test,
+# those run, test executions and the strong pass's time
+# (benchmarks/mutation-pipeline/README.md). Dispatched with a ref; a change's
+# run is compared with its base's by `compare.mjs`.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['exp/mutation-pipeline*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutation-pipeline
+      - run: cargo build --release -p supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-bin
+          path: target/release/supercov
+          retention-days: 3
+
+  go:
+    needs: build
+    name: go ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [go-humanize, btree, golang-lru, uuid, cast]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-bin
+          path: ${{ runner.temp }}/bin
+      - run: chmod +x "$RUNNER_TEMP/bin/supercov"
+      - run: bash benchmarks/mutation-go/corpus.sh clone ${{ matrix.project }} "$RUNNER_TEMP/module"
+      - name: Measure and strong pass
+        run: |
+          out="$PWD/out"; mkdir -p "$out"
+          cd "$RUNNER_TEMP/module"
+          "$RUNNER_TEMP/bin/supercov" -- go test ./... > "$out/measure.log" 2>&1 || true
+          start=$(date +%s.%N)
+          "$RUNNER_TEMP/bin/supercov" runs latest mutants test --json > "$out/strong.json" 2> "$out/strong.log" || true
+          echo "$(date +%s.%N) - $start" | bc > "$out/strong-seconds.txt"
+          cp .supercov/runs/*/strong-mutation.json "$out/" || true
+          tail -5 "$out/strong.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: go-${{ matrix.project }}
+          path: out
+
+  python:
+    needs: build
+    name: python ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [python-slugify, cachetools, parse, humanize]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-bin
+          path: ${{ runner.temp }}/bin
+      - run: chmod +x "$RUNNER_TEMP/bin/supercov"
+      - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
+      - run: |
+          benchmarks/mutation-python/run-supercov.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" pytest "$RUNNER_TEMP/bin/supercov" out
+          python3 -c "import json; print(json.load(open('out/timing.json'))['strongSeconds'])" > out/strong-seconds.txt
+          tail -5 out/strong.log
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: python-${{ matrix.project }}
+          path: out
+
+  js:
+    needs: build
+    name: js ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 11
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [defu, scule, cookie-es, pathe, ufo]
+    env:
+      PNPM_STORE: ${{ github.workspace }}/../pnpm-store
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-bin
+          path: ${{ runner.temp }}/bin
+      - run: chmod +x "$RUNNER_TEMP/bin/supercov"
+      - name: Benchmark
+        env:
+          npm_config_store_dir: ${{ github.workspace }}/../pnpm-store
+          pnpm_config_store_dir: ${{ github.workspace }}/../pnpm-store
+          npm_config_minimum_release_age: "0"
+          pnpm_config_minimum_release_age: "0"
+          npm_config_strict_dep_builds: "false"
+          pnpm_config_strict_dep_builds: "false"
+          COREPACK_ENABLE_STRICT: "0"
+          SUPERCOV_BENCH_BINARY: ${{ runner.temp }}/bin/supercov
+        run: |
+          node benchmarks/mutation/run-job.mjs --project ${{ matrix.project }} --scenario supercov-cold --out out
+          node -e "const r=require('./out/result.json'); const p=r.phases.find(p=>p.name==='supercov-strong'); console.log(p?.wallS ?? '')" > out/strong-seconds.txt
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: js-${{ matrix.project }}
+          path: out
+
+  summary:
+    needs: [go, python, js]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/results
+          pattern: '{go,python,js}-*'
+      - run: |
+          mkdir -p summary
+          node benchmarks/mutation-pipeline/summarize.mjs "$RUNNER_TEMP/results" --verdicts summary/verdicts.jsonl | tee summary/summary.md
+          node benchmarks/mutation-pipeline/summarize.mjs "$RUNNER_TEMP/results" --json > summary/summary.json
+          cat summary/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: summary
+          path: summary
