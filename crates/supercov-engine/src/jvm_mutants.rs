@@ -3917,7 +3917,7 @@ impl Enumerator<'_> {
                 for body in named_children(node)
                     .filter(|child| matches!(child.kind(), "class_body" | "enum_class_body"))
                 {
-                    self.kotlin_class_body(body, object || static_context);
+                    self.kotlin_class_body(body, object);
                 }
                 self.classes.pop();
                 self.methods = outer_methods;
@@ -4163,6 +4163,10 @@ impl Enumerator<'_> {
         // The JVM name kotlinc gives it: `getName`, `setName`, and `isOpen`
         // and `setOpen` for a property named `isOpen`, where what follows
         // `is` is not a lowercase letter (`island` is `getIsland`).
+        let is_prefixed = property
+            .strip_prefix("is")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|next| !next.is_ascii_lowercase());
         let capitalized = property
             .chars()
             .next()
@@ -4173,11 +4177,11 @@ impl Enumerator<'_> {
                     .collect::<String>()
             })
             .unwrap_or_default();
-        let jvm_name = if getter && property.starts_with("is") && property.len() > 2 {
+        let jvm_name = if getter && is_prefixed {
             property.to_owned()
         } else if getter {
             format!("get{capitalized}")
-        } else if property.starts_with("is") && property.len() > 2 {
+        } else if is_prefixed {
             format!("set{}", &property[2..])
         } else {
             format!("set{capitalized}")
@@ -4535,6 +4539,9 @@ impl Enumerator<'_> {
                     if position + 1 == count {
                         // The value, which a call of a method that returns
                         // nothing still is a call of.
+                        if statement.kind() == "call_expression" {
+                            self.kotlin_call_statement(statement);
+                        }
                         self.kotlin_node(statement, Context::Value);
                     } else {
                         self.kotlin_statement(statement);
@@ -4550,7 +4557,8 @@ impl Enumerator<'_> {
             }
             "return_expression" => {
                 // `return@label value`: the label is an identifier too.
-                if let Some(value) = named_children(node).find(|child| child.kind() != "label") {
+                let label = node.child_by_field_name("label");
+                if let Some(value) = named_children(node).find(|child| Some(*child) != label) {
                     let labelled = text(node, self.source).starts_with("return@");
                     if !labelled {
                         self.kotlin_return(node, value);
@@ -4610,7 +4618,10 @@ impl Enumerator<'_> {
                                 part.kind() == "range_expression"
                                     || (part.kind() == "infix_expression"
                                         && named_children(part).any(|word| {
-                                            matches!(text(word, self.source), "until" | "downTo")
+                                            matches!(
+                                                text(word, self.source),
+                                                "until" | "downTo" | "step"
+                                            )
                                         }))
                             });
                             // A destructuring's names are in its own
@@ -4829,11 +4840,7 @@ impl Enumerator<'_> {
             return None;
         }
         let arguments = named_children(call).find(|child| child.kind() == "value_arguments")?;
-        let mut values = named_children(arguments);
-        let argument = values.next()?;
-        if values.next().is_some() {
-            return None;
-        }
+        let argument = named_children(arguments).next()?;
         let value = strip_parens(named_children(argument).last()?);
         (value.kind() == "binary_expression"
             && matches!(binary_operator(value, self.source).as_str(), "&&" | "||"))
@@ -4935,31 +4942,27 @@ impl Enumerator<'_> {
     }
 
     fn kotlin_infix(&mut self, node: Node, context: Context) {
-        let parts = named_children(node).collect::<Vec<_>>();
-        if parts.len() == 3 && parts[1].kind() == "identifier" {
-            let operator = text(parts[1], self.source).to_owned();
-            if matches!(
-                operator.as_str(),
-                "and" | "or" | "xor" | "shl" | "shr" | "ushr"
-            ) && let Some((to, helper)) = math_of(&operator)
-                && self.kotlin_constant_value(node).is_none()
-            {
-                let left_ty = self.kotlin_type_of(parts[0]);
-                if !matches!(left_ty, Ty::Object(_) | Ty::Str) {
-                    self.arith(node, parts[0], parts[2], &operator, to, helper);
-                }
+        // The grammar's infix call is an expression, the function's name and
+        // an expression, with any comment among them.
+        let parts = named_children(node)
+            .filter(|part| !part.kind().ends_with("comment"))
+            .collect::<Vec<_>>();
+        let (left, name, right) = (parts[0], parts[1], parts[2]);
+        let operator = text(name, self.source).to_owned();
+        // `and`, `or`, `xor`, `shl`, `shr` and `ushr` are the operators.
+        if let Some((to, helper)) = math_of(&operator)
+            && self.kotlin_constant_value(node).is_none()
+        {
+            let left_ty = self.kotlin_type_of(left);
+            if !matches!(left_ty, Ty::Object(_) | Ty::Str) {
+                self.arith(node, left, right, &operator, to, helper);
             }
-            if context == Context::Condition {
-                self.negate(node);
-            }
-            self.kotlin_node(parts[0], Context::Value);
-            self.kotlin_node(parts[2], Context::Value);
-            return;
         }
         if context == Context::Condition {
             self.negate(node);
         }
-        self.kotlin_children(node, Context::Value);
+        self.kotlin_node(left, Context::Value);
+        self.kotlin_node(right, Context::Value);
     }
 
     /// A call, navigation or index chain the grammar leads with a `!`
