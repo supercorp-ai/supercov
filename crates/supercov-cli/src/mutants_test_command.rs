@@ -975,6 +975,19 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     drop(earlier);
     narrow(&mut plan, &root, run, options)?;
     let narrowed = plan.clone();
+    // A shard's share is dealt from every mutant of the run, whatever has a
+    // verdict already: dealt from those left, as it was, a second shard run
+    // after the first against the same run took half of what the first left
+    // and left the rest without a verdict.
+    let share = options.shard.map(|(k, n)| {
+        let mut dealt = narrowed.clone();
+        dealt.keep_share(k, n);
+        dealt
+            .mutants
+            .into_iter()
+            .map(|mutant| mutant.id)
+            .collect::<BTreeSet<_>>()
+    });
     let mut saved = read_saved(run);
     // The candidates each mutant with no verdict already passed with it, in
     // passes over this run.
@@ -1042,8 +1055,8 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     }
     // A shard: the k-th of n shares of about the same cost; the decided
     // ones with the first shard.
-    if let Some((k, n)) = options.shard {
-        plan.keep_share(k, n);
+    if let Some(share) = &share {
+        plan.mutants.retain(|mutant| share.contains(&mutant.id));
     }
     // The cheapest first: a pass cut short has decided as many as it could.
     plan.cheapest_first();

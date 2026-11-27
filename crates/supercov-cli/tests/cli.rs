@@ -23646,6 +23646,47 @@ fn job_runner_project(label: &str, module: &str, tests: &[(&str, &str)]) -> Proj
 
 /// Each mutant's strong verdict in a `mutants --json` reply, by id.
 #[cfg(unix)]
+/// Shards run one after the other against the same run, on one machine,
+/// decide every mutant between them, each its own share of the whole run:
+/// the second is not dealt from what the first left.
+#[test]
+fn shards_run_in_turn_against_one_run_decide_every_mutant() {
+    let project = Project::cart("shards-in-turn");
+    project.measure(&[]);
+    let planned = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+        .json();
+    let shares = ["1/2", "2/2"].map(|shard| {
+        project
+            .supercov(&[
+                "runs", "latest", "mutants", "test", "--shard", shard, "--plan", "--json",
+            ])
+            .json()["summary"]["mutants"]
+            .as_u64()
+            .unwrap()
+    });
+    for shard in ["1/2", "2/2"] {
+        let reply = project
+            .supercov(&[
+                "runs", "latest", "mutants", "test", "--shard", shard, "--json",
+            ])
+            .json();
+        assert_eq!(reply["summary"]["error"], 0, "{shard}: {reply}");
+    }
+    let statuses = strong_statuses(&project);
+    let total = planned["summary"]["mutants"].as_u64().unwrap();
+    assert_eq!(shares.iter().sum::<u64>(), total, "{planned}");
+    assert!(
+        statuses.values().all(|status| status != "-"),
+        "{statuses:?}"
+    );
+    // A third pass has nothing left to run.
+    let again = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(again["summary"]["ran"], 0, "{again}");
+}
+
 fn strong_statuses(project: &Project) -> std::collections::BTreeMap<String, String> {
     let listed = project
         .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
