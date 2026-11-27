@@ -15,6 +15,7 @@ permissions:
 jobs:
   list:
     name: List (${{ matrix.os }})
+    if: inputs.os != 'fresh'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,7 +29,7 @@ jobs:
       - shell: bash
         run: |
           cd ~
-          { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; } 2>/dev/null | sort || true > "$RUNNER_TEMP/list-${{ matrix.os }}.txt"
+          { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; } 2>/dev/null | sort > "$RUNNER_TEMP/list-${{ matrix.os }}.txt" || true
           wc -l "$RUNNER_TEMP/list-${{ matrix.os }}.txt"
           du -sh .m2/repository .gradle/caches/modules-2 .gradle/wrapper/dists 2>/dev/null || true
       - uses: actions/upload-artifact@v4
@@ -84,20 +85,20 @@ jobs:
       - run: npm ci
       - run: cargo nextest run --workspace --no-run && cargo test --no-run -p supercov-engine --test jvm_frontend --test jvm_run && cargo build -p supercov
       - name: list 0
-        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-0-start.txt"; wc -l "$RUNNER_TEMP/fresh-0-start.txt"
+        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; true; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-0-start.txt"; wc -l "$RUNNER_TEMP/fresh-0-start.txt"
       - run: npm run test:jvm
         continue-on-error: true
         env:
           SUPERCOV_REQUIRE_JVM: "1"
       - name: list 1
-        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-1-testjvm.txt"; wc -l "$RUNNER_TEMP/fresh-1-testjvm.txt"
+        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; true; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-1-testjvm.txt"; wc -l "$RUNNER_TEMP/fresh-1-testjvm.txt"
       - run: node scripts/java-syntax-zoo.mjs || true; node scripts/mutation-report-formats.mjs || true; node scripts/assertions-integration.mjs || true
       - name: list 2
-        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-2-scripts.txt"; wc -l "$RUNNER_TEMP/fresh-2-scripts.txt"
+        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; true; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-2-scripts.txt"; wc -l "$RUNNER_TEMP/fresh-2-scripts.txt"
       - run: cargo nextest run -p supercov --no-fail-fast
         continue-on-error: true
       - name: list 3
-        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-3-cli.txt"; wc -l "$RUNNER_TEMP/fresh-3-cli.txt"
+        run: cd ~ && { find .m2/repository -type f; find .gradle/caches/modules-2 -type f; find .gradle/wrapper/dists -maxdepth 2 -mindepth 2 -type d; true; } 2>/dev/null | sort > "$RUNNER_TEMP/fresh-3-cli.txt"; wc -l "$RUNNER_TEMP/fresh-3-cli.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: fresh
