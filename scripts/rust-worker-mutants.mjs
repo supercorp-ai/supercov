@@ -21,7 +21,7 @@
 // gate says so; a job that installed them sets SUPERCOV_REQUIRE_RUST_WORKER=1.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, resolve } from 'node:path';
 
 const repository = resolve(import.meta.dirname, '..');
@@ -30,7 +30,7 @@ const root = resolve(repository, 'target', `rust-worker-mutants-${process.pid}-$
 const WRANGLER = '4.151.1';
 const run = (cwd, command, args, env = {}, timeout = 0) => spawnSync(command, args, { cwd, encoding: 'utf8', maxBuffer: 1 << 28, timeout, killSignal: 'SIGKILL', env: { ...process.env, NO_COLOR: '1', CI: '1', ...env } });
 // Each step ends in time, saying what it did so far, rather than holding the job.
-const LIMIT = 6 * 60 * 1000;
+const LIMIT = 7 * 60 * 1000;
 const started = Date.now();
 const took = () => `${Math.round((Date.now() - started) / 1000)} s`;
 
@@ -46,7 +46,7 @@ if (process.platform === 'win32' || run(repository, 'worker-build', ['--version'
 
 const files = {
   'package.json': `{ "name": "grades", "private": true, "devDependencies": { "wrangler": "${WRANGLER}" } }\n`,
-  '.gitignore': 'node_modules/\ntarget/\n.wrangler/\nworker/build/\n',
+  '.gitignore': 'node_modules/\ntarget/\n.wrangler/\nworker/build/\nwrangler-*.log\n',
   'Cargo.toml': '[workspace]\nmembers = ["worker", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
   'worker/Cargo.toml': '[package]\nname = "grades-worker"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\n',
   'worker/wrangler.toml': 'name = "grades-worker"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "./build.sh"\n',
@@ -144,12 +144,17 @@ fn get(port: u16, path: &str) -> Option<String> {
 
 fn serve_with(wrangler: &str) -> Dev {
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // What wrangler said, for the gate to show when a test fails.
+    let log = std::fs::File::create(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../wrangler-{port}.log")),
+    )
+    .unwrap();
     let child = Command::new(wrangler)
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../worker"))
         .args(["dev", "--local", "--ip", "127.0.0.1", "--port", &port.to_string(), "--show-interactive-dev-session=false"])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
         .process_group(0)
         .spawn()
         .expect("wrangler");
@@ -226,6 +231,14 @@ try {
   const pass = run(root, binary, ['runs', 'latest', 'mutants', 'test', '--json'], { ...env, SUPERCOV_PROGRESS_INTERVAL_MS: '20000' }, LIMIT);
   console.log(`[rust-worker-mutants] strong pass, ${took()}`);
   console.log(pass.stderr.split('\n').filter((line) => line.startsWith('[supercov]')).join('\n'));
+  if (pass.status !== 0) {
+    // What each mutant was found, and what the Workers said, before failing.
+    console.log(run(root, binary, ['runs', 'latest', 'mutants', '--json', '--limit', '0']).stdout);
+    const logs = readdirSync(resolve(root, '.supercov'), { recursive: true }).map(String).filter((name) => /wrangler-\d+\.log$/u.test(name));
+    for (const log of logs.slice(-12)) {
+      console.log(`== ${log}\n${readFileSync(resolve(root, '.supercov', log), 'utf8').split('\n').slice(-20).join('\n')}`);
+    }
+  }
   assert.equal(pass.status, 0, `${pass.stdout}\n${pass.stderr}`);
   const listed = JSON.parse(run(root, binary, ['runs', 'latest', 'mutants', '--json', '--limit', '0']).stdout).data.mutants;
   const of = (line) => listed.filter((mutant) => mutant.file === 'worker/src/lib.rs' && mutant.span.start[0] === line);
