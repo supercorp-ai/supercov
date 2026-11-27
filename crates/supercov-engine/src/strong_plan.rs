@@ -2691,6 +2691,15 @@ mod tests {
         assert_eq!(costs["decided"], 0);
         assert_eq!(costs["fileless"], COPY_START_MS + 5);
         assert_eq!(costs["gone-file"], COPY_START_MS);
+        // A plan with no test: its mutants are decided and cost nothing; one
+        // that runs a file whole still starts a copy of it.
+        let testless = costed(
+            &[],
+            &[("decided", None, &[]), ("whole", Some(&[]), &["a.test.js"])],
+        )
+        .estimated_ms();
+        assert_eq!(testless["decided"], 0);
+        assert_eq!(testless["whole"], COPY_START_MS);
         plan.cheapest_first();
         let order = plan
             .mutants
