@@ -2203,14 +2203,14 @@ fn kill_tree(child: &mut std::process::Child) {
     let descendants = crate::process_supervision::descendant_process_tree(child.id());
     kill_group(child);
     // The child is among them, ended again with its group: harmless.
-    for process in descendants {
+    descendants.iter().for_each(|process| {
         // SAFETY: kill(2) of a pid and of the group it may lead; a process
         // gone since the listing makes it fail harmlessly.
         unsafe {
             libc::kill(-(process.pid as i32), libc::SIGKILL);
             libc::kill(process.pid as i32, libc::SIGKILL);
         }
-    }
+    });
 }
 
 #[cfg(not(unix))]
