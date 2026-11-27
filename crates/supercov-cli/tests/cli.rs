@@ -5496,9 +5496,7 @@ fn bun_source_imports_bootstrap_before_probes_even_with_shadowed_host_names() {
         .succeeds();
     for file in ["src/leaf.mjs", "src/common.cjs", "src/middle.ts"] {
         let source = kept_workspace_source(&project, file);
-        let loader = source
-            .find("new Function(\"stack\", \"specifier\"")
-            .unwrap();
+        let loader = source.find("new Function(\"s\", \"p\"").unwrap();
         let fallback = source
             .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
             .unwrap();
@@ -5565,7 +5563,7 @@ fn bun_bootstraps_sources_with_nested_frontend_aliases_and_preloads() {
                 .chain((0..64).map(|index| format!("src/core/runtime/clock{index}.ts")))
             {
                 let code = kept_workspace_source(&project, &file);
-                let loader = code.find("new Function(\"stack\", \"specifier\"").unwrap_or_else(|| panic!("{file} has no source bootstrap (browser={browser_config}, explicit roots={explicit_roots})"));
+                let loader = code.find("new Function(\"s\", \"p\"").unwrap_or_else(|| panic!("{file} has no source bootstrap (browser={browser_config}, explicit roots={explicit_roots})"));
                 let helper = code
                     .find(" = globalThis.__SUPERCOV_DIRECT_RUNTIME__.mcdcBegin")
                     .unwrap();

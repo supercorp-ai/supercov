@@ -71,6 +71,10 @@ function installRuntime(target) {
         hitEpochs: new Uint32Array(definition.points),
         // What a statement probe calls, by place, when its point is new.
         hit() {},
+        // What a decision's outcome calls, as mcdcEndV2 below records it.
+        end(index, encoded, value) {
+          outcomes.push(`${index} ${encoded} ${Boolean(value)}`);
+        },
         // What the end of a module's top level calls.
         loaded() {},
         decisionEpochs: definition.decisionWidths.map((width) =>
@@ -398,7 +402,7 @@ async function runBrowser(name) {
               mcdcBegin(id, width) { return { id, values: Array(width).fill(null) }; },
               mcdcCondition(frame, conditionIndex, value) { frame.values[conditionIndex] = Boolean(value); return value; },
               mcdcEnd(_frame, value) { return value; },
-              registerProbeV2(definition) { return { ...definition, clock: { e: 1, fast: true }, hitEpochs: new Uint32Array(definition.points), hit() {}, loaded() {}, decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
+              registerProbeV2(definition) { return { ...definition, clock: { e: 1, fast: true }, hitEpochs: new Uint32Array(definition.points), hit() {}, end() {}, loaded() {}, decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
               coverageHitV2() {},
               renderedValueV2(_file, _index, value) { return value; },
               mcdcEndV2(_file, _decisionIndex, _encoded, value) { return value; },
