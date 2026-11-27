@@ -12,7 +12,7 @@ const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
 // A strong pass's driver over a runner whose tests do what `rules` says
 // (fixtures/strong-jobs-runner.mjs), each mutant's verdict by id.
-async function pass({ tests, mutants, listed, rules, files, workers = 4 }) {
+async function pass({ tests, mutants, listed, rules, files, workers = 4, aloneGraceMs }) {
     const root = mkdtempSync(join(tmpdir(), "supercov-strong-jobs-"));
     try {
         mkdirSync(join(root, ".supercov/frontend-evidence"), { recursive: true });
@@ -28,6 +28,7 @@ async function pass({ tests, mutants, listed, rules, files, workers = 4 }) {
             environment: { ...process.env, FAKE_SUITE: join(root, "suite.json") },
             graceMs: 1_500,
             baselineGraceMs: 1_500,
+            ...(aloneGraceMs === undefined ? {} : { aloneGraceMs }),
         });
         const records = readFileSync(resultsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
         return {
@@ -163,12 +164,16 @@ test("jobs wait their turn by priority, first come first served among equals", a
 // where each job builds Rust compiled to wasm): side by side, the last jobs
 // wait past a limit set by a baseline that ran alone. Each runs again alone,
 // and the verdicts are the ones a pass that ran them one at a time reaches.
+// Side by side, the limit's grace is short, so the waits pass it; alone, it
+// is the pass's own 10 s: with every test file of the suite running at once,
+// a 1 s run alone took more than 3 x 1 s + 1.5 s, and four survivors were
+// timeouts.
 test("a job past its limit beside others runs again alone before it is a timeout", async () => {
     const tests = [test_("w1", "t/w.test.js"), test_("w2", "t/w.test.js")];
     const mutants = Array.from({ length: 8 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }));
     const listed = mutants.map(({ id }) => ({ id }));
     const rules = { "*": { w1: "locked" }, "src/a.js#0": { w1: "locked,fail" }, "src/a.js#7": { w1: "locked,fail" } };
-    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 8 });
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 8, aloneGraceMs: 10_000 });
     const status = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id, verdict.status]));
     assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "survived", m3: "survived", m4: "survived", m5: "survived", m6: "survived", m7: "killed" }, JSON.stringify(summary));
     assert.ok(summary.alone >= 1, JSON.stringify(summary));
