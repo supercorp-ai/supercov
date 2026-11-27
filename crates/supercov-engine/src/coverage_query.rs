@@ -2857,9 +2857,65 @@ fn diff_snapshot(
         Some(selected) if selected.is_empty() => [0.0; 3],
         Some(_) => of(index.projection(view, kind, runner)?.summary),
     };
-    let picks = |tests: &[String]| {
-        selected.is_none_or(|selected| tests.iter().any(|test| selected.contains(test)))
+    // Two whole runs are compared by what each covered: which tests
+    // covered it is decoded only to tell which of them a filter picks.
+    let Some(selected) = selected else {
+        let lines = index
+            .covered_line_places(view)?
+            .into_iter()
+            .map(|(file, line)| format!("{file}:{line}"))
+            .collect();
+        let branches = index
+            // fault-site: coverage-query.diff-snapshot.hit-metadata
+            .reached_branch_outcomes(view)?
+            .into_iter()
+            .map(|outcome| {
+                // The index Supercov wrote names each branch outcome's branch.
+                let parent = outcome
+                    .parent_id
+                    .expect("a branch outcome names its branch");
+                (
+                    format!("{parent}:{}", outcome.id),
+                    format!(
+                        "{}:{} {}",
+                        outcome.file,
+                        outcome.line,
+                        outcome.alternative.unwrap_or_default()
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mcdc = index
+            .decision_conditions(view)?
+            .into_iter()
+            .flat_map(|decision| {
+                let meta = decision.meta;
+                decision
+                    .conditions
+                    .into_iter()
+                    .filter(|condition| condition.covered)
+                    .map(move |condition| {
+                        (
+                            format!("{}:c{}", meta.id, condition.index),
+                            format!(
+                                "{}:{} C{} {}",
+                                meta.file,
+                                meta.line,
+                                condition.index + 1,
+                                condition.source
+                            ),
+                        )
+                    })
+            })
+            .collect();
+        return Ok(DiffSnapshot {
+            percentages,
+            lines,
+            branches,
+            mcdc,
+        });
     };
+    let picks = |tests: &[String]| tests.iter().any(|test| selected.contains(test));
     let lines = index
         .lines(view)?
         .into_iter()
@@ -2867,7 +2923,6 @@ fn diff_snapshot(
         .map(|line| format!("{}:{}", line.file, line.line))
         .collect();
     let branches = index
-        // fault-site: coverage-query.diff-snapshot.hit-metadata
         .hit_metadata(view)?
         .into_iter()
         .filter(|metadata| {
@@ -2894,7 +2949,7 @@ fn diff_snapshot(
         .into_iter()
         .flat_map(|decision| {
             // Under a filter, the pairs the picked tests' own vectors show.
-            let shown = selected.map(|selected| {
+            let shown = {
                 let vectors = decision
                     .vector_observations
                     .iter()
@@ -2912,14 +2967,11 @@ fn diff_snapshot(
                 )
                 .map(|witnesses| witnesses.iter().map(Option::is_some).collect::<Vec<_>>())
                 .unwrap_or_default()
-            });
+            };
             decision
                 .conditions
                 .into_iter()
-                .filter(move |condition| match &shown {
-                    Some(shown) => shown.get(condition.index).copied().unwrap_or(false),
-                    None => condition.covered,
-                })
+                .filter(move |condition| shown.get(condition.index).copied().unwrap_or(false))
                 .map(move |condition| {
                     (
                         format!("{}:c{}", decision.meta.id, condition.index),
