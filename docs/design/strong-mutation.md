@@ -2229,6 +2229,20 @@ can run:
   (`export * as`), a top-level code change, a changed file no parser reads,
   a Python or Ruby file whose code changed (a decorator registers a function
   no code names), a directory a test loads whole.
+- **A Rust test** (libtest or nextest; a doctest, whose code is a comment
+  of a source file, keeps its verdict only where no code changed): its test binary links every crate it depends on, so every
+  Rust file of the checkout counts, and any other file that changed is
+  read whole. It runs from its own function, not its file, and reaches what
+  that names, and what that names in turn, as above, with what Rust calls
+  unnamed: a method of a trait implementation is reached by its trait's or
+  its type's name too (an operator, `Drop`, `Display` through `format!`,
+  `Iterator` through `for`); an implementation's or a trait's header names
+  nothing; an item that carries an attribute other than the compiler's own
+  (`#[no_mangle]`, a procedural macro's) is reached with what holds it; a
+  file whose macros build names (`paste!`, `concat_idents!`) gives the bound
+  up; and so does any change to a file's top level, a new file, or a
+  function added (it may shadow what a glob import brought in). The details
+  and the fixture are in `docs/design/rust-mutation.md` ("After an edit").
 - **Any other test**: the earlier run found it unaffected, and every test of
   its file (they share the file's state), and no code changed but tests'.
 

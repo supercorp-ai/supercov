@@ -271,7 +271,7 @@ Usage: supercov mutants [options] [-- <test command>]
 
 Mutation-tests the project: lists the mutants of every source the tests ran,
 as each language's established tool makes them (StrykerJS for JavaScript and
-TypeScript; in preview, mutmut for Python, cargo-mutants for Rust, Gremlins
+TypeScript, cargo-mutants for Rust; in preview, mutmut for Python, Gremlins
 for Go and mutant for Ruby), runs each against only the tests that run its
 code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
@@ -2220,7 +2220,7 @@ impl Progress {
                     // ends after it (a poll earlier, for a signal the
                     // supervisor heard first).
                     let _ = std::fs::write(
-                        results.with_file_name(STOPPED_AT),
+                        results.with_file_name(supercov_engine::strong_driver::STOPPED_AT),
                         now_ms()
                             .saturating_sub(SAVE_INTERVAL.as_millis() as u64)
                             .to_string(),
@@ -2248,10 +2248,6 @@ impl Drop for Progress {
         let _ = self.thread.take().map(std::thread::JoinHandle::join);
     }
 }
-
-/// The file beside a pass's results that says when the pass began to stop,
-/// in milliseconds since the epoch (`playwrightStrongReporter.mjs` reads it).
-const STOPPED_AT: &str = "stopped-at";
 
 /// Now, in milliseconds since the epoch.
 fn now_ms() -> u64 {
@@ -2870,6 +2866,20 @@ fn run_language(
     // The driver's time limit for an attempt goes with the plan it runs.
     let mut written = serde_json::to_value(&pass_plan).expect("plain data serializes");
     written["timeoutFactor"] = json!(factor);
+    // A Rust mutant the plan decided without running (no test reaches it,
+    // or none infects it) may not compile, which cargo-mutants reports as
+    // `unviable`: the driver switches it into its build too, to find out.
+    // (Another language's decided mutant is in no Rust file's list, and is
+    // left as it is.)
+    if language == supercov_engine::mutant_list::RUST {
+        written["decided"] = serde_json::to_value(
+            plan.mutants
+                .iter()
+                .filter(|mutant| mutant.decided.is_some())
+                .collect::<Vec<_>>(),
+        )
+        .expect("plain data serializes");
+    }
     // fault-site: mutants-test-command.run-language
     supercov_engine::fault_fs::write(
         &plan_path,
@@ -3452,14 +3462,33 @@ impl Reach {
             .flat_map(|mutant| &mutant.candidates)
             .filter_map(|candidate| tests[candidate.test].file.clone())
             .collect::<BTreeSet<_>>();
+        // A Rust test binary links every crate it depends on: what it loads
+        // is every Rust file, and any file that changed, which reaching
+        // reads by names where it is Rust and reads whole otherwise.
+        let rust_loads = supercov_engine::test_loads::Loads {
+            files: self
+                .program
+                .as_ref()
+                .map(|program| program.recorded_files())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|file| file.ends_with(".rs"))
+                .chain(self.changed.iter().cloned())
+                .collect(),
+            ..Default::default()
+        };
         self.loads = files
             .into_iter()
             .map(|file| {
-                let loads = checkout.loads(
-                    &BTreeSet::from([file.clone()]),
-                    ran.runners.as_ref(),
-                    &configurations,
-                );
+                let loads = if file.ends_with(".rs") {
+                    Some(rust_loads.clone())
+                } else {
+                    checkout.loads(
+                        &BTreeSet::from([file.clone()]),
+                        ran.runners.as_ref(),
+                        &configurations,
+                    )
+                };
                 (file, loads)
             })
             .collect();
@@ -3495,23 +3524,38 @@ impl Reach {
             .get(&key.0)
             .and_then(Option::as_ref)
             .filter(|loads| {
+                // A doctest runs the code its comment holds, which no test
+                // file's names say.
                 test.runner != "playwright"
+                    && test.runner != "rustdoc"
                     && mutant.server_wide.is_none()
                     && !self.served.contains(&test.name)
                     && loads.open.is_none()
                     && loads.directories.is_empty()
                     && loads.includes(&mutant.file)
             });
-        let reaches = match (bounded, &self.program) {
-            (Some(loads), Some(program)) => program.reaches_change(&key.0, &loads.files),
-            _ => {
-                affected
-                    || !self
-                        .code_changed
-                        .iter()
-                        .all(|file| self.test_files.contains(file))
-            }
-        };
+        // A doctest's code is a comment of a source file, which the test
+        // files hold: it runs as it did only where no code changed.
+        let doctest_reaches = test.runner == "rustdoc" && !self.code_changed.is_empty();
+        let reaches = doctest_reaches
+            || match (bounded, &self.program) {
+                // A Rust test runs from its own function, named by its path in
+                // its file.
+                (Some(loads), Some(program)) => program.reaches_change_from(
+                    &key.0,
+                    key.1
+                        .strip_prefix(&format!("{}::", key.0))
+                        .filter(|_| key.0.ends_with(".rs")),
+                    &loads.files,
+                ),
+                _ => {
+                    affected
+                        || !self
+                            .code_changed
+                            .iter()
+                            .all(|file| self.test_files.contains(file))
+                }
+            };
         match (reaches, affected) {
             (false, _) => Ok(()),
             (true, true) => Err(TEST_REACHED),

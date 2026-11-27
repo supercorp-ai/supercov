@@ -20,6 +20,11 @@ pub const STRONG_FILES: &str = "SUPERCOV_STRONG_FILES";
 pub const STRONG_PLAN: &str = "SUPERCOV_STRONG_PLAN";
 /// Where the driver appends its verdicts (`results.jsonl`).
 pub const STRONG_RESULTS: &str = "SUPERCOV_STRONG_RESULTS";
+/// The file beside a pass's results that says when the pass began to stop,
+/// in milliseconds since the epoch: written before the pass is signalled,
+/// for its budget or a signal alike. A driver judges nothing a stop cut
+/// short (`playwrightStrongReporter.mjs` and the Rust driver read it).
+pub const STOPPED_AT: &str = "stopped-at";
 /// `<file>#<index>`: the mutant switched on in a process from its start;
 /// `-` or unset for none. `file` is the mutant's file as `mutants.json`
 /// keys it, `index` its place in that file's list.

@@ -22,6 +22,17 @@
 //! declaration whose name is not an identifier. A Python or Ruby file, whose
 //! code is reached in more ways than its names say (decorators that register
 //! a function, `send`), is reached whole where its code changed.
+//!
+//! A Rust test runs in a test binary that links every crate it depends on,
+//! so every Rust file counts, and code there runs only where it is reached
+//! by name, as above, with what Rust calls unnamed (`docs/design/rust-mutation.md`,
+//! "After an edit"): a method of a trait implementation runs wherever its
+//! type or its trait is named (an operator, `Drop`, `Display` through
+//! `format!`, `Iterator` through `for`), not only its own name; a
+//! declaration an attribute may hand to code that never names it
+//! (`#[no_mangle]`, a procedural macro's attribute) runs wherever what
+//! holds it does; and a file whose macros build names (`paste!`'s `[<..>]`,
+//! `concat_idents!`) gives the bound up.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,6 +57,14 @@ struct Node {
     always: bool,
     /// No runtime presence: a type.
     inert: bool,
+    /// Reached only by a name even where its parent is reached: a Rust
+    /// item of a module, an implementation or a trait.
+    free: bool,
+    /// Other names that reach it: the trait and the type of the Rust trait
+    /// implementation it is a method of.
+    keys: BTreeSet<String>,
+    /// Its name path in the file (`tests::it_works`).
+    path: String,
 }
 
 /// One file of what a test loads, as it is now against the earlier run.
@@ -60,6 +79,8 @@ enum File {
         /// It exports a whole module as one value (`export * as all`),
         /// which its importers read under a name of their own.
         exports_module: bool,
+        /// Its macros build names no text holds (`paste!`, `concat_idents!`).
+        builds_names: bool,
     },
     /// Its code changed in a way only running it whole can bound: its top
     /// level, a Python or Ruby file, a file no parser reads.
@@ -78,9 +99,121 @@ pub struct Program {
 
 /// Whether `file` holds code reaching reads by names.
 fn by_names(file: &str) -> bool {
-    [".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"]
-        .iter()
-        .any(|extension| file.ends_with(extension))
+    [
+        ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".rs",
+    ]
+    .iter()
+    .any(|extension| file.ends_with(extension))
+}
+
+/// Whether `file` is Rust.
+fn rust(file: &str) -> bool {
+    file.ends_with(".rs")
+}
+
+/// The attributes that never hand what they sit on to code that does not
+/// name it: what they do is the compiler's, or a derive's, whose code calls
+/// the methods of the types the item names.
+const PLAIN_ATTRIBUTES: &[&str] = &[
+    "allow",
+    "automatically_derived",
+    "cold",
+    "deny",
+    "deprecated",
+    "derive",
+    "diagnostic",
+    "doc",
+    "expect",
+    "forbid",
+    "ignore",
+    "inline",
+    "must_use",
+    "non_exhaustive",
+    "repr",
+    "rustfmt",
+    "clippy",
+    "should_panic",
+    "test",
+    "track_caller",
+    "warn",
+    "cfg",
+];
+
+/// The paths of the attributes in a Rust item's own text (`#[a::b(..)]`
+/// gives `a::b`), inner ones (`#![..]`) included.
+fn rust_attributes(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('#') {
+        rest = &rest[at + 1..];
+        let after = rest.trim_start_matches('!').trim_start();
+        let Some(inside) = after.strip_prefix('[') else {
+            continue;
+        };
+        let path = inside
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+            .collect::<String>();
+        found.push(path);
+    }
+    found
+}
+
+/// The names that reach a method of the Rust implementation whose header
+/// (`impl<T: Bound> Trait for Type<T> where ..`) is `header`: the trait's
+/// and the type's, where it implements a trait; none for an inherent one.
+fn implementation_keys(header: &str) -> BTreeSet<String> {
+    let header = header
+        .trim_start()
+        .strip_prefix("unsafe")
+        .unwrap_or(header)
+        .trim_start();
+    let Some(rest) = header.strip_prefix("impl") else {
+        return BTreeSet::new();
+    };
+    // The generics after `impl`, and their parameters' names, which name
+    // no type of the program.
+    let mut depth = 0usize;
+    let mut parameters = BTreeSet::new();
+    let mut part = String::new();
+    let mut end = 0;
+    for (at, c) in rest.char_indices() {
+        if depth == 0 && !c.is_whitespace() && c != '<' {
+            break;
+        }
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ => {}
+        }
+        if depth == 1 && matches!(c, '<' | ',') || depth == 0 {
+            let name = part
+                .trim()
+                .trim_start_matches("const ")
+                .trim_start_matches('\'')
+                .split(|c: char| !word(c))
+                .next();
+            parameters.extend(name.filter(|name| !name.is_empty()).map(str::to_owned));
+            part.clear();
+        } else {
+            part.push(c);
+        }
+        end = at + c.len_utf8();
+    }
+    let rest = &rest[end..];
+    let rest = rest.split(" where ").next().unwrap_or(rest);
+    if !rest.contains(" for ") {
+        return BTreeSet::new();
+    }
+    identifiers(rest)
+        .0
+        .into_iter()
+        .filter(|name| {
+            !["for", "dyn", "mut", "const", "impl"].contains(&name.as_str())
+                && !parameters.contains(name)
+        })
+        .collect()
 }
 
 /// Whether `c` can be part of an identifier.
@@ -176,7 +309,7 @@ fn declared(before: &str) -> bool {
 }
 
 /// A file's declarations, as reaching reads them, from its source.
-fn nodes(code: &Code, source: &str) -> Vec<Node> {
+fn nodes(code: &Code, source: &str, rust: bool) -> Vec<Node> {
     let starts = crate::source_manifest::line_starts(source);
     let offset = |line: usize, column: usize| {
         starts
@@ -221,6 +354,9 @@ fn nodes(code: &Code, source: &str) -> Vec<Node> {
             // value an expression holds (`export default function`, an
             // argument).
             let top = unit.parent == Some(0);
+            if rust {
+                return rust_node(code, index, &own, names, bare);
+            }
             Node {
                 name: own_name(&unit.path),
                 parent: unit.parent,
@@ -228,9 +364,67 @@ fn nodes(code: &Code, source: &str) -> Vec<Node> {
                 bare,
                 always: top && (unit.kind == "method" || !declared(&source[..start])),
                 inert: unit.inert,
+                free: false,
+                keys: BTreeSet::new(),
+                path: unit.path.clone(),
             }
         })
         .collect()
+}
+
+/// A Rust declaration, as reaching reads it. Modules, implementations and
+/// traits hold items, and run nothing themselves: each is reached, and an
+/// item in it only by its name, as an item of the file is. A function
+/// nested in a function runs where that function does. A method of a trait
+/// implementation is reached by its trait's or its type's name too, since
+/// the language calls it unnamed. An item an attribute may hand to code that
+/// never names it is reached with what holds it.
+fn rust_node(
+    code: &Code,
+    index: usize,
+    own: &str,
+    names: BTreeSet<String>,
+    bare: BTreeSet<String>,
+) -> Node {
+    let unit = &code.units[index];
+    let holder = unit.parent.map(|parent| code.units[parent].kind.as_str());
+    let container = matches!(unit.kind.as_str(), "mod" | "impl" | "trait");
+    let attributes = rust_attributes(own);
+    let unnamed = attributes.iter().any(|path| {
+        let first = path.split("::").next().unwrap_or_default();
+        !PLAIN_ATTRIBUTES.contains(&first)
+    });
+    // An implementation's or a trait's header runs nothing: the types and
+    // traits it names are what reach its methods, not what it reaches.
+    let names = if matches!(unit.kind.as_str(), "impl" | "trait") {
+        BTreeSet::new()
+    } else {
+        names
+    };
+    let keys = match (holder, unit.parent) {
+        (Some("impl"), Some(parent)) => {
+            // The implementation's path is its header after the path of the
+            // module it is in (`tests::impl<T> W<T>`).
+            let path = &code.units[parent].path;
+            let module = code.units[parent]
+                .parent
+                .map(|module| format!("{}::", code.units[module].path))
+                .unwrap_or_default();
+            implementation_keys(path.strip_prefix(module.as_str()).unwrap_or(path))
+        }
+        _ => BTreeSet::new(),
+    };
+    Node {
+        name: own_name(&unit.path),
+        parent: unit.parent,
+        names,
+        bare,
+        always: index == 0 || container || unnamed,
+        inert: unit.inert,
+        free: holder.is_some_and(|holder| matches!(holder, "mod" | "impl" | "trait")),
+        keys,
+        path: unit.path.clone(),
+    }
 }
 
 impl Program {
@@ -241,6 +435,11 @@ impl Program {
             files: RefCell::new(BTreeMap::new()),
             reaches: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    /// The files the earlier run recorded.
+    pub fn recorded_files(&self) -> Vec<String> {
+        self.recorded.keys().cloned().collect()
     }
 
     /// One file now, against the earlier run's record: read once.
@@ -272,20 +471,38 @@ impl Program {
         let Some(now) = now else {
             return if same { File::Inert } else { File::Whole };
         };
-        // Comments name nothing that runs.
-        let nodes = nodes(
-            &now,
-            &crate::source_units::javascript_without_comments(file, &source)
-                .expect("`code` parsed it"),
-        );
-        let modules = module_bindings(&source);
-        let exports_module = source.contains("export * as ");
+        // Comments name nothing that runs. A Rust file's are kept: a name
+        // they hold only grows what is reached.
+        let nodes = if rust(file) {
+            nodes(&now, &source, true)
+        } else {
+            nodes(
+                &now,
+                &crate::source_units::javascript_without_comments(file, &source)
+                    .expect("`code` parsed it"),
+                false,
+            )
+        };
+        let (modules, exports_module, builds_names) = if rust(file) {
+            (
+                BTreeSet::new(),
+                false,
+                source.contains("[<") || source.contains("concat_idents!"),
+            )
+        } else {
+            (
+                module_bindings(&source),
+                source.contains("export * as "),
+                false,
+            )
+        };
         if same {
             return File::Read {
                 nodes,
                 changed: BTreeSet::new(),
                 modules,
                 exports_module,
+                builds_names,
             };
         }
         let Some(before) = before.and_then(|before| before.code.as_ref()) else {
@@ -297,6 +514,7 @@ impl Program {
                 changed: BTreeSet::new(),
                 modules,
                 exports_module,
+                builds_names,
             };
         }
         let diff = before.diff(&now);
@@ -328,6 +546,7 @@ impl Program {
             changed,
             modules,
             exports_module,
+            builds_names,
         }
     }
 
@@ -335,15 +554,28 @@ impl Program {
     /// switched on, code that changed since the earlier run. Read once per
     /// test file.
     pub fn reaches_change(&self, entry: &str, files: &BTreeSet<String>) -> bool {
-        if let Some(reaches) = self.reaches.borrow().get(entry) {
+        self.reaches_change_from(entry, None, files)
+    }
+
+    /// [`Self::reaches_change`] for the test named `test` (its name path in
+    /// `entry`, `tests::it_works`): a Rust test binary runs the test's own
+    /// function, not every item of its file. Read once per test.
+    pub fn reaches_change_from(
+        &self,
+        entry: &str,
+        test: Option<&str>,
+        files: &BTreeSet<String>,
+    ) -> bool {
+        let key = format!("{entry}\0{}", test.unwrap_or_default());
+        if let Some(reaches) = self.reaches.borrow().get(&key) {
             return *reaches;
         }
-        let reaches = self.reach(entry, files);
-        self.reaches.borrow_mut().insert(entry.to_owned(), reaches);
+        let reaches = self.reach(entry, test, files);
+        self.reaches.borrow_mut().insert(key, reaches);
         reaches
     }
 
-    fn reach(&self, entry: &str, files: &BTreeSet<String>) -> bool {
+    fn reach(&self, entry: &str, test: Option<&str>, files: &BTreeSet<String>) -> bool {
         let read = files
             .iter()
             .map(|file| (file.as_str(), self.file(file)))
@@ -356,10 +588,13 @@ impl Program {
                 File::Read {
                     changed,
                     exports_module,
+                    builds_names,
                     ..
                 } => {
                     changes |= !changed.is_empty();
-                    exported_whole |= *exports_module;
+                    // Names a macro builds are read by no one: as a module
+                    // exported whole, the bound is given up.
+                    exported_whole |= *exports_module || *builds_names;
                 }
                 File::Inert => {}
             }
@@ -375,8 +610,15 @@ impl Program {
             .iter()
             .map(|(file, read)| match read.as_ref() {
                 File::Read { nodes, .. } => {
-                    let all = *file == entry;
-                    (0..nodes.len()).map(|index| all || index == 0).collect()
+                    // A test whose own declaration is found runs from it
+                    // (a Rust test); otherwise its whole file runs.
+                    let own = test
+                        .filter(|_| *file == entry)
+                        .and_then(|test| nodes.iter().position(|node| node.path == test));
+                    let all = *file == entry && own.is_none();
+                    (0..nodes.len())
+                        .map(|index| all || index == 0 || Some(index) == own)
+                        .collect()
                 }
                 _ => Vec::new(),
             })
@@ -397,12 +639,13 @@ impl Program {
                             // Nested in code that runs, or named by it.
                             let reachable = !node.inert
                                 && reached[parent]
-                                && (parent != 0
+                                && ((parent != 0 && !node.free)
                                     || node.always
                                     || node
                                         .name
                                         .as_deref()
-                                        .is_none_or(|name| named.contains(name)));
+                                        .is_none_or(|name| named.contains(name))
+                                    || node.keys.iter().any(|key| named.contains(key.as_str())));
                             if !reachable {
                                 return;
                             }
@@ -554,6 +797,146 @@ mod tests {
         assert!(checkout.reaches(&recorded, "test/cart.test.js", &["src/new.js"]));
         let unrecorded = checkout.recorded(&["src/cart.js"]);
         assert!(checkout.reaches(&unrecorded, "test/cart.test.js", &files));
+    }
+
+    const SHOP: &str = "pub fn refund(sum: u32) -> u32 {\n    if sum > 1000 {\n        audit(sum)\n    } else {\n        sum\n    }\n}\n\npub fn audit(sum: u32) -> u32 {\n    sum\n}\n\npub fn double(v: u32) -> u32 {\n    v * 2\n}\n\npub struct Money(pub u32);\n\nimpl std::fmt::Display for Money {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"${}\", self.0)\n    }\n}\n\nimpl Money {\n    pub fn cents(&self) -> u32 {\n        self.0 * 100\n    }\n}\n\npub fn label(m: &Money) -> String {\n    format!(\"{m}\")\n}\n";
+    const SHOP_TESTS: &str = "use shop::*;\n\n#[test]\nfn refunds() {\n    assert_eq!(refund(20), 20);\n}\n\n#[test]\nfn labels() {\n    assert_eq!(label(&Money(3)), \"$3\");\n}\n";
+
+    /// A Rust test runs from its own function: what that names, and what
+    /// that names in turn, with a trait implementation's methods reached by
+    /// their type's name (`format!` calls `Display::fmt` unnamed), and an
+    /// item an attribute may hand to other code reached with what holds it.
+    #[test]
+    fn a_rust_test_reaches_what_its_function_names() {
+        let checkout = Checkout::new("rust", &[("src/lib.rs", SHOP), ("tests/t.rs", SHOP_TESTS)]);
+        let files = ["src/lib.rs", "tests/t.rs"];
+        let recorded = checkout.recorded(&files);
+        let reaches = |test: &str| {
+            Program::new(checkout.root.clone(), recorded.clone()).reaches_change_from(
+                "tests/t.rs",
+                Some(test),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        };
+        assert!(!reaches("refunds"));
+        // `audit`, which `refund` names.
+        checkout.write(
+            "src/lib.rs",
+            &SHOP.replacen("    sum\n}", "    sum + 1\n}", 1),
+        );
+        assert!(reaches("refunds"));
+        assert!(!reaches("labels"));
+        // `double`: nothing either test runs names it.
+        checkout.write("src/lib.rs", &SHOP.replace("v * 2", "2 * v"));
+        assert!(!reaches("refunds"));
+        assert!(!reaches("labels"));
+        // `Display::fmt`, never named: `labels` names `Money`.
+        checkout.write("src/lib.rs", &SHOP.replace("self.0)", "self.0 + 0)"));
+        assert!(reaches("labels"));
+        assert!(!reaches("refunds"));
+        // An inherent method is reached by its name alone.
+        checkout.write("src/lib.rs", &SHOP.replace("self.0 * 100", "100 * self.0"));
+        assert!(!reaches("labels"));
+        // A function exported unmangled may be called by code that never
+        // names it.
+        let exported = SHOP.replace("pub fn double", "#[no_mangle]\npub extern \"C\" fn double");
+        checkout.write("src/lib.rs", &exported);
+        let recorded_exported = checkout.recorded(&files);
+        checkout.write("src/lib.rs", &exported.replace("v * 2", "2 * v"));
+        assert!(
+            Program::new(checkout.root.clone(), recorded_exported).reaches_change_from(
+                "tests/t.rs",
+                Some("refunds"),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        );
+        // Names a macro builds give the bound up.
+        let concatenated = format!("{SHOP}fn joined() {{ concat_idents!(dou, ble)(1); }}\n");
+        checkout.write("src/lib.rs", &concatenated);
+        let recorded_concatenated = checkout.recorded(&files);
+        checkout.write("src/lib.rs", &concatenated.replace("v * 2", "2 * v"));
+        assert!(
+            Program::new(checkout.root.clone(), recorded_concatenated).reaches_change_from(
+                "tests/t.rs",
+                Some("refunds"),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        );
+        let pasted = format!("{SHOP}paste::paste! {{ fn [<dou ble>]() {{}} }}\n");
+        checkout.write("src/lib.rs", &pasted);
+        let recorded_pasted = checkout.recorded(&files);
+        checkout.write("src/lib.rs", &pasted.replace("v * 2", "2 * v"));
+        assert!(
+            Program::new(checkout.root.clone(), recorded_pasted).reaches_change_from(
+                "tests/t.rs",
+                Some("refunds"),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        );
+        // A test whose function is not found runs its whole file.
+        checkout.write("src/lib.rs", &SHOP.replace("v * 2", "2 * v"));
+        assert!(!reaches("gone"));
+        checkout.write("src/lib.rs", &SHOP.replace("self.0)", "self.0 + 0)"));
+        assert!(reaches("gone"));
+    }
+
+    const GENERIC: &str = "pub mod inner {\n    pub struct W<T>(pub T);\n    impl<T: Copy> std::ops::Add for W<T>\n    where\n        T: std::ops::Add<Output = T>,\n    {\n        type Output = W<T>;\n        fn add(self, o: W<T>) -> W<T> {\n            W(self.0 + o.0)\n        }\n    }\n    pub struct P(pub *const u8);\n    unsafe impl Send for P {}\n    impl<T: Into<u8>> From<T> for P {\n        fn from(t: T) -> P {\n            P(std::ptr::null::<u8>().wrapping_add(t.into() as usize))\n        }\n    }\n    impl P {\n        pub fn get(&self) -> u8 {\n            1\n        }\n    }\n}\n\npub fn sum(a: u8, b: u8) -> u8 {\n    #![allow(unused)]\n    let tag = \"#x\";\n    (inner::W(a) + inner::W(b)).0\n}\n\n#[cfg_attr(test, inline)]\npub fn later() -> u8 {\n    2\n}\n";
+
+    /// An operator implemented for a generic type in a module is reached by
+    /// the type's name (`W`), whatever its header holds (generics, `where`);
+    /// a method no code names is not; an item under an attribute the
+    /// compiler does not own is reached with what holds it.
+    #[test]
+    fn a_rust_operator_of_a_generic_type_is_reached_by_its_type() {
+        let tests = "use shop::*;\n\n#[test]\nfn sums() {\n    assert_eq!(sum(1, 2), 3);\n}\n";
+        let checkout = Checkout::new(
+            "rust-generic",
+            &[("src/lib.rs", GENERIC), ("tests/t.rs", tests)],
+        );
+        let files = ["src/lib.rs", "tests/t.rs"];
+        let recorded = checkout.recorded(&files);
+        let reaches = || {
+            Program::new(checkout.root.clone(), recorded.clone()).reaches_change_from(
+                "tests/t.rs",
+                Some("sums"),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        };
+        assert!(!reaches());
+        checkout.write(
+            "src/lib.rs",
+            &GENERIC.replace("self.0 + o.0", "o.0 + self.0"),
+        );
+        assert!(reaches());
+        checkout.write(
+            "src/lib.rs",
+            &GENERIC.replace("            1\n", "            2\n"),
+        );
+        assert!(!reaches());
+        checkout.write("src/lib.rs", &GENERIC.replace("    2\n}\n", "    3\n}\n"));
+        assert!(reaches());
+        assert_eq!(
+            rust_attributes("#![allow(x)] # [inline] #x #[tokio::test]"),
+            ["allow", "inline", "tokio::test"]
+        );
+        // `From::from` of `P`, whose header nests generics: `sum` never
+        // names `P`, `From` or `from`.
+        checkout.write(
+            "src/lib.rs",
+            &GENERIC.replace("t.into() as usize", "t.into() as usize + 0"),
+        );
+        assert!(!reaches());
+        assert_eq!(
+            implementation_keys("unsafe impl Send for P"),
+            BTreeSet::from(["P".to_owned(), "Send".to_owned()])
+        );
+        assert!(implementation_keys("struct S").is_empty());
+        assert!(implementation_keys("impl").is_empty());
+        // A generic parameter names no type of the program.
+        assert_eq!(
+            implementation_keys("impl<'a, T: Into<u8>, const N: usize> From<[T; N]> for P<'a>"),
+            BTreeSet::from(["From".to_owned(), "P".to_owned()])
+        );
     }
 
     /// What a name cannot follow gives up the bound: a whole module read

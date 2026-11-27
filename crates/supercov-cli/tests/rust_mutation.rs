@@ -267,3 +267,266 @@ fn a_nextest_rust_run_s_mutants_run_with_its_setup_scripts() {
     assert_eq!(added["killedBy"], "tests/flag.rs::scales_with_the_flag");
     assert_eq!(reply["summary"]["killed"], 4, "{reply}");
 }
+
+/// Interrupted while a test runs a mutant, a pass ends at once with the
+/// signal's exit code: the test is stopped with it and says nothing of its
+/// mutant, which keeps the candidate it already passed. The next pass runs
+/// it against the rest, and reaches the verdict a whole pass does.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_rust_pass_judges_nothing_it_cut_short_and_resumes() {
+    let project = Project::empty("strong-rust-interrupted");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"held\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn small(v: u32) -> bool {\n    v < 10\n}\n",
+    );
+    // `b`, with a mutant on, says it started and waits while `hold` is
+    // there: only the interruption ends it. It runs in the pass's copy, so
+    // both are named by their absolute paths in the project. Without a
+    // mutant it is the slower, so `a` runs first.
+    let place = |name: &str| format!("{:?}", project.root.join(name).display().to_string());
+    project.write(
+        "tests/t.rs",
+        &format!(
+            concat!(
+                "#[test]\nfn a() {{\n    assert!(held::small(3));\n}}\n\n",
+                "#[test]\nfn b() {{\n",
+                "    std::thread::sleep(std::time::Duration::from_secs(2));\n",
+                "    if std::env::var_os(\"SUPERCOV_ACTIVE_MUTANT\").is_some() {{\n",
+                "        std::fs::write({started}, std::process::id().to_string()).unwrap();\n",
+                "        let begun = std::time::Instant::now();\n",
+                "        while std::path::Path::new({hold}).exists() && begun.elapsed().as_secs() < 300 {{\n",
+                "            std::thread::sleep(std::time::Duration::from_millis(20));\n",
+                "        }}\n",
+                "    }}\n",
+                "    assert!(!held::small(10));\n",
+                "}}\n",
+            ),
+            started = place("started"),
+            hold = place("hold"),
+        ),
+    );
+    project.write(".gitignore", "target\n.supercov\nhold\nstarted\n");
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+
+    project.write("hold", "");
+    let pass = project
+        .supercov_command(&["runs", "latest", "mutants", "test", "--json"])
+        .env("SUPERCOV_STRONG_JOBS", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = project.root.join("started");
+    let begun = std::time::Instant::now();
+    while !started.exists() {
+        assert!(
+            begun.elapsed() < std::time::Duration::from_secs(300),
+            "no test started with a mutant"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let test_process: i32 = std::fs::read_to_string(&started).unwrap().parse().unwrap();
+    // SAFETY: a signal to the pass alone, as `kill -INT` sends it.
+    unsafe { libc::kill(pass.id() as i32, libc::SIGINT) };
+    let interrupted = std::time::Instant::now();
+    let output = pass.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(130), "{said}");
+    assert!(
+        interrupted.elapsed() < std::time::Duration::from_secs(8),
+        "{:?}: {said}",
+        interrupted.elapsed()
+    );
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_ne!(
+        unsafe { libc::kill(test_process, 0) },
+        0,
+        "the test outlived the pass"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    assert!(
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["strong"].is_null()),
+        "{listed}"
+    );
+
+    // The rest: `true` runs `b` alone, which kills it as it does `<=`.
+    std::fs::remove_file(project.root.join("hold")).unwrap();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(
+        said.contains(
+            "1 mutant(s) resume where earlier passes left them, with 1 of 2 candidates left"
+        ),
+        "{said}"
+    );
+    assert_eq!(reply["summary"]["killed"], 5, "{reply}\n{said}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    for id in [
+        "src/lib.rs:2:5-2:11:FnValue:true",
+        "src/lib.rs:2:7-2:8:BinaryOperator:<=",
+    ] {
+        assert_eq!(
+            strong_of(&listed, id)["killedBy"],
+            "tests/t.rs::b",
+            "{listed}"
+        );
+    }
+}
+
+/// A Rust pass carried across commits keeps the verdicts no change could
+/// move and reaches, at each commit, the verdicts a pass from nothing does.
+/// A test runs from its own function: a function no test's code names is
+/// not in reach, one a mutant may lead a test into is (`audit`), and a trait
+/// implementation's method is reached by its type's name, which `format!`
+/// calls unnamed (`Display::fmt`).
+#[test]
+fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
+    let project = Project::empty("strong-rust-carried");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        concat!(
+            "pub fn refund(sum: u32) -> u32 {\n    if sum > 1000 {\n        audit(sum)\n    } else {\n        sum\n    }\n}\n\n",
+            "pub fn audit(sum: u32) -> u32 {\n    sum\n}\n\n",
+            "/// ```\n/// assert_eq!(shop::double(3), 6);\n/// ```\npub fn double(v: u32) -> u32 {\n    v * 2\n}\n\n",
+            "pub fn unused(v: u32) -> u32 {\n    v - 1\n}\n\n",
+            "pub struct Money(pub u32);\n\n",
+            "impl std::fmt::Display for Money {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"${}\", self.0)\n    }\n}\n\n",
+            "pub fn label(m: &Money) -> String {\n    format!(\"{m}\")\n}\n",
+        ),
+    );
+    project.write(
+        "tests/t.rs",
+        concat!(
+            "use shop::*;\n\n",
+            "#[test]\nfn refunds() {\n    assert_eq!(refund(20), 20);\n}\n\n",
+            "#[test]\nfn doubles() {\n    assert_eq!(double(2), 4);\n}\n\n",
+            "#[test]\nfn labels() {\n    assert_eq!(label(&Money(3)), \"$3\");\n}\n",
+        ),
+    );
+    project.write(".gitignore", "target\n.supercov\n.supercov-aside\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let pass = || {
+        project
+            .supercov(&["mutants", "--json", "--", "cargo", "test"])
+            .json()
+    };
+    let statuses = |run: &str| {
+        let saved = serde_json::from_str::<Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // A pass from nothing: the store set aside while it runs.
+    let store = project.root.join(".supercov");
+    let aside = project.root.join(".supercov-aside");
+    let fresh = || {
+        std::fs::rename(&store, &aside).unwrap();
+        let reply = pass();
+        let verdicts = statuses(reply["run"].as_str().unwrap());
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::rename(&aside, &store).unwrap();
+        (reply, verdicts)
+    };
+    let first = pass();
+    assert_eq!(first["summary"]["error"], 0, "{first}");
+    let step = |message: &str, kept: Option<u64>, why: &[&str]| {
+        project.commit(message);
+        let carried = pass();
+        let (whole, verdicts) = fresh();
+        assert_eq!(
+            statuses(carried["run"].as_str().unwrap()),
+            verdicts,
+            "{message}: {carried}"
+        );
+        if let Some(kept) = kept {
+            assert_eq!(carried["carried"]["mutants"], kept, "{message}: {carried}");
+            assert!(
+                carried["summary"]["ran"].as_u64() < whole["summary"]["ran"].as_u64(),
+                "{message}: {carried}"
+            );
+        } else {
+            assert!(carried["carried"].is_null(), "{message}: {carried}");
+        }
+        let reasons = carried["carried"]["notKept"]
+            .as_object()
+            .map(|reasons| reasons.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(reasons, why, "{message}: {carried}");
+        carried
+    };
+    // A comment above every function moves its mutants: each verdict is
+    // found by its code.
+    project.write(
+        "src/lib.rs",
+        &format!("// The shop's rules.\n\n{}", project.read("src/lib.rs")),
+    );
+    // The doctest's name holds its line, which moved: its kill runs again.
+    let moved = step("a comment", Some(9), &["killerUnknown"]);
+    assert_eq!(moved["summary"]["ran"], 1, "{moved}");
+    // One function: its own mutants run again, and nothing else, since no
+    // other test's code names it.
+    project.edit("src/lib.rs", "    v * 2\n", "    2 * v\n");
+    step("double", Some(6), &["fileChanged"]);
+    // A function no test runs, which `refund`'s mutants lead `refunds` into:
+    // they run again, and the one that sends it there is killed now.
+    project.edit(
+        "src/lib.rs",
+        "pub fn audit(sum: u32) -> u32 {\n    sum\n",
+        "pub fn audit(sum: u32) -> u32 {\n    sum + 1\n",
+    );
+    // The doctest's kill runs again too: a doctest is a comment of the
+    // source, and it keeps nothing where code changed.
+    let trap = step("audit", Some(6), &["loadsChanged", "testReached"]);
+    let now = statuses(trap["run"].as_str().unwrap());
+    assert_eq!(
+        now["src/lib.rs:4:12-4:13:BinaryOperator:<"], "killed",
+        "{trap}"
+    );
+    // `Display::fmt`, which no code names: `labels` names `Money`.
+    project.edit("src/lib.rs", "self.0)", "0 + self.0)");
+    step("fmt", Some(6), &["fileChanged", "testReached"]);
+    // A function nothing names: every verdict is kept but the doctest's.
+    project.edit("src/lib.rs", "    v - 1\n", "    v.wrapping_sub(1)\n");
+    let unnamed = step("unused", Some(9), &["testReached"]);
+    assert_eq!(unnamed["summary"]["ran"], 1, "{unnamed}");
+    // A comment after every function moves no line: every verdict is
+    // kept, the doctest's with them, since no code changed.
+    project.write(
+        "src/lib.rs",
+        &format!("{}// The end.\n", project.read("src/lib.rs")),
+    );
+    let ended = step("a comment at the end", Some(10), &[]);
+    assert_eq!(ended["summary"]["ran"], 0, "{ended}");
+    // The build's configuration: nothing is kept.
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\ndebug = 1\n",
+    );
+    step("configuration", None, &[]);
+}

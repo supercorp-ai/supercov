@@ -183,7 +183,8 @@ pub fn merged_marks(
 /// (`docs/design/mutants.md`, Merged runs), and how many of them each run
 /// lent: a verdict two runs hold alike is counted for the first, in the
 /// order given. Only the mutants of the merged plan have one. A mutant the
-/// plan decides takes the plan's verdict, lent by no run. Of the rest, a
+/// plan decides takes the plan's verdict, lent by no run, unless a run
+/// found it does not compile (`unviable`), which stands. Of the rest, a
 /// kill in any run is a kill (killed before timeout), and a mutant that did
 /// not compile in one did not in any. Survived stands only where every test
 /// of the merged suite that could kill it (its candidates, and the tests of
@@ -198,16 +199,27 @@ pub fn merged_verdicts(
     let mut merged = BTreeMap::new();
     let mut taken = vec![0; lent.len()];
     for mutant in &plan.mutants {
-        if let Some(verdict) = decided_verdict(mutant) {
-            merged.insert(mutant.id.clone(), verdict);
-            continue;
-        }
         let held = lent
             .iter()
             .enumerate()
             .filter(|(_, run)| !run.other_bytes.contains(&mutant.file))
             .filter_map(|(index, run)| Some((index, run, run.verdicts.get(&mutant.id)?)))
             .collect::<Vec<_>>();
+        if let Some(verdict) = decided_verdict(mutant) {
+            // A pass may find that a mutant the plan decides does not
+            // compile (a Rust pass builds them to find out): that stands.
+            let unviable = held
+                .iter()
+                .find(|(.., verdict)| verdict.status == "unviable")
+                .map(|(index, _, verdict)| (*index, (*verdict).clone()));
+            if let Some((index, unviable)) = unviable {
+                taken[index] += 1;
+                merged.insert(mutant.id.clone(), unviable);
+            } else {
+                merged.insert(mutant.id.clone(), verdict);
+            }
+            continue;
+        }
         let first_of = |status: &str| {
             held.iter()
                 .find(|(.., verdict)| verdict.status == status)
@@ -711,6 +723,21 @@ mod tests {
             decided_verdict(&mutant("open", "src/a.js", &[0], &[])),
             None
         );
+        // A run that found a decided mutant does not compile lends that.
+        let unviable = verdicts(&[("no-coverage", "unviable")]);
+        let (merged, taken) = merged_verdicts(
+            &plan,
+            &[Lent {
+                verdicts: &unviable,
+                progress: &Progress::new(),
+                lived: &BTreeSet::new(),
+                tests: &tests,
+                other_bytes: &none,
+            }],
+        );
+        assert_eq!(merged["no-coverage"].status, "unviable");
+        assert_eq!(merged["survived"].status, "survived");
+        assert_eq!(taken, [1]);
         // A plan of no mutant keeps nothing.
         plan.mutants.clear();
         assert_eq!(merged_verdicts(&plan, &[]), (BTreeMap::new(), Vec::new()));

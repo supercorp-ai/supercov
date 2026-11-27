@@ -20,7 +20,7 @@ npx supercov -- mvn test
 | --- | --- | --- | --- |
 | JavaScript | Available | `npx supercov -- npm test` | StrykerJS 10.1.1's mutants |
 | TypeScript | Available | `npx supercov -- npm test` | StrykerJS 10.1.1's mutants |
-| Rust | Available | `npx supercov -- cargo test` | Preview: cargo-mutants 27.1.0's mutants |
+| Rust | Available | `npx supercov -- cargo test` | cargo-mutants 27.1.0's mutants |
 | Python | Available | `npx supercov -- pytest` | Preview: mutmut 3.8.1's mutants |
 | Ruby | Available | `npx supercov -- rspec` | Preview: mutant 0.17.1's mutants |
 | Go | Available | `npx supercov -- go test ./...` | Preview: Gremlins 0.6.0's mutants |
@@ -37,7 +37,7 @@ The npm-distributed CLI requires Node.js 22 or newer for every language.
 `npx supercov mutants -- <test command>` lists the mutants the language's
 established tool would make of every source the run measured, says from the
 run which ones no test reaches or infects, and runs the rest against the tests
-that reach them. JavaScript and TypeScript are fully supported; Python, Rust,
+that reach them. JavaScript, TypeScript and Rust are fully supported; Python,
 Go and Ruby are in preview, each validated against its tool on public
 projects; Java and Kotlin have no mutants yet. The Mutation testing column of
 each runner table below says whether that runner's tests run against mutants.
@@ -200,9 +200,9 @@ loses nothing there either.
 
 | Runner | Attribution | Current requirement | Mutation testing |
 | --- | --- | --- | --- |
-| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Rust 1.95; run with `npx supercov -- cargo test` | Preview |
-| rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` | Preview |
-| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or newer (tested with 0.9.140 and 0.9.148) | Preview, with the project's nextest configuration |
+| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Rust 1.95; run with `npx supercov -- cargo test` | Yes |
+| rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` | Yes |
+| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or newer (tested with 0.9.140 and 0.9.148) | Yes, with the project's nextest configuration |
 
 Supercov preserves Cargo's test selection, scheduling, fail-fast behavior,
 environment and exit status. Doctests run with their own identities; nextest
@@ -241,7 +241,7 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
-### Mutation testing (preview)
+### Mutation testing
 
 `supercov runs latest mutants` lists cargo-mutants' mutants (27.1.0) of the
 files a Rust run measured, with what the run's tests tell of each, and

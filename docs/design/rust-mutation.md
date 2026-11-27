@@ -28,6 +28,16 @@ and its replacement code:
 | `MatchArmGuard` | a guard made `true`, and `false` | `true`, `false` |
 | `StructField` | a field of a struct literal with `..base` deleted | `removed` |
 
+cargo-mutants replaces an operator's text, so the compiler reads its mutant
+afresh: where the new operator binds otherwise than the old, the expression
+around it groups otherwise (`a - b * c` with `*` made `+` is `a - b + c`,
+`(a - b) + c`; `p && q && r` with its first `&&` made `||` is
+`p || (q && r)`). Such a mutant's site is the whole expression of operators,
+casts and ranges it sits in (up to parentheses, a call, a statement), which
+its switch replaces with that text, and its weak verdict reads no operand
+probe; one whose text groups as the expression with only the operator
+changed stays at its own operator (`rust_mutants::regrouped`).
+
 It reads the file with the parser the instrumenter uses (`ra_ap_syntax`),
 where cargo-mutants reads it with `syn`, so it repeats what `syn` sees: a
 macro's arguments are tokens and hold no mutant; a node starts at its first
@@ -106,7 +116,11 @@ a built-in integer, float, `bool` or `char`; anything else records
 can be borrowed. An operator's probe evaluates its operands a second time,
 so it goes only where they are pure: paths, fields, indexes, literals,
 casts, dereferences, parentheses and arithmetic of those, never a call. A
-literal takes the other operand's type, as the operator gives it. Probes go
+literal takes the other operand's type, as the operator gives it. An
+operand of literals alone (`1 << 83`) has no probe: it takes its type from
+where it stands, and evaluated apart it is an `i32`, which can overflow where
+the original does not (itoa's `n < 1 << 83`, `n` a `u128`, failed every
+`u128` test of the measured run). Probes go
 only where the instrumenter places probes at all: not in macros, test code,
 const contexts or an allocator. A returned value's wrapper goes around every
 wrapper the instrumenter placed at its range, and inside every one around it
@@ -161,10 +175,14 @@ incremental builds, not one per mutant.
 
 Some mutants are never switched (`rust_schemata::placeable`): code the
 compiler evaluates (`const`, `static`, `const fn`, array lengths, enum
-discriminants), a body whose type is an opaque `impl Trait` (a second value
-would be a second type), an operator over a `let` chain (an `if` around it
+discriminants), a body whose type holds an opaque `impl Trait` anywhere
+(`Result<impl Iterator, E>`; a second value would be a second type), an operator over a `let` chain (an `if` around it
 ends the chain), allocator code (the runtime reads the environment once,
 which allocates), and files of proc-macro crates (the compiler runs them).
+So is a deleted arm whose `match` is left with arms that all diverge
+(`_ => return None`): the `match` is then of type `!`, and the code that
+uses its value may not compile, as cargo-mutants' build finds (regex-syntax
+has four); a switch keeps the arm, and its type.
 Each is written into a plain copy (`.supercov/strong/rust/plain`) and built
 there on its own, as cargo-mutants builds every mutant: unviable where that
 build fails.
@@ -199,6 +217,24 @@ from code that evaluates the mutant many times and ends: such a test would
 read as a timeout where cargo-mutants, which has no limit of the kind, runs
 it to its end.
 
+## What the plan decides, and what still compiles
+
+The plan decides a mutant no test reaches (`no-coverage`) or none infects
+(`survived`) without running it. cargo-mutants builds every mutant first, and
+reports one that does not compile as `unviable` whatever the tests would do.
+So the CLI gives the Rust driver its plan-decided mutants too (`decided` in
+`plan.json`), and the driver switches those a switch can hold into its
+build, only to find whether they compile: one that does not is `unviable`
+(a body replaced by `Default::default()` where the type has no `Default`);
+one that does keeps the plan's verdict, and nothing runs it. One a switch
+cannot hold is not built on its own for this: it keeps the plan's verdict
+(semver's unreached `const`, below).
+
+A mutant in a `const fn` is linked to no statement: the instrumenter
+declares a `const fn`'s body (`unmeasured`) and cannot probe it, so its
+points are in the run's record and never hit. Linked to one, the mutant read
+as code no test ran, though the program calls the function at run time.
+
 ## The driver
 
 `rust_strong::run_strong_rust` reads `plan.json`, finds each mutant again
@@ -211,14 +247,47 @@ options given to `cargo test`. Then:
 - **Baselines.** Every test a mutant needs runs once with no mutant, in the
   switched build. One that fails there is no candidate; a mutant whose
   candidates all fail is `survived`, with that reason. Its time sets the
-  test's limit: 3 times the baseline and 10 s.
+  test's limit, cargo-mutants' rule: 5 times the baseline, at least 20 s.
+  (It was 3 times and 10 s: on fastrand 2.3.0 a mutant that makes rejection
+  sampling loop longer ended its test in 14 s, a `timeout` here and missed
+  by cargo-mutants.)
 - **Libtest and nextest tests** run by exact name through the test binary
   (`<binary> --exact <name> --test-threads=1`), each in its own process,
   through the target runner Cargo would use, in the package's directory, as
   a measured run runs them. A mutant's candidates run cheapest first and stop
-  at the first that fails: `killed`, `killedBy` that test. Past its limit:
-  `timeout`. All passing: `survived`. Mutants run side by side, half the
-  CPUs by default (`SUPERCOV_STRONG_JOBS`).
+  at the first that fails: `killed`, `killedBy` that test. All passing:
+  `survived`. Mutants run side by side, half the CPUs by default
+  (`SUPERCOV_STRONG_JOBS`), each test process in a process group of its
+  own, which its limit or the pass's stop ends whole (nextest's and
+  rustdoc's test processes with it).
+- **Timeouts, at the machine's speed.** A test past its limit beside the
+  pass's other tests decides nothing yet: once every switched mutant has
+  run, each such mutant runs again alone, one at a time. Its test first runs
+  again without the mutant, and its limit there is 5 times the slower of
+  that run and its baseline, at least 20 s; the mutant then runs against the
+  candidates it has not passed. Only past that limit is it a `timeout`
+  (`ran past 10120 ms, alone, after its test ran again without the mutant`).
+  A baseline measured while the machine was quieter (the baselines run
+  first, side by side) does not make a slow test a timeout once a CI runner
+  is busier; a test that does not pass without the mutant then is an
+  `error`. A mutant that never ends costs its limit twice and one run of
+  its test. A test stopped at the hit limit counts evaluations, not time,
+  and is a `timeout` at once.
+- **Stopping.** The CLI writes `stopped-at` beside the pass's results before
+  it signals the pass, for `--budget` or a signal alike. From then the pass
+  starts nothing, ends the process groups it runs (a build among them), and
+  judges nothing they said: their mutants are left for the next pass. It
+  ends at once, with the signal's exit code (143 for the budget, which the
+  CLI reads as a finished pass). Each candidate a mutant passes is written
+  as it passes (`{"progress": true, "id": .., "passed": [..]}`), so the next
+  pass runs that mutant against the rest (`docs/mutation.md`, partial
+  progress): each test runs in a process of its own, so its passing holds
+  whatever runs beside or after it. A test process ended by SIGINT,
+  SIGTERM or SIGHUP waits up to 2 s for the stop to show before it is
+  judged. Up to this release, the Rust pass did not look for the stop: a
+  budget ran 8 s past and ended the command with exit 143, leaving its test
+  processes running; a Ctrl-C ended each test process of the terminal's
+  group, and the pass saved each of those mutants as `killed`.
 - **Doctests** are compiled by rustdoc against the switched library: a
   mutant's doctests run after its libtest candidates, in one
   `cargo test --doc -p <package> -- <names>` with the mutant on.
@@ -240,9 +309,19 @@ catches (or times out) that Supercov calls survived or no-coverage is a
 soundness violation, and the reverse too. Unviable mutants are counted
 apart.
 
-The corpus is under `mutation-corpora/rust/`, cloned at a tag: strsim-rs
-v0.11.1, rust-hex v0.4.3, semver 1.0.27. The results are in
-"Measured" below.
+The corpus is `benchmarks/mutation/rust/corpus.json`: eleven public crates
+at a tag (strsim, hex, semver, itoa, smallvec, unicode-width, bitflags,
+anyhow, base64, fastrand under cargo-nextest, regex-syntax as a workspace
+member), run by `.github/workflows/mutation-rust.yml` on GitHub's runners:
+cargo-mutants in shards, `supercov mutants --shard k/n` in shards merged by
+`supercov merge`, joined by `benchmarks/mutation/rust/summarize.mjs`. The
+table and every disagreement are in `docs/mutation.md` ("Rust, against
+cargo-mutants 27.1.0"). Its first runs found the gaps 4.29.18 fixed: value
+probes that failed itoa's `u128` tests (33 soundness violations), `const fn`
+mutants read as never run (12), a regrouping operator mutant (1), mutants of
+`Result<impl Trait, E>` bodies called unviable, unviable mutants no test
+reaches listed as gaps, and diverging arms. "Measured" below is the
+original three crates' record, on 16-CPU machines.
 
 ## Measured
 
@@ -324,6 +403,61 @@ The five viability disagreements, each applied by hand:
 
 None is a mutant one tool kills and the other calls survived.
 
+## After an edit
+
+`supercov mutants` on a new commit keeps the verdicts no change could move
+(`docs/design/strong-mutation.md`, "After an edit"). Up to this release a
+Rust test kept a verdict only where no code but tests' changed: any edit to
+a crate's source ran every mutant again. A Rust test is now bounded by
+names (`strong_reach.rs`), as a JavaScript one is:
+
+- **What it loads.** A test binary links every crate it depends on, so
+  every Rust file the earlier run recorded counts, and every file that
+  changed. A changed file that is not Rust (a fixture a test reads, a file
+  `include_str!` takes) is read whole: any change there reaches the test.
+- **Where it starts.** From its own function (`tests::it_works` in its
+  file), not its whole file: libtest runs that function alone, in a process
+  of its own. A test whose function is not found there (one a macro
+  writes) starts from its whole file.
+- **What reaches.** A function is reached where reached code names it, and
+  a function nested in one where it runs. Modules, implementations and
+  traits hold items and run nothing themselves: an item in one is reached
+  only by its name. A method of a trait implementation is reached by its
+  trait's or its type's name too, since the language calls it unnamed: an
+  operator calls `Add::add`, a value going out of scope `Drop::drop`,
+  `format!` `Display::fmt`, a `for` loop `Iterator::next`, `sort` `Ord::cmp`.
+  A type a test never names has no value in its code: a value of it comes
+  from code that names it, in its signature at least. An implementation's or
+  a trait's header names nothing that runs. A derive's code calls the
+  methods of the types its item names, which those names reach.
+- **What gives up.** An item that carries an attribute other than the
+  compiler's own (`derive`, `inline`, `cfg`, `allow`, `doc`, `repr`, ...) is
+  reached with what holds it: `#[no_mangle]` hands it to code that never
+  names it, and a procedural macro's attribute may register it. A file whose
+  macros build names (`paste!`'s `[<..>]`, `concat_idents!`) gives up the
+  bound wherever it is loaded. A change to a file's top level (a `use`, a
+  `mod`), a new file, and a function added give it up too: an added `fn`
+  may shadow what a glob import brought in. A doctest keeps its verdict only
+  where no code changed: its code is a comment of a source file, which the
+  run counts among its test files.
+
+`rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches`
+(`crates/supercov-cli/tests/rust_mutation.rs`) carries a crate across seven
+commits and compares each with a pass from nothing on the same commit:
+every verdict the same each time. Of its ten mutants a pass runs, one is
+killed by a doctest, whose name holds its line and whose code is a comment
+of the source: it runs again wherever code changed.
+
+| commit | kept | ran |
+| --- | --- | --- |
+| a comment above every function (the doctest's line moved) | 9 | 1 |
+| `double`, which one test names | 6 | 4 |
+| `audit`, which only a mutant of `refund` sends a test into | 6 | 4, the survivor now killed |
+| `Display::fmt`, which `format!` calls and no code names | 6 | 4 |
+| a function nothing names | 9 | 1 (the doctest's) |
+| a comment after every function (no line moved) | 10 | 0 |
+| `Cargo.toml` | 0 | 10 |
+
 ## nextest
 
 Under `cargo nextest run`, each test runs through nextest, one test per
@@ -362,3 +496,14 @@ build: such a pass cannot tell anything of it.
   pages the JavaScript strong pass runs them (`mutation-drivers.md`).
 - The value probes on `&&` and `||`, struct fields and non-number returns:
   those mutants stay `unknown` where they ran.
+- Equivalent mutants by compiled code, as JavaScript's pass finds them
+  (Trivial Compiler Equivalence): a Rust mutant would need a build of its
+  own to compare, which is what cargo-mutants pays per mutant and the
+  switched build exists to avoid. Every mutant runs; none is skipped.
+- A stalled attempt ended early, as Playwright's are: a libtest process
+  shows no wait a pass could read, so a test runs to its limit.
+- On Windows, a test's limit or the pass's stop ends the test process, not
+  processes it started (nextest's, rustdoc's): Unix ends the process group.
+- A slow mutant's time limit is per test (5 × the test's baseline, at least
+  20 s); cargo-mutants' is per suite run. A mutant that slows one test past
+  20 s but leaves the suite within 5 × its time is a `timeout` here (fastrand).

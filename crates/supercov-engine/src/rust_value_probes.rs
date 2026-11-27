@@ -223,8 +223,28 @@ fn operand(runtime: &str, expression: &ast::Expr) -> Option<String> {
                     .replacen("num(&(", "num(&(-", 1),
             )
         }
-        _ if pure(expression) => Some(format!("{runtime}::num(&({}))", expression.syntax().text())),
+        // Arithmetic of literals alone takes its type from where it stands
+        // (`n < 1 << 83`, `n` a `u128`): evaluated apart, it is an `i32`,
+        // and may overflow where the original does not.
+        _ if pure(expression) && !literals_only(expression) => {
+            Some(format!("{runtime}::num(&({}))", expression.syntax().text()))
+        }
         _ => None,
+    }
+}
+
+/// Whether `expression` is literals and the operators and parentheses
+/// around them, with no operand that gives it a type of its own.
+fn literals_only(expression: &ast::Expr) -> bool {
+    match expression {
+        ast::Expr::Literal(_) => true,
+        ast::Expr::ParenExpr(paren) => paren.expr().is_some_and(|inner| literals_only(&inner)),
+        ast::Expr::PrefixExpr(prefix) => prefix.expr().is_some_and(|inner| literals_only(&inner)),
+        ast::Expr::BinExpr(binary) => {
+            binary.lhs().is_some_and(|inner| literals_only(&inner))
+                && binary.rhs().is_some_and(|inner| literals_only(&inner))
+        }
+        _ => false,
     }
 }
 
@@ -427,9 +447,15 @@ mod tests {
             "fn a(v: &[u8], i: usize, y: u8, x: f64) {\n",
             "    let _ = (v[g()] < 1, g()[0] < 1, v[i] < 1, *g() < 1, (g() + y) < y, (y + g()) < y, (1 + y) < y, (y + 1) < y, y - 1, x < 1.5f64, -true < y);\n",
             "}\n",
+            // Literals alone take their type from where they stand: apart,
+            // `1 << 83` is an `i32` and overflows.
+            "fn d(n: u128) -> bool {\n    n < 1 << 83 || n > (2 * 3) || n == -(4 + 5)\n}\n",
         ))
         .join("\n");
         for absent in [
+            "num(&(1 << 83))",
+            "num(&((2 * 3)))",
+            "num(&(-(4 + 5)))",
             "num(&(v[g()]))",
             "num(&(g()[0]))",
             "num(&(*g()))",
