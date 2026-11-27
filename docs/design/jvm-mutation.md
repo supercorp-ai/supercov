@@ -318,7 +318,23 @@ in a job of their own: kotlinpoet in 12. The Ant project (Apache Ant's own
 `util` package) runs PIT through its command line over the classes Ant
 compiled, since PIT's Ant task launches the same.
 
-### Results
+### On GitHub Actions, 2026-11-27
+
+`.github/workflows/mutation-jvm.yml` (dispatch) runs the same benchmark on
+GitHub's `ubuntu-latest` (4 vCPUs): PIT as a team runs it (not its full
+matrix, whose cost the 4-CPU runners cannot carry in ten-minute jobs; PIT's
+kills are what a violation is read against) and Supercov per shard
+(`shards` in `projects.json`, sized so each job ends within ten minutes),
+joined by `mutants pit`, with a `handchecks` input that applies a mutant and
+runs the project's own suite in CI. The table and every violation's check
+are in `docs/mutation.md` ("Java and Kotlin, against PIT 1.17.1"): 18
+violations in 7,146 joined mutants, each one PIT's environment (statics set
+up before its mutant, one JVM's leftover state, an `inline` function's
+copied code, identity-hashed test names, a load-dependent timeout), none
+Supercov's. Every mutant Supercov decided was decided within the jobs'
+budgets.
+
+### Results (16-CPU machines, earlier rounds)
 
 Measured on 16-CPU Linux machines (c8a/m8a/r8a), 16 threads for PIT and
 16 JVMs for the strong pass, PIT 1.17.1; times are seconds, summed over a

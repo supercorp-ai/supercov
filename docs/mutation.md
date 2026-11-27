@@ -891,6 +891,60 @@ down twice. Each earlier gap the benchmark found is fixed and held by a test (`C
 run, operator mutants that regroup their expression, unviable mutants no
 test reaches.
 
+### Java and Kotlin, against PIT 1.17.1
+
+Eight public projects pinned to a tag (`benchmarks/mutation-jvm/`), every
+mutant joined by file, line, mutator and PIT's description (`supercov runs
+latest mutants pit`): PIT as a team runs it (each mutant until its first
+kill) and Supercov's measured run and strong pass, over the same source files
+in shards of each project, on GitHub's `ubuntu-latest` (4 vCPUs), 4 PIT
+threads and 4 JVMs for the strong pass, 2026-11-27
+(`.github/workflows/mutation-jvm.yml`). Times are summed over each tool's
+jobs, in seconds; each Supercov job measures the whole suite once.
+
+| Project | Shape | PIT mutants | Supercov mutants | Joined | Agree | Soundness violations | PIT | Supercov measured + strong |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| commons-cli 1.9.0 | Java, JUnit 5, Maven | 882 | 882 | 881 | 879 | 1 | 98 | 29 + 186 |
+| commons-csv 1.12.0 | Java, JUnit 5, Maven | 720 | 719 | 717 | 717 | 0 | 147 | 56 + 194 |
+| typetools 0.6.3 | Java, TestNG, Maven | 216 | 216 | 216 | 213 | 3 | 28 | 14 + 49 |
+| java-diff-utils 4.12 | Java, JUnit 5, Maven, multi-module | 652 | 660 | 645 | 645 | 0 | 166 | 482 + 595 |
+| Apache Ant 1.10.15 `util` | Java, JUnit 4 under Ant's `<junit>` | 2,083 | 2,056 | 2,039 | 2,031 | 8 | 258 | 63 + 245 |
+| picnic 0.5.0 | Kotlin, JUnit 4, Gradle | 632 | 342 | 318 | 317 | 1 | 56 | 39 + 87 |
+| kotlinpoet 1.14.2 | Kotlin, JUnit 4, Gradle, 12 shards | 2,114 | 1,213 | 1,121 | 1,117 | 4 | 1,394 | 968 + 2,235 |
+| aedile 3.0.4 | Kotlin, Kotest, Gradle | — | 28 | — | — | — | — | 117 + 324 |
+
+PIT does not run Kotest, so aedile has no join: all 28 of its mutants are
+killed. Every soundness violation was checked, the mutant applied to the
+source and the project's own suite run with it:
+
+- **Supercov killed, PIT survived or no coverage (13):** code that runs only
+  as a class's statics are set up (typetools' `TypeResolver` initializer,
+  3; picnic's `textBorder.kt:5`; Ant's cached parser factories and package
+  list, `JAXPUtils` and `JavaEnvUtils`, 5; Ant's `SymbolicLinkUtils.java:55`,
+  read into a test class's static field): PIT switches a mutant into a JVM
+  whose statics are already set, so the mutant never runs there, where
+  Supercov loads the project's classes afresh for each mutant. kotlinpoet's
+  `CodeWriter.kt:41` and `Taggable.kt:73` are in `inline` functions, whose
+  code runs only copied into callers compiled before PIT mutates anything;
+  `Taggable.kt:28` and `:63` are reached only by a JUnit 4 parameterized
+  test whose names carry identity hashes, which PIT cannot select again.
+- **Supercov survived, PIT killed or timed out (5):** with the mutant applied,
+  the project's whole suite passes: commons-cli's `OptionBuilder.java:141`
+  and Ant's `FileUtils.java:1204` are killed in PIT's single JVM by state an
+  earlier test left; Ant's `VectorSet.java:228` makes `retainAll` slower
+  (its speed test passes in 5.7 s alone), a timeout in PIT's loaded JVMs and
+  within Supercov's second-round limit.
+
+Mutants one tool lists and the other does not: on the Java projects, a few
+(PIT's loop filters match some loops of a source shape and not others; a
+lambda whose return type the source does not show). On Kotlin, PIT mutates
+code kotlinc writes that has no source of its own (property accessors, null
+checks it adds, inlined standard-library code, `when` subject comparisons):
+`mutants pit` names each such mutant's category, and leaves 52 of
+kotlinpoet's and 11 of picnic's as `other`. Supercov's own extra Kotlin
+mutants include operators on a type the source does not show that the
+compiler refuses (`unviable`). Details in `docs/design/jvm-mutation.md`.
+
 ### Go (preview), against Gremlins 0.6.0
 
 Five modules at their tags, Gremlins with every test per mutant
