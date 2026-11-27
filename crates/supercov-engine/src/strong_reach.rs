@@ -160,22 +160,6 @@ fn rust_attributes(text: &str) -> Vec<String> {
     found
 }
 
-/// An implementation's header from its path: what follows the path of the
-/// module it is in (`tests::impl<T> W<T>` gives `impl<T> W<T>`).
-fn header(path: &str) -> &str {
-    let starts = |at: usize| {
-        let rest = &path[at..];
-        (at == 0 || path[..at].ends_with("::"))
-            && (rest.starts_with("impl<")
-                || rest.starts_with("impl ")
-                || rest.starts_with("unsafe impl"))
-    };
-    (0..path.len())
-        .filter(|at| path.is_char_boundary(*at))
-        .find(|at| starts(*at))
-        .map_or(path, |at| &path[at..])
-}
-
 /// The names that reach a method of the Rust implementation whose header
 /// (`impl<T: Bound> Trait for Type<T> where ..`) is `header`: the trait's
 /// and the type's, where it implements a trait; none for an inherent one.
@@ -185,28 +169,39 @@ fn implementation_keys(header: &str) -> BTreeSet<String> {
         .strip_prefix("unsafe")
         .unwrap_or(header)
         .trim_start();
-    let Some(mut rest) = header.strip_prefix("impl") else {
+    let Some(rest) = header.strip_prefix("impl") else {
         return BTreeSet::new();
     };
-    // The generics after `impl`.
-    if rest.trim_start().starts_with('<') {
-        let mut depth = 0usize;
-        let mut end = rest.len();
-        for (at, c) in rest.char_indices() {
-            match c {
-                '<' => depth += 1,
-                '>' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        end = at + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
+    // The generics after `impl`, and their parameters' names, which name
+    // no type of the program.
+    let mut depth = 0usize;
+    let mut parameters = BTreeSet::new();
+    let mut part = String::new();
+    let mut end = 0;
+    for (at, c) in rest.char_indices() {
+        if depth == 0 && !c.is_whitespace() && c != '<' {
+            break;
         }
-        rest = &rest[end..];
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ => {}
+        }
+        if depth == 1 && matches!(c, '<' | ',') || depth == 0 {
+            let name = part
+                .trim()
+                .trim_start_matches("const ")
+                .trim_start_matches('\'')
+                .split(|c: char| !word(c))
+                .next();
+            parameters.extend(name.filter(|name| !name.is_empty()).map(str::to_owned));
+            part.clear();
+        } else {
+            part.push(c);
+        }
+        end = at + c.len_utf8();
     }
+    let rest = &rest[end..];
     let rest = rest.split(" where ").next().unwrap_or(rest);
     if !rest.contains(" for ") {
         return BTreeSet::new();
@@ -214,7 +209,10 @@ fn implementation_keys(header: &str) -> BTreeSet<String> {
     identifiers(rest)
         .0
         .into_iter()
-        .filter(|name| !["for", "dyn", "mut", "const", "impl"].contains(&name.as_str()))
+        .filter(|name| {
+            !["for", "dyn", "mut", "const", "impl"].contains(&name.as_str())
+                && !parameters.contains(name)
+        })
         .collect()
 }
 
@@ -404,7 +402,16 @@ fn rust_node(
         names
     };
     let keys = match (holder, unit.parent) {
-        (Some("impl"), Some(parent)) => implementation_keys(header(&code.units[parent].path)),
+        (Some("impl"), Some(parent)) => {
+            // The implementation's path is its header after the path of the
+            // module it is in (`tests::impl<T> W<T>`).
+            let path = &code.units[parent].path;
+            let module = code.units[parent]
+                .parent
+                .map(|module| format!("{}::", code.units[module].path))
+                .unwrap_or_default();
+            implementation_keys(path.strip_prefix(module.as_str()).unwrap_or(path))
+        }
         _ => BTreeSet::new(),
     };
     Node {
@@ -844,6 +851,17 @@ mod tests {
             )
         );
         // Names a macro builds give the bound up.
+        let concatenated = format!("{SHOP}fn joined() {{ concat_idents!(dou, ble)(1); }}\n");
+        checkout.write("src/lib.rs", &concatenated);
+        let recorded_concatenated = checkout.recorded(&files);
+        checkout.write("src/lib.rs", &concatenated.replace("v * 2", "2 * v"));
+        assert!(
+            Program::new(checkout.root.clone(), recorded_concatenated).reaches_change_from(
+                "tests/t.rs",
+                Some("refunds"),
+                &files.iter().map(|file| (*file).to_owned()).collect(),
+            )
+        );
         let pasted = format!("{SHOP}paste::paste! {{ fn [<dou ble>]() {{}} }}\n");
         checkout.write("src/lib.rs", &pasted);
         let recorded_pasted = checkout.recorded(&files);
@@ -862,7 +880,7 @@ mod tests {
         assert!(reaches("gone"));
     }
 
-    const GENERIC: &str = "pub mod inner {\n    pub struct W<T>(pub T);\n    impl<T: Copy> std::ops::Add for W<T>\n    where\n        T: std::ops::Add<Output = T>,\n    {\n        type Output = W<T>;\n        fn add(self, o: W<T>) -> W<T> {\n            W(self.0 + o.0)\n        }\n    }\n    pub struct P(pub *const u8);\n    unsafe impl Send for P {}\n    impl P {\n        pub fn get(&self) -> u8 {\n            1\n        }\n    }\n}\n\npub fn sum(a: u8, b: u8) -> u8 {\n    #![allow(unused)]\n    let tag = \"#x\";\n    (inner::W(a) + inner::W(b)).0\n}\n\n#[cfg_attr(test, inline)]\npub fn later() -> u8 {\n    2\n}\n";
+    const GENERIC: &str = "pub mod inner {\n    pub struct W<T>(pub T);\n    impl<T: Copy> std::ops::Add for W<T>\n    where\n        T: std::ops::Add<Output = T>,\n    {\n        type Output = W<T>;\n        fn add(self, o: W<T>) -> W<T> {\n            W(self.0 + o.0)\n        }\n    }\n    pub struct P(pub *const u8);\n    unsafe impl Send for P {}\n    impl<T: Into<u8>> From<T> for P {\n        fn from(t: T) -> P {\n            P(std::ptr::null::<u8>().wrapping_add(t.into() as usize))\n        }\n    }\n    impl P {\n        pub fn get(&self) -> u8 {\n            1\n        }\n    }\n}\n\npub fn sum(a: u8, b: u8) -> u8 {\n    #![allow(unused)]\n    let tag = \"#x\";\n    (inner::W(a) + inner::W(b)).0\n}\n\n#[cfg_attr(test, inline)]\npub fn later() -> u8 {\n    2\n}\n";
 
     /// An operator implemented for a generic type in a module is reached by
     /// the type's name (`W`), whatever its header holds (generics, `where`);
@@ -898,17 +916,25 @@ mod tests {
         checkout.write("src/lib.rs", &GENERIC.replace("    2\n}\n", "    3\n}\n"));
         assert!(reaches());
         assert_eq!(
-            header("inner::unsafe impl Send for P"),
-            "unsafe impl Send for P"
+            rust_attributes("#![allow(x)] # [inline] #x #[tokio::test]"),
+            ["allow", "inline", "tokio::test"]
         );
+        // `From::from` of `P`, whose header nests generics: `sum` never
+        // names `P`, `From` or `from`.
+        checkout.write(
+            "src/lib.rs",
+            &GENERIC.replace("t.into() as usize", "t.into() as usize + 0"),
+        );
+        assert!(!reaches());
         assert_eq!(
             implementation_keys("unsafe impl Send for P"),
             BTreeSet::from(["P".to_owned(), "Send".to_owned()])
         );
         assert!(implementation_keys("struct S").is_empty());
+        // A generic parameter names no type of the program.
         assert_eq!(
-            rust_attributes("#![allow(x)] # [inline] #x"),
-            ["allow", "inline"]
+            implementation_keys("impl<'a, T: Into<u8>, const N: usize> From<[T; N]> for P<'a>"),
+            BTreeSet::from(["From".to_owned(), "P".to_owned()])
         );
     }
 

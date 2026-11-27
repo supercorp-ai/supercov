@@ -28,6 +28,16 @@ and its replacement code:
 | `MatchArmGuard` | a guard made `true`, and `false` | `true`, `false` |
 | `StructField` | a field of a struct literal with `..base` deleted | `removed` |
 
+cargo-mutants replaces an operator's text, so the compiler reads its mutant
+afresh: where the new operator binds otherwise than the old, the expression
+around it groups otherwise (`a - b * c` with `*` made `+` is `a - b + c`,
+`(a - b) + c`; `p && q && r` with its first `&&` made `||` is
+`p || (q && r)`). Such a mutant's site is the whole expression of operators,
+casts and ranges it sits in (up to parentheses, a call, a statement), which
+its switch replaces with that text, and its weak verdict reads no operand
+probe; one whose text groups as the expression with only the operator
+changed stays at its own operator (`rust_mutants::regrouped`).
+
 It reads the file with the parser the instrumenter uses (`ra_ap_syntax`),
 where cargo-mutants reads it with `syn`, so it repeats what `syn` sees: a
 macro's arguments are tokens and hold no mutant; a node starts at its first
@@ -165,8 +175,8 @@ incremental builds, not one per mutant.
 
 Some mutants are never switched (`rust_schemata::placeable`): code the
 compiler evaluates (`const`, `static`, `const fn`, array lengths, enum
-discriminants), a body whose type is an opaque `impl Trait` (a second value
-would be a second type), an operator over a `let` chain (an `if` around it
+discriminants), a body whose type holds an opaque `impl Trait` anywhere
+(`Result<impl Iterator, E>`; a second value would be a second type), an operator over a `let` chain (an `if` around it
 ends the chain), allocator code (the runtime reads the environment once,
 which allocates), and files of proc-macro crates (the compiler runs them).
 Each is written into a plain copy (`.supercov/strong/rust/plain`) and built

@@ -164,21 +164,6 @@ pub(crate) fn list(
     if points_changed {
         return None;
     }
-    // What the instrumenter declares and cannot probe (a `const fn`'s body,
-    // which the compiler runs) is in the run's record and never hit: a link
-    // there would read the code as never run. Such a mutant is linked to
-    // nothing, and reached for all the run knows.
-    let declined = manifest
-        .unmeasured
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    let measured = recorded
-        .iter()
-        .filter(|id| !declined.contains(id.as_str()))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let recorded = &measured;
     // The innermost recorded one of `candidates` whose range holds `range`.
     let innermost = |candidates: &[(String, TextRange)], range: TextRange| {
         candidates
@@ -215,6 +200,18 @@ pub(crate) fn list(
                 is_static: false,
                 unplaceable: None,
             };
+            // Code no probe can be in (a `const fn`'s, an allocator's) has no
+            // record of its own, though the run may list its points: the
+            // mutant is linked to nothing, and reached for all the run knows.
+            let node = match root.covering_element(mutant.range) {
+                ra_ap_syntax::NodeOrToken::Node(node) => node,
+                ra_ap_syntax::NodeOrToken::Token(token) => {
+                    token.parent().expect("a token is in a node")
+                }
+            };
+            if crate::rust_instrumenter::cannot_carry_probe(&node) {
+                return candidate;
+            }
             // The value probe at the mutated code, where the run placed one.
             let probed = |range: TextRange, kind: &str| {
                 let site = value_site(file, range, kind);
@@ -390,7 +387,13 @@ impl Walker<'_> {
         let last = statements.last().expect("not empty").text_range().end();
         let range = TextRange::new(first, last);
         let return_type = function.ret_type().and_then(|ret| ret.ty());
-        let opaque = matches!(return_type, Some(ast::Type::ImplTraitType(_)));
+        // An `impl Trait` anywhere in it (`Result<impl Iterator, E>`): a
+        // second value is a second type.
+        let opaque = return_type.as_ref().is_some_and(|ty| {
+            ty.syntax()
+                .descendants()
+                .any(|node| node.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
+        });
         let replacements = match &return_type {
             None => vec!["()".to_owned()],
             Some(ty) => type_replacements(ty),
@@ -428,7 +431,8 @@ impl Walker<'_> {
                 token.text_range(),
                 (*replacement).to_owned(),
                 Site::Operator {
-                    expression: node.text_range(),
+                    expression: regrouped(node, token.text_range(), replacement)
+                        .unwrap_or_else(|| node.text_range()),
                 },
             );
         }
@@ -549,6 +553,68 @@ pub(crate) fn arithmetic_code(replacement: &str) -> char {
 const SKIPPED_CALL: &str = "with_capacity";
 
 /// cargo-mutants' replacements of a binary operator.
+/// cargo-mutants replaces an operator's text in the source, so the
+/// compiler reads its mutant afresh: where the new operator binds more or
+/// less tightly than the old, the expression around it groups otherwise.
+/// `a - b * c` with `*` made `+` is `a - b + c`, `(a - b) + c`, not
+/// `a - (b + c)`; `p && q && r` with its first `&&` made `||` is
+/// `p || (q && r)`. The expression of operators the mutant sits in (its
+/// operators, casts and ranges, up to what bounds them: parentheses, a call,
+/// a statement), where its text with the replacement groups otherwise than
+/// the expression as written with only the operator changed; `None` where
+/// it groups alike, and the operator's own expression holds the mutant.
+fn regrouped(node: &SyntaxNode, operator: TextRange, replacement: &str) -> Option<TextRange> {
+    let chained = |node: &SyntaxNode| {
+        matches!(
+            node.kind(),
+            SyntaxKind::BIN_EXPR
+                | SyntaxKind::PREFIX_EXPR
+                | SyntaxKind::CAST_EXPR
+                | SyntaxKind::RANGE_EXPR
+        )
+    };
+    let outer = node.ancestors().take_while(chained).last()?;
+    if outer == *node {
+        return None;
+    }
+    let start = outer.text_range().start();
+    let text = outer.text().to_string();
+    let at = usize::from(operator.start() - start)..usize::from(operator.end() - start);
+    let mutated = format!("{}{replacement}{}", &text[..at.start], &text[at.end..]);
+    let parsed = ra_ap_syntax::SourceFile::parse(
+        &format!("fn f() {{ let _ = ({mutated}); }}"),
+        ra_ap_syntax::Edition::Edition2024,
+    );
+    let reparsed = parsed
+        .tree()
+        .syntax()
+        .descendants()
+        .find(|node| node.kind() == SyntaxKind::PAREN_EXPR)
+        .and_then(|paren| paren.children().next());
+    let alike = reparsed.is_some_and(|reparsed| {
+        shape(&reparsed, None) == shape(&outer, Some((operator, replacement)))
+    });
+    (!alike).then(|| outer.text_range())
+}
+
+/// How `node` groups: each node in parentheses, its tokens as written but
+/// for `replaced`, the token at a range given its new text.
+fn shape(node: &SyntaxNode, replaced: Option<(TextRange, &str)>) -> String {
+    let parts = node
+        .children_with_tokens()
+        .filter_map(|element| match element {
+            ra_ap_syntax::NodeOrToken::Node(child) => Some(shape(&child, replaced)),
+            ra_ap_syntax::NodeOrToken::Token(token) if token.kind().is_trivia() => None,
+            ra_ap_syntax::NodeOrToken::Token(token) => Some(
+                replaced
+                    .filter(|(range, _)| *range == token.text_range())
+                    .map_or_else(|| token.text().to_owned(), |(_, text)| text.to_owned()),
+            ),
+        })
+        .collect::<Vec<_>>();
+    format!("({})", parts.join(" "))
+}
+
 pub(crate) fn binary_replacements(operator: BinaryOp) -> &'static [&'static str] {
     use ra_ap_syntax::ast::Ordering::{Greater, Less};
     match operator {
@@ -1665,13 +1731,43 @@ mod tests {
         assert_eq!(arithmetic_code(""), ' ');
     }
 
+    /// A mutant whose operator binds otherwise than the one it replaces
+    /// regroups the expression around it, as cargo-mutants' text does
+    /// (`a - b * c` made `a - b + c` is `(a - b) + c`): its switch holds that
+    /// whole expression. One that groups alike stays at its own operator.
+    #[test]
+    fn a_mutant_that_regroups_its_expression_is_switched_around_it() {
+        let source = "pub fn f(a: i32, b: i32, c: i32, p: bool, q: bool, r: bool) -> i32 {\n    if p && q && r { a - b * c } else { a + b - c }\n}\n";
+        let mutants = enumerate(source).unwrap();
+        let site = |at: &str, replacement: &str| {
+            let mutant = mutants
+                .iter()
+                .find(|mutant| {
+                    &source[mutant.range] == at.split('@').next().unwrap()
+                        && mutant.start.1 == at.split('@').nth(1).unwrap().parse::<u32>().unwrap()
+                        && mutant.replacement == replacement
+                })
+                .unwrap_or_else(|| panic!("no {at} {replacement}"));
+            match mutant.site {
+                Site::Operator { expression } => source[expression].to_owned(),
+                _ => panic!("{mutant:?}"),
+            }
+        };
+        assert_eq!(site("*@28", "+"), "a - b * c");
+        assert_eq!(site("*@28", "/"), "b * c");
+        assert_eq!(site("&&@10", "||"), "p && q && r");
+        assert_eq!(site("&&@15", "||"), "p && q && r");
+        assert_eq!(site("-@24", "+"), "a - b * c");
+        assert_eq!(site("+@43", "-"), "a + b");
+    }
+
     /// A `const fn`'s body is declared and never probed: the run records
     /// its points, never hit, and a mutant there is linked to none of them,
     /// so it is reached for all the run knows, not `not-reached`.
     #[test]
     fn a_mutant_in_a_const_fn_is_linked_to_nothing() {
         let file = "src/lib.rs";
-        let source = "pub const fn named(s: &str) -> bool {\n    !s.is_empty()\n}\npub fn plain(s: &str) -> bool {\n    !s.is_empty()\n}\n";
+        let source = "pub const fn named(s: &str) -> bool {\n    !s.is_empty()\n}\npub fn plain(s: &str) -> bool {\n    !s.is_empty()\n}\npub const fn look(n: u8) -> u8 {\n    match n {\n        1 => 2,\n        _ => 3,\n    }\n}\n";
         let manifest = crate::rust_instrumenter::build_rust_manifest(file, source).unwrap();
         let recorded = manifest
             .points
@@ -1691,5 +1787,20 @@ mod tests {
             negations[0]
         );
         assert!(negations[1].statement.is_some(), "{:?}", negations[1]);
+        // A deleted arm of a `const fn`'s `match`: its branch is in the
+        // run's record, never taken; the mutant is linked to none of it.
+        let mut with_branches = recorded.clone();
+        with_branches.extend(manifest.branches.iter().flat_map(|branch| {
+            branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.id.clone())
+        }));
+        let arm = list(file, source, &with_branches)
+            .unwrap()
+            .into_iter()
+            .find(|mutant| mutant.mutator == "MatchArm")
+            .unwrap();
+        assert!(arm.statement.is_none() && arm.function.is_none(), "{arm:?}");
     }
 }

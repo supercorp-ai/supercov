@@ -2869,17 +2869,13 @@ fn run_language(
     // A Rust mutant the plan decided without running (no test reaches it,
     // or none infects it) may not compile, which cargo-mutants reports as
     // `unviable`: the driver switches it into its build too, to find out.
+    // (Another language's decided mutant is in no Rust file's list, and is
+    // left as it is.)
     if language == supercov_engine::mutant_list::RUST {
         written["decided"] = serde_json::to_value(
             plan.mutants
                 .iter()
-                .filter(|mutant| {
-                    mutant.decided.is_some()
-                        && mutant.language == language
-                        && saved
-                            .get(&mutant.id)
-                            .is_none_or(|verdict| verdict.status != "unviable")
-                })
+                .filter(|mutant| mutant.decided.is_some())
                 .collect::<Vec<_>>(),
         )
         .expect("plain data serializes");

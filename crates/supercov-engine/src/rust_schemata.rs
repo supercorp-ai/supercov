@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(mutants.len(), 7);
         assert_eq!(
             file.code,
-            "pub fn f(a: i32, b: i32) -> i32 { if crate::rt::on(\"a.rs\", 0) { return 0; } if crate::rt::on(\"a.rs\", 1) { return 1; } if crate::rt::on(\"a.rs\", 2) { return -1; }\n    (if crate::rt::on(\"a.rs\", 3) { a - b * 2 } else if crate::rt::on(\"a.rs\", 4) { a * b * 2 } else { a + (if crate::rt::on(\"a.rs\", 5) { b + 2 } else if crate::rt::on(\"a.rs\", 6) { b / 2 } else { b * 2 }) })\n}\n"
+            "pub fn f(a: i32, b: i32) -> i32 { if crate::rt::on(\"a.rs\", 0) { return 0; } if crate::rt::on(\"a.rs\", 1) { return 1; } if crate::rt::on(\"a.rs\", 2) { return -1; }\n    (if crate::rt::on(\"a.rs\", 3) { a - b * 2 } else if crate::rt::on(\"a.rs\", 4) { a * b * 2 } else if crate::rt::on(\"a.rs\", 5) { a + b + 2 } else { a + (if crate::rt::on(\"a.rs\", 6) { b / 2 } else { b * 2 }) })\n}\n"
         );
         let own = |ordinal: u64| {
             let (_, range) = file
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn code_the_compiler_evaluates_is_not_switched() {
-        let source = "const N: usize = 1 + 2;\nconst fn c(a: u8) -> u8 { a + 1 }\nfn i() -> impl Iterator<Item = u8> { std::iter::once(1) }\nfn l(a: Option<u8>, b: bool) -> bool { if let Some(_) = a && b { true } else { false } }\nenum E { A = 1 << 2 }\nfn r(a: u8) -> u8 { a + 1 }\n";
+        let source = "const N: usize = 1 + 2;\nconst fn c(a: u8) -> u8 { a + 1 }\nfn i() -> impl Iterator<Item = u8> { std::iter::once(1) }\nfn o() -> Result<impl Iterator<Item = u8>, ()> { Ok(std::iter::once(1)) }\nfn l(a: Option<u8>, b: bool) -> bool { if let Some(_) = a && b { true } else { false } }\nenum E { A = 1 << 2 }\nfn r(a: u8) -> u8 { a + 1 }\n";
         let mutants = crate::rust_mutants::enumerate(source).unwrap();
         let (tree, _) = crate::rust_instrumenter::parse_source(source).unwrap();
         let reasons = mutants
@@ -383,6 +383,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(reasons.contains(&Some("const-context")));
         assert!(reasons.contains(&Some("opaque-return")));
+        // `impl Trait` inside the return type is as opaque.
+        let nested = mutants
+            .iter()
+            .zip(&reasons)
+            .filter(|(mutant, _)| mutant.start.0 == 4 && mutant.genre == "FnValue")
+            .map(|(_, reason)| *reason)
+            .collect::<Vec<_>>();
+        assert!(
+            !nested.is_empty() && nested.iter().all(|reason| *reason == Some("opaque-return")),
+            "{nested:?}"
+        );
         assert!(reasons.contains(&Some("let-chain")));
         assert!(reasons.contains(&None));
         assert!(runtime("rt", "k").contains("mod rt"));

@@ -69,7 +69,7 @@
       "shape": "mid-size library, randomized round-trip tests",
       "test": "cargo test",
       "truthShards": 24,
-      "supercovShards": 4
+      "supercovShards": 8
     },
     {
       "name": "fastrand",
@@ -79,7 +79,7 @@
       "test": "cargo nextest run",
       "cargoMutantsArgs": "--test-tool=nextest",
       "truthShards": 6,
-      "supercovShards": 1
+      "supercovShards": 4
     },
     {
       "name": "bitflags",
@@ -107,7 +107,7 @@
       "test": "cargo test -p regex-syntax",
       "cargoMutantsArgs": "-p regex-syntax",
       "truthShards": 40,
-      "supercovShards": 6
+      "supercovShards": 10
     }
   ]
 }
