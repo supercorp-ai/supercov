@@ -28,7 +28,11 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const root = resolve(repository, 'target', `rust-worker-mutants-${process.pid}-${Date.now()}`);
 const WRANGLER = '4.151.1';
-const run = (cwd, command, args, env = {}) => spawnSync(command, args, { cwd, encoding: 'utf8', maxBuffer: 1 << 28, env: { ...process.env, NO_COLOR: '1', CI: '1', ...env } });
+const run = (cwd, command, args, env = {}, timeout = 0) => spawnSync(command, args, { cwd, encoding: 'utf8', maxBuffer: 1 << 28, timeout, killSignal: 'SIGKILL', env: { ...process.env, NO_COLOR: '1', CI: '1', ...env } });
+// Each step ends in time, saying what it did so far, rather than holding the job.
+const LIMIT = 6 * 60 * 1000;
+const started = Date.now();
+const took = () => `${Math.round((Date.now() - started) / 1000)} s`;
 
 const targets = run(repository, 'rustup', ['target', 'list', '--installed']).stdout ?? '';
 if (process.platform === 'win32' || run(repository, 'worker-build', ['--version']).status !== 0 || !targets.includes('wasm32-unknown-unknown')) {
@@ -46,7 +50,7 @@ const files = {
   'Cargo.toml': '[workspace]\nmembers = ["worker", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
   'worker/Cargo.toml': '[package]\nname = "grades-worker"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\n',
   'worker/wrangler.toml': 'name = "grades-worker"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "./build.sh"\n',
-  'worker/build.sh': '#!/bin/sh\n# The Worker, as the project builds it.\nset -e\nworker-build --release\n',
+  'worker/build.sh': '#!/bin/sh\n# The Worker, as the project builds it: a dev build, which a gate builds in seconds.\nset -e\nworker-build --dev\n',
   'worker/src/lib.rs': `use worker::*;
 
 pub fn grade(score: u32) -> &'static str {
@@ -65,7 +69,10 @@ pub fn hidden(score: u32) -> u32 {
     score + 1
 }
 
+// The routing is not what the gate is about: its mutants would each start
+// the Worker for every test.
 #[event(fetch)]
+#[cfg_attr(test, mutants::skip)]
 async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Response> {
     let url = request.url()?;
     let score = url
@@ -146,7 +153,8 @@ fn serve_with(wrangler: &str) -> Dev {
         .spawn()
         .expect("wrangler");
     let dev = Dev { child, port };
-    for _ in 0..1200 {
+    // Two minutes: a Worker that never answers fails its test, not the job.
+    for _ in 0..240 {
         if get(port, "/ready").as_deref() == Some("ready") {
             return dev;
         }
@@ -208,11 +216,14 @@ try {
   const bin = resolve(root, 'node_modules/.bin');
   const path = `${bin}${delimiter}${process.env.PATH}`;
   const env = { PATH: path, GATE_REAL_WRANGLER: realpathSync(resolve(bin, 'wrangler')) };
-  const measured = run(root, binary, ['--', 'cargo', 'test'], env);
+  const measured = run(root, binary, ['--', 'cargo', 'test'], env, LIMIT);
+  console.log(`[rust-worker-mutants] measured, ${took()}`);
   assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
   assert.doesNotMatch(measured.stderr, /not measured: [^\n]*Rust Worker/u, measured.stderr);
 
-  const pass = run(root, binary, ['runs', 'latest', 'mutants', 'test', '--json'], env);
+  const pass = run(root, binary, ['runs', 'latest', 'mutants', 'test', '--json'], { ...env, SUPERCOV_PROGRESS_INTERVAL_MS: '20000' }, LIMIT);
+  console.log(`[rust-worker-mutants] strong pass, ${took()}`);
+  console.log(pass.stderr.split('\n').filter((line) => line.startsWith('[supercov]')).join('\n'));
   assert.equal(pass.status, 0, `${pass.stdout}\n${pass.stderr}`);
   const listed = JSON.parse(run(root, binary, ['runs', 'latest', 'mutants', '--json', '--limit', '0']).stdout).data.mutants;
   const of = (line) => listed.filter((mutant) => mutant.file === 'worker/src/lib.rs' && mutant.span.start[0] === line);
