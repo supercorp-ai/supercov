@@ -68,8 +68,8 @@
       "tag": "v0.22.1",
       "shape": "mid-size library, randomized round-trip tests",
       "test": "cargo test",
-      "truthShards": 24,
-      "supercovShards": 8
+      "truthShards": 48,
+      "supercovShards": 16
     },
     {
       "name": "fastrand",
@@ -78,8 +78,8 @@
       "shape": "run under cargo-nextest by both tools",
       "test": "cargo nextest run",
       "cargoMutantsArgs": "--test-tool=nextest",
-      "truthShards": 6,
-      "supercovShards": 4
+      "truthShards": 8,
+      "supercovShards": 8
     },
     {
       "name": "bitflags",
