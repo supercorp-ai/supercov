@@ -456,7 +456,7 @@ for (let round = 1; round <= rounds; round += 1) {
       continue;
     }
     for (const suite of suites) suiteRun(round, name, suite, path);
-    const { seconds } = run(project, path, ['merge'], `${round}-${name}-merge`);
+    const { seconds } = run(project, path, ['merge'], `${round}-${name}-merge`, {}, true);
     sample(round, name, 'merge', seconds);
   }
 }

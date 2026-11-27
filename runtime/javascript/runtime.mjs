@@ -491,6 +491,11 @@ function installProbeV2AsyncHook() {
     const createHook = (_a8 = getBuiltinModule == null ? void 0 : getBuiltinModule("node:async_hooks")) == null ? void 0 : _a8.createHook;
     if (!createHook)
       return;
+    if (diagSkipList.includes("hook")) {
+      state.probeV2HookInstalled = true;
+      state.probeV2Clock.fast = true;
+      return;
+    }
     const epochs = [];
     createHook({
       // NaN, which no epoch equals: the callback's first probe works out
