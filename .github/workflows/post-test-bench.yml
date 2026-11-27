@@ -1,0 +1,149 @@
+name: Post-test bench
+
+# Experiment-only workflow: times what Supercov does after the tests finish
+# (publication, merge, first query, reports, diff, store size) for a base and a
+# head binary on the same recorded runs, and checks their outputs agree.
+
+on:
+  push:
+    branches: ['exp/post-test-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-test-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The build that records the fixture runs, and the base the head is compared with.
+  FIXTURE_REF: ce132bc2
+  BASE_REF: ce132bc2
+  EXCALIDRAW: 701b901a0f1ba3d0b390d9cdf63d112e25abac4b
+  FIXTURE_VERSION: v1
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        variant: [base, head]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: ref
+        run: |
+          if [ "${{ matrix.variant }}" = base ]; then echo "sha=$(git rev-parse $BASE_REF)" >> "$GITHUB_OUTPUT"; else echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; fi
+      - id: cached
+        uses: actions/cache@v4
+        with:
+          path: out/supercov
+          key: post-test-bin-${{ steps.ref.outputs.sha }}
+      - if: steps.cached.outputs.cache-hit != 'true'
+        run: git checkout -q --detach ${{ steps.ref.outputs.sha }}
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: post-test-bench
+      - if: steps.cached.outputs.cache-hit != 'true'
+        run: |
+          cargo build --profile measure -p supercov
+          mkdir -p out && cp target/measure/supercov out/supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: out/supercov
+          retention-days: 2
+
+  fixtures:
+    name: Fixture runs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: cached
+        uses: actions/cache@v4
+        with:
+          path: fixtures.tar
+          key: post-test-fixtures-${{ env.FIXTURE_VERSION }}-${{ env.FIXTURE_REF }}-${{ env.EXCALIDRAW }}
+          lookup-only: true
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: post-test-bench
+      - if: steps.cached.outputs.cache-hit != 'true'
+        run: |
+          git checkout -q --detach $FIXTURE_REF
+          cargo build --profile measure -p supercov
+          git checkout -q $GITHUB_SHA
+      - if: steps.cached.outputs.cache-hit != 'true'
+        env:
+          BENCH_MODE: fixtures
+          BENCH_BINARY: ${{ github.workspace }}/target/measure/supercov
+          BENCH_OUTPUT: ${{ runner.temp }}/bench
+        run: node scripts/post-test-bench.mjs
+      - if: steps.cached.outputs.cache-hit != 'true'
+        run: tar -C "$RUNNER_TEMP/bench" -cf fixtures.tar runs fixture.json
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: fixtures.tar
+          key: post-test-fixtures-${{ env.FIXTURE_VERSION }}-${{ env.FIXTURE_REF }}-${{ env.EXCALIDRAW }}
+      - if: always() && steps.cached.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-log
+          path: ${{ runner.temp }}/bench/fixture-*.txt
+          retention-days: 3
+
+  measure:
+    needs: [build, fixtures]
+    name: Measure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/cache/restore@v4
+        with:
+          path: fixtures.tar
+          key: post-test-fixtures-${{ env.FIXTURE_VERSION }}-${{ env.FIXTURE_REF }}-${{ env.EXCALIDRAW }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov && nproc && free -g
+      - env:
+          BENCH_MODE: measure
+          BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
+          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,head=${{ github.workspace }}/binaries/supercov-head/supercov
+          BENCH_OUTPUT: ${{ runner.temp }}/bench
+          BENCH_ROUNDS: 3
+        run: node scripts/post-test-bench.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            ${{ runner.temp }}/bench/summary.md
+            ${{ runner.temp }}/bench/samples.jsonl
+            ${{ runner.temp }}/bench/outputs/
+            ${{ runner.temp }}/bench/logs/
+          retention-days: 5
