@@ -515,6 +515,14 @@ fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
     project.edit("src/lib.rs", "    v - 1\n", "    v.wrapping_sub(1)\n");
     let unnamed = step("unused", Some(9), &["testReached"]);
     assert_eq!(unnamed["summary"]["ran"], 1, "{unnamed}");
+    // A comment after every function moves no line: every verdict is
+    // kept, the doctest's with them, since no code changed.
+    project.write(
+        "src/lib.rs",
+        &format!("{}// The end.\n", project.read("src/lib.rs")),
+    );
+    let ended = step("a comment at the end", Some(10), &[]);
+    assert_eq!(ended["summary"]["ran"], 0, "{ended}");
     // The build's configuration: nothing is kept.
     project.write(
         "Cargo.toml",

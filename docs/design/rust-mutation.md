@@ -432,7 +432,7 @@ names (`strong_reach.rs`), as a JavaScript one is:
   run counts among its test files.
 
 `rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches`
-(`crates/supercov-cli/tests/rust_mutation.rs`) carries a crate across six
+(`crates/supercov-cli/tests/rust_mutation.rs`) carries a crate across seven
 commits and compares each with a pass from nothing on the same commit:
 every verdict the same each time. Of its ten mutants a pass runs, one is
 killed by a doctest, whose name holds its line and whose code is a comment
@@ -445,6 +445,7 @@ of the source: it runs again wherever code changed.
 | `audit`, which only a mutant of `refund` sends a test into | 6 | 4, the survivor now killed |
 | `Display::fmt`, which `format!` calls and no code names | 6 | 4 |
 | a function nothing names | 9 | 1 (the doctest's) |
+| a comment after every function (no line moved) | 10 | 0 |
 | `Cargo.toml` | 0 | 10 |
 
 ## nextest

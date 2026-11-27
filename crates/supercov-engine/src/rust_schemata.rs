@@ -75,14 +75,18 @@ pub(crate) fn placeable(root: &SyntaxNode, mutant: &RustMutant) -> Option<&'stat
     // With the arm gone, every arm left diverges (`_ => return None`): the
     // `match` is of type `!`, and what uses its value may not compile, as
     // cargo-mutants' build finds. A switch keeps the arm, and its type.
-    if let Site::Arm { arm, .. } = mutant.site
-        && let Some(list) = node.ancestors().find_map(ast::MatchArmList::cast)
-        && list
+    if let Site::Arm { arm, .. } = mutant.site {
+        let list = node
+            .ancestors()
+            .find_map(ast::MatchArmList::cast)
+            .expect("an arm is in a match");
+        let diverging = list
             .arms()
             .filter(|other| other.syntax().text_range() != arm)
-            .all(|other| other.expr().is_some_and(|expr| diverges(&expr)))
-    {
-        return Some("diverging-arms");
+            .all(|other| other.expr().is_some_and(|expr| diverges(&expr)));
+        if diverging {
+            return Some("diverging-arms");
+        }
     }
     None
 }
@@ -436,7 +440,7 @@ mod tests {
         );
         assert!(reasons.contains(&Some("let-chain")));
         // An arm whose deletion leaves only arms that diverge.
-        let diverging = "fn s(n: Option<u8>, m: Option<u8>) -> u8 {\n    let v = match n {\n        Some(v) => v,\n        _ => return 0,\n    };\n    let w = match m {\n        Some(w) => w,\n        None => { panic!(\"none\"); }\n        _ => unreachable!(),\n    };\n    match n {\n        Some(1) => 2,\n        _ => { v + w }\n    }\n}\n";
+        let diverging = "fn s(n: Option<u8>, m: Option<u8>) -> u8 {\n    let v = match n {\n        Some(v) => v,\n        _ => return 0,\n    };\n    let w = match m {\n        Some(w) => w,\n        None => { panic!(\"none\"); }\n        _ => unreachable!(),\n    };\n    match m {\n        Some(9) => {}\n        Some(8) => { let _z = 1; }\n        _ => { g(); }\n    }\n    match n {\n        Some(1) => 2,\n        _ => { v + w }\n    }\n}\n";
         let arms = crate::rust_mutants::enumerate(diverging).unwrap();
         let (tree, _) = crate::rust_instrumenter::parse_source(diverging).unwrap();
         let by_line = arms
@@ -450,7 +454,9 @@ mod tests {
                 (3, Some("diverging-arms")),
                 (7, Some("diverging-arms")),
                 (8, None),
-                (12, None)
+                (12, None),
+                (13, None),
+                (17, None)
             ]
         );
         assert!(reasons.contains(&None));

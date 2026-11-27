@@ -578,7 +578,7 @@ fn regrouped(node: &SyntaxNode, operator: TextRange, replacement: &str) -> Optio
         .ancestors()
         .take_while(chained)
         .last()
-        .unwrap_or_else(|| node.clone());
+        .unwrap_or(node.clone());
     if outer == *node {
         return None;
     }
