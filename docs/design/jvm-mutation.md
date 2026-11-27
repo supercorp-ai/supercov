@@ -327,8 +327,8 @@ kills are what a violation is read against) and Supercov per shard
 (`shards` in `projects.json`, sized so each job ends within ten minutes),
 joined by `mutants pit`, with a `handchecks` input that applies a mutant and
 runs the project's own suite in CI. The table and every violation's check
-are in `docs/mutation.md` ("Java and Kotlin, against PIT 1.17.1"): 18
-violations in 7,146 joined mutants, each one PIT's environment (statics set
+are in `docs/mutation.md` ("Java and Kotlin, against PIT 1.17.1"): 17
+violations in 5,937 joined mutants, each one PIT's environment (statics set
 up before its mutant, one JVM's leftover state, an `inline` function's
 copied code, identity-hashed test names, a load-dependent timeout), none
 Supercov's. Every mutant Supercov decided was decided within the jobs'

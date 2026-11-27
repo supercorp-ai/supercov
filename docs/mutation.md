@@ -917,7 +917,7 @@ PIT does not run Kotest, so aedile has no join: all 28 of its mutants are
 killed. Every soundness violation was checked, the mutant applied to the
 source and the project's own suite run with it:
 
-- **Supercov killed, PIT survived or no coverage (13):** code that runs only
+- **Supercov killed, PIT survived or no coverage (14):** code that runs only
   as a class's statics are set up (typetools' `TypeResolver` initializer,
   3; picnic's `textBorder.kt:5`; Ant's cached parser factories and package
   list, `JAXPUtils` and `JavaEnvUtils`, 5; Ant's `SymbolicLinkUtils.java:55`,
@@ -928,7 +928,7 @@ source and the project's own suite run with it:
   code runs only copied into callers compiled before PIT mutates anything;
   `Taggable.kt:28` and `:63` are reached only by a JUnit 4 parameterized
   test whose names carry identity hashes, which PIT cannot select again.
-- **Supercov survived, PIT killed or timed out (5):** with the mutant applied,
+- **Supercov survived, PIT killed or timed out (3):** with the mutant applied,
   the project's whole suite passes: commons-cli's `OptionBuilder.java:141`
   and Ant's `FileUtils.java:1204` are killed in PIT's single JVM by state an
   earlier test left; Ant's `VectorSet.java:228` makes `retainAll` slower

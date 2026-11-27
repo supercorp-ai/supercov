@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Added**
+
+- Java and Kotlin mutation testing, fully supported: `npx supercov mutants -- mvn test` (or `./gradlew test`, or an Ant build) lists PIT 1.17.1's mutants of the Java and Kotlin the run measured, decides from the run those no test reaches or infects, and runs the rest inside the build's own test JVM, one test at a time, each mutant in freshly loaded classes, under JUnit 5, JUnit 4 (through Vintage and under Ant's `<junit>`), Kotest, Spock and TestNG, with Maven, Gradle and Ant. Code a test class runs for all its tests (`@BeforeAll`, a `@MethodSource`, a static initializer, `@BeforeClass`, a Kotest spec's body) is credited to each of its tests; each JVM that shares the pass works in a directory of its own; each test runs twice without a mutant before it is a candidate, and each kill is confirmed without the mutant. `supercov runs latest mutants --format pit` writes PIT's XML report, and `supercov runs latest mutants pit <mutations.xml>` joins a PIT report with the run's verdicts. Against PIT on eight public projects (`benchmarks/mutation-jvm/`, `.github/workflows/mutation-jvm.yml`), of 5,937 mutants both tools listed, 5,919 agree; each of the 17 soundness violations is PIT's environment (statics already set up, state an earlier test left, `inline` code, identity-hashed test names, a load-dependent timeout), each checked by applying the mutant and running the project's own suite. The table is in `docs/mutation.md`.
+
 **Fixed**
 
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
