@@ -31022,8 +31022,13 @@ fn a_ruby_suite_whose_coverage_tool_stops_coverage_is_still_measured() {
     let output = project
         .supercov(&["--", ruby.as_str(), "-Ilib", "test/w_test.rb"])
         .succeeds();
-    assert!(!output.contains("coverage measurement is not enabled"), "{output}");
-    let file = project.supercov(&["runs", "latest", "file", "lib/w.rb"]).succeeds();
+    assert!(
+        !output.contains("coverage measurement is not enabled"),
+        "{output}"
+    );
+    let file = project
+        .supercov(&["runs", "latest", "file", "lib/w.rb"])
+        .succeeds();
     assert!(file.contains("Tests touching this file: 1"), "{file}");
 }
 
