@@ -1,0 +1,116 @@
+name: Speed languages
+
+# Experiment only: plain vs Supercov on public Rust, Python, Go, Ruby and JVM
+# projects (scripts/speed/languages.mjs). Runs on pushes to exp/speed-languages*.
+
+on:
+  push:
+    branches: ['exp/speed-languages*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speed-languages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A base ref to compare against, or empty to measure the head alone.
+  BASE_REF: ''
+  PROJECTS: '["rust-semver","rust-ripgrep","python-click","python-h11","go-cobra","go-gin","ruby-rack","ruby-httparty","jvm-gson","jvm-commons-cli"]'
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      projects: ${{ steps.p.outputs.projects }}
+      base: ${{ steps.p.outputs.base }}
+    steps:
+      - id: p
+        run: |
+          echo "projects=$PROJECTS" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE_REF" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        variant: [base, new]
+    steps:
+      - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.variant == 'base' && needs.setup.outputs.base || github.sha }}
+      - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
+        uses: dtolnay/rust-toolchain@1.95.0
+      - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-languages-${{ matrix.variant }}
+      - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
+        run: cargo build --profile measure -p supercov
+      - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  measure:
+    needs: [setup, build]
+    name: ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.setup.outputs.projects) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - if: startsWith(matrix.project, 'rust-')
+        uses: dtolnay/rust-toolchain@1.95.0
+      - if: startsWith(matrix.project, 'python-')
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - if: startsWith(matrix.project, 'go-')
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - if: startsWith(matrix.project, 'ruby-')
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - if: startsWith(matrix.project, 'jvm-')
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: binaries
+      - run: chmod +x binaries/*/supercov && nproc && lscpu | grep 'Model name'
+      - name: Measure
+        env:
+          SPEED_PROJECT: ${{ matrix.project }}
+          SPEED_ROUNDS: '2'
+          SPEED_OUTPUT: ${{ runner.temp }}/speed/out
+          SUPERCOV_BINARIES: ${{ needs.setup.outputs.base != '' && 'base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov' || 'new=binaries/supercov-new/supercov' }}
+        run: node scripts/speed/languages.mjs
+      - if: always()
+        run: |
+          cd "$RUNNER_TEMP/speed/out/answers" 2>/dev/null && ls -la && { [ -f base.json ] && [ -f new.json ] && (cmp base.json new.json && echo "ANSWERS IDENTICAL" || { echo "ANSWERS DIFFER"; diff base.json new.json | head -50; }) || true; }
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speed-${{ matrix.project }}
+          path: ${{ runner.temp }}/speed/out
+          retention-days: 5
