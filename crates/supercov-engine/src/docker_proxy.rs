@@ -346,9 +346,6 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
     // the same way as one stopped later.
     loop {
         match listener.accept() {
-            // `finish` connects once to wake the relay: that connection is
-            // nobody's.
-            Ok(_) if stop.load(Ordering::Acquire) => break,
             Ok((client, _)) => {
                 let _ = client.set_nonblocking(false);
                 let shared = Arc::clone(shared);
@@ -363,6 +360,8 @@ fn accept(listener: &UnixListener, shared: &Arc<Shared>, stop: &AtomicBool) {
             // the relay a hundred times a second for the whole run, most
             // runs never using it; `finish` wakes it with a connection, and
             // the wait ends by itself in case that connection cannot be made.
+            // The relay stops on the check below, before taking that
+            // connection.
             Err(_) => wait_readable(listener, Duration::from_millis(250)),
         }
         if stop.load(Ordering::Acquire) {
@@ -380,12 +379,10 @@ fn wait_readable(listener: &UnixListener, limit: Duration) {
         revents: 0,
     };
     let milliseconds = libc::c_int::try_from(limit.as_millis()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: one valid pollfd, for the call's length.
-    let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
-    if ready < 0 {
-        // Interrupted, or a poll that cannot run: never spin.
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // SAFETY: one valid pollfd, for the call's length. Whatever it answers,
+    // the relay tries to take a connection next: a poll that was interrupted
+    // only ends a wait early.
+    unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
 }
 
 /// An HTTP/1.1 message head: the start line and its headers, as sent.
