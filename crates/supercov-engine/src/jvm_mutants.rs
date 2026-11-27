@@ -6676,5 +6676,62 @@ operator fun Int.times(vote: Vote): Vote = vote
             let source = "package a\n\nclass Split(p: Pair<Int, Int>, n: Int) {\n    val (a, b) = make(n + 1)\n}\n";
             assert_eq!(by_line(file, source), [(4, "Math:-".to_owned())]);
         }
+
+        /// Kotlin forms inside a function and a class: a local class and a
+        /// local function (methods of their own, which PIT mutates), a local
+        /// that destructures, a delegated property (no code of the class's
+        /// own here), `x in` a range, `until` or `downTo` branched on (two
+        /// comparisons the source does not write) and `x in` a list (a
+        /// `contains` call's jump), and an empty file.
+        #[test]
+        fn kotlin_local_declarations_and_in_conditions_list_the_mutants_pit_makes() {
+            let file = "a/Local.kt";
+            let source = r#"package a
+
+class Local(private val helper: Helper) {
+    val name by lazy { helper.name() }
+    fun work(n: Int, p: Pair<Int, Int>, xs: List<Int>) {
+        class Counter {
+            fun next(k: Int) = k + 1
+        }
+        fun twice(k: Int) = k * 2
+        val (a, b) = p
+        if (n in 1..5) log()
+        if (n in 0 until 5) log()
+        if (n in 5 downTo 0) log()
+        if (n in xs) log()
+    }
+    fun log() {}
+}
+"#;
+            let listed = by_line(file, source);
+            let removed = vec!["VoidMethodCall:removed".to_owned()];
+            let expected = [
+                ("val name by", vec![]),
+                (
+                    "fun next",
+                    vec!["Math:-".to_owned(), "PrimitiveReturns:0".to_owned()],
+                ),
+                (
+                    "fun twice",
+                    vec!["Math:/".to_owned(), "PrimitiveReturns:0".to_owned()],
+                ),
+                ("val (a, b)", vec![]),
+                ("in 1..5", removed.clone()),
+                ("in 0 until 5", removed.clone()),
+                ("in 5 downTo 0", removed.clone()),
+                (
+                    "in xs",
+                    vec![
+                        "NegateConditionals:negated".to_owned(),
+                        "VoidMethodCall:removed".to_owned(),
+                    ],
+                ),
+            ];
+            for (marker, mutants) in expected {
+                assert_eq!(on(&listed, source, marker), mutants, "{marker}: {listed:?}");
+            }
+            assert!(kotlin_mutants("a/Empty.kt", "").is_empty());
+        }
     }
 }
