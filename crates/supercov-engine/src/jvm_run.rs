@@ -1603,6 +1603,14 @@ fn instrument_workspace(
     })
 }
 
+/// The package a Java, Kotlin or Groovy source declares, as it writes it.
+fn declared_package(source: &str) -> Option<String> {
+    source.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("package ")?;
+        Some(rest.trim_end().trim_end_matches(';').trim().to_owned())
+    })
+}
+
 /// The directory a source file's packages start in, the one a `<javac>`
 /// compiling it names: its directory less the path its `package` declares.
 /// `src/main/app/Calc.java` in `package app` is under `src/main`; Ametys's
@@ -1611,16 +1619,7 @@ fn ant_source_root(relative: &str, source: &str) -> Option<String> {
     let directory = relative
         .rsplit_once('/')
         .map_or("", |(directory, _)| directory);
-    let package = source.lines().find_map(|line| {
-        let line = line.trim_start();
-        let rest = line.strip_prefix("package ")?;
-        Some(
-            rest.trim_end()
-                .trim_end_matches(';')
-                .trim()
-                .replace('.', "/"),
-        )
-    });
+    let package = declared_package(source).map(|package| package.replace('.', "/"));
     match package {
         None => Some(directory.to_owned()),
         Some(package) if directory == package => Some(String::new()),
@@ -2988,17 +2987,63 @@ e: /w/copy/src/main/kotlin/a/D.kt: (4, 2): Type mismatch
         );
     }
 
+    /// A file that cannot be read is placed by its path below a source
+    /// root.
     #[test]
     fn a_class_named_by_its_simple_name_is_found_from_its_file() {
+        let nowhere = Path::new("/nonexistent");
         assert_eq!(
-            class_of_file("src/test/java/net/x/FooTest.java", "FooTest"),
+            class_of_file(nowhere, "src/test/java/net/x/FooTest.java", "FooTest"),
             "net.x.FooTest"
         );
         assert_eq!(
-            class_of_file("module/src/test/kotlin/a/BarTest.kt", "BarTest"),
+            class_of_file(nowhere, "module/src/test/kotlin/a/BarTest.kt", "BarTest"),
             "a.BarTest"
         );
-        assert_eq!(class_of_file("Top.java", "Top"), "Top");
+        assert_eq!(class_of_file(nowhere, "Top.java", "Top"), "Top");
+    }
+
+    /// A file that can be read is in the package it declares, wherever it
+    /// is: an Ant tree's `test/app/CalcTest.java` declares `app.CalcTest`,
+    /// a Kotlin file says its package with no semicolon, and a file that
+    /// declares none is in the default package.
+    #[test]
+    fn a_class_named_by_its_simple_name_is_in_its_file_s_declared_package() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-class-of-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (file, source) in [
+            (
+                "test/app/CalcTest.java",
+                "// header\npackage app;\n\npublic class CalcTest {}\n",
+            ),
+            ("test/k/KTest.kt", "package a.b\n\nclass KTest\n"),
+            ("test/Plain.java", "public class Plain {}\n"),
+        ] {
+            write(&root.join(file), source).unwrap();
+        }
+        assert_eq!(
+            class_of_file(&root, "test/app/CalcTest.java", "CalcTest"),
+            "app.CalcTest"
+        );
+        assert_eq!(
+            class_of_file(&root, "test/k/KTest.kt", "KTest"),
+            "a.b.KTest"
+        );
+        assert_eq!(class_of_file(&root, "test/Plain.java", "Plain"), "Plain");
+        // One that cannot be read is placed by its path.
+        assert_eq!(
+            crate::fault::during("fs.read_to_string#jvm-run.class-of-file", || {
+                class_of_file(&root, "test/app/CalcTest.java", "CalcTest")
+            }),
+            "test.app.CalcTest"
+        );
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -6256,7 +6301,7 @@ pub fn run_strong_jvm(
                         class: if class.contains('.') || file.is_empty() {
                             class.to_owned()
                         } else {
-                            class_of_file(file, class)
+                            class_of_file(&root, file, class)
                         },
                         module: if file.is_empty() {
                             ".".to_owned()
@@ -6597,20 +6642,31 @@ pub fn run_strong_jvm(
     }
 }
 
-/// The class a test file declares, by its path below a source root
-/// (`src/test/java/com/x/FooTest.java` declares `com.x.FooTest`), for a
-/// class a framework named by its simple name.
-fn class_of_file(file: &str, simple: &str) -> String {
-    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    let package = ["/java/", "/kotlin/", "/groovy/", "/scala/"]
-        .iter()
-        .find_map(|root| stem.split_once(root).map(|(_, rest)| rest))
-        .unwrap_or(stem);
-    let package = package.rsplit_once('/').map_or("", |(package, _)| package);
+/// The class a test file declares, for a class a framework named by its
+/// simple name: in the package its source declares. An Ant tree's tests
+/// are under no `java` directory (`test/app/FooTest.java` declares
+/// `app.FooTest`), so the path alone does not say. A file that cannot be
+/// read is placed by its path below a source root
+/// (`src/test/java/com/x/FooTest.java` declares `com.x.FooTest`).
+fn class_of_file(root: &Path, file: &str, simple: &str) -> String {
+    // fault-site: jvm-run.class-of-file
+    let package = match fs::read_to_string(root.join(file)) {
+        Ok(source) => declared_package(&source).unwrap_or_default(),
+        Err(_) => {
+            let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+            let below = ["/java/", "/kotlin/", "/groovy/", "/scala/"]
+                .iter()
+                .find_map(|root| stem.split_once(root).map(|(_, rest)| rest))
+                .unwrap_or(stem);
+            below
+                .rsplit_once('/')
+                .map_or(String::new(), |(package, _)| package.replace('/', "."))
+        }
+    };
     if package.is_empty() {
         simple.to_owned()
     } else {
-        format!("{}.{simple}", package.replace('/', "."))
+        format!("{package}.{simple}")
     }
 }
 
