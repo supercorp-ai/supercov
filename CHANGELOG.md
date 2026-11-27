@@ -4,6 +4,7 @@
 
 **Fixed**
 
+- An AVA suite measured on a machine whose disk is busy with other writes no longer fails with "Timed out while running tests" and "Failed to exit when running …". Supercov turned on Node's compile cache in every AVA worker thread, and Node writes a thread's compiled code as the thread ends: a temporary file and a rename for each module it compiled. AVA stops a run whose workers send nothing for 10 s, and with other writes on the disk each rename took about 0.2 s, so the workers of a two-file suite spent most of a minute ending. On a Linux runner with that load, 20 of 24 measured runs failed where AVA alone passed every time. A worker thread now compiles as it would without Supercov. A process still keeps the cache for the processes after it.
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
 
 ## 4.29.19

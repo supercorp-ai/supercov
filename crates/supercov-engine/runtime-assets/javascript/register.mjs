@@ -10,6 +10,7 @@ import Module, { register, syncBuiltinESMExports } from "node:module";
 import fs, { closeSync, openSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
 import path, { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMainThread } from "node:worker_threads";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 import { adaptRunnerEntry, noteSkippedCoverageThresholds } from "./runnerEntry.mjs";
@@ -41,7 +42,15 @@ const isNpmItself = (() => {
         return false;
     }
 })();
-if (!isNpmItself)
+// Nor in a worker thread. Node writes a thread's compiled code as the
+// thread ends, a temporary file and a rename for each module it compiled, and
+// a runner waits for its worker to end: AVA stops a file whose worker sends
+// nothing for 10 s ("Timed out while running tests", "Failed to exit"). On a
+// disk busy with other writes, each rename took 0.2 s, and the two workers
+// of a two-file suite spent most of a minute ending: 20 of 24 runs failed
+// where AVA alone passed. A worker thread compiles as it would without
+// Supercov; a process keeps the cache.
+if (!isNpmItself && isMainThread)
     enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
