@@ -84,6 +84,13 @@ first pass of their own:
   the original is `equivalent`, and is not run; mutants whose files compile
   to the same code as each other run once, and each takes that run's verdict
   (see Equivalent mutants, below).
+- a Rust mutant whose candidate tests all pass, where no test process ever
+  ran its mutated code, is `no-coverage` with the reason
+  `not-reached-mutated`, not `survived`: its tests ran something built apart
+  from the pass, such as a Worker's wasm that `wrangler dev` built, and could
+  not have failed. A switched build's processes say when they first evaluate
+  their mutant; a mutant built on its own, a `wasm-pack test` pass, and one
+  resumed from candidates an earlier pass ran are judged as before.
 
 Each of these shortcuts is exact. Where the run cannot prove a test is
 irrelevant, the test runs.
