@@ -2215,8 +2215,8 @@ can run:
   (`export * as`), a top-level code change, a changed file no parser reads,
   a Python or Ruby file whose code changed (a decorator registers a function
   no code names), a directory a test loads whole.
-- **A Rust test** (libtest or nextest; not a doctest, whose code is a
-  comment's): its test binary links every crate it depends on, so every
+- **A Rust test** (libtest or nextest; a doctest, whose code is a comment
+  of a source file, keeps its verdict only where no code changed): its test binary links every crate it depends on, so every
   Rust file of the checkout counts, and any other file that changed is
   read whole. It runs from its own function, not its file, and reaches what
   that names, and what that names in turn, as above, with what Rust calls

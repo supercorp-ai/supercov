@@ -573,7 +573,12 @@ fn regrouped(node: &SyntaxNode, operator: TextRange, replacement: &str) -> Optio
                 | SyntaxKind::RANGE_EXPR
         )
     };
-    let outer = node.ancestors().take_while(chained).last()?;
+    // The node is an operator's: the chain holds it at least.
+    let outer = node
+        .ancestors()
+        .take_while(chained)
+        .last()
+        .unwrap_or_else(|| node.clone());
     if outer == *node {
         return None;
     }

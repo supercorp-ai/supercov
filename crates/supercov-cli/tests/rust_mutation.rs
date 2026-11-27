@@ -406,7 +406,7 @@ fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
         concat!(
             "pub fn refund(sum: u32) -> u32 {\n    if sum > 1000 {\n        audit(sum)\n    } else {\n        sum\n    }\n}\n\n",
             "pub fn audit(sum: u32) -> u32 {\n    sum\n}\n\n",
-            "pub fn double(v: u32) -> u32 {\n    v * 2\n}\n\n",
+            "/// ```\n/// assert_eq!(shop::double(3), 6);\n/// ```\npub fn double(v: u32) -> u32 {\n    v * 2\n}\n\n",
             "pub fn unused(v: u32) -> u32 {\n    v - 1\n}\n\n",
             "pub struct Money(pub u32);\n\n",
             "impl std::fmt::Display for Money {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"${}\", self.0)\n    }\n}\n\n",
@@ -486,8 +486,9 @@ fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
         "src/lib.rs",
         &format!("// The shop's rules.\n\n{}", project.read("src/lib.rs")),
     );
-    let moved = step("a comment", Some(9), &[]);
-    assert_eq!(moved["summary"]["ran"], 0, "{moved}");
+    // The doctest's name holds its line, which moved: its kill runs again.
+    let moved = step("a comment", Some(9), &["killerUnknown"]);
+    assert_eq!(moved["summary"]["ran"], 1, "{moved}");
     // One function: its own mutants run again, and nothing else, since no
     // other test's code names it.
     project.edit("src/lib.rs", "    v * 2\n", "    2 * v\n");
@@ -499,7 +500,9 @@ fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
         "pub fn audit(sum: u32) -> u32 {\n    sum\n",
         "pub fn audit(sum: u32) -> u32 {\n    sum + 1\n",
     );
-    let trap = step("audit", Some(6), &["loadsChanged"]);
+    // The doctest's kill runs again too: a doctest is a comment of the
+    // source, and it keeps nothing where code changed.
+    let trap = step("audit", Some(6), &["loadsChanged", "testReached"]);
     let now = statuses(trap["run"].as_str().unwrap());
     assert_eq!(
         now["src/lib.rs:4:12-4:13:BinaryOperator:<"], "killed",
@@ -508,10 +511,10 @@ fn rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches() {
     // `Display::fmt`, which no code names: `labels` names `Money`.
     project.edit("src/lib.rs", "self.0)", "0 + self.0)");
     step("fmt", Some(6), &["fileChanged", "testReached"]);
-    // A function nothing names: every verdict is kept.
+    // A function nothing names: every verdict is kept but the doctest's.
     project.edit("src/lib.rs", "    v - 1\n", "    v.wrapping_sub(1)\n");
-    let unnamed = step("unused", Some(9), &[]);
-    assert_eq!(unnamed["summary"]["ran"], 0, "{unnamed}");
+    let unnamed = step("unused", Some(9), &["testReached"]);
+    assert_eq!(unnamed["summary"]["ran"], 1, "{unnamed}");
     // The build's configuration: nothing is kept.
     project.write(
         "Cargo.toml",

@@ -29,7 +29,7 @@
 //!
 //! Every test a mutant needs runs first with no mutant (its baseline): a
 //! test that fails there cannot tell a mutant apart, and its time sets the
-//! mutant's limit, 3 times the baseline and 10 s. A mutant's tests run
+//! mutant's limit, cargo-mutants': 5 times the baseline, at least 20 s. A mutant's tests run
 //! cheapest first and stop at the first that fails: `killed`. One that runs
 //! past its limit beside other tests runs again alone, after a run of its
 //! test without the mutant that sets its limit there: past that, `timeout`.
@@ -310,6 +310,13 @@ pub fn run_strong_rust(
     outcome
 }
 
+/// A test's time limit with a mutant, from its time without one:
+/// cargo-mutants' rule, 5 times the baseline and at least 20 s. A mutant that
+/// makes a test slower but lets it end within that is no timeout there.
+fn limit(baseline: Duration) -> Duration {
+    (baseline * 5).max(Duration::from_secs(20))
+}
+
 /// How a mutant's run against its candidates ended.
 enum Ended {
     /// Its verdict is written: which.
@@ -556,10 +563,11 @@ fn pass(
                 .is_some_and(|ran| ran.outcome == Outcome::Passed)
     };
     let limit_of = |test: usize| {
-        let baseline = baselines
-            .get(&test)
-            .map_or(Duration::from_secs(10), |ran| ran.duration);
-        baseline * 3 + Duration::from_secs(10)
+        limit(
+            baselines
+                .get(&test)
+                .map_or(Duration::from_secs(10), |ran| ran.duration),
+        )
     };
 
     // The switched mutants, side by side.
@@ -2036,9 +2044,12 @@ fn supervised(
     // the pass heard of it, is the stop's: given a moment, the stop shows.
     if status.is_some_and(stopping_signal) {
         let since = Instant::now();
-        while since.elapsed() < STOP_SETTLE {
+        loop {
             if stop.now() {
                 stopped = true;
+                break;
+            }
+            if since.elapsed() >= STOP_SETTLE {
                 break;
             }
             std::thread::sleep(STOP_POLL);
@@ -2169,8 +2180,8 @@ fn baselines(
 
 /// Judges again, alone, a mutant whose test ran past its limit beside the
 /// pass's other tests: that test (or package's doctests) runs again without
-/// the mutant first, in `plain`, and its limit is then 3 times the slower of
-/// that run and its baseline, and 10 s; then the mutant runs, in `mutated`,
+/// the mutant first, in `plain`, and its limit is then 5 times the slower of
+/// that run and its baseline, at least 20 s; then the mutant runs, in `mutated`,
 /// against the candidates it has not passed. Only a test past that limit is
 /// a `timeout`: one baseline measured while the machine was quieter does not
 /// make a slow test a timeout once it is busier. A test that does not pass
@@ -2221,7 +2232,7 @@ fn judge_alone(
         } else {
             baseline
         };
-        base * 3 + Duration::from_secs(10)
+        limit(base)
     };
     run_job(
         job,

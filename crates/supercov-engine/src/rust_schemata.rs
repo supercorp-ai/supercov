@@ -72,7 +72,47 @@ pub(crate) fn placeable(root: &SyntaxNode, mutant: &RustMutant) -> Option<&'stat
     {
         return Some("let-chain");
     }
+    // With the arm gone, every arm left diverges (`_ => return None`): the
+    // `match` is of type `!`, and what uses its value may not compile, as
+    // cargo-mutants' build finds. A switch keeps the arm, and its type.
+    if let Site::Arm { arm, .. } = mutant.site
+        && let Some(list) = node.ancestors().find_map(ast::MatchArmList::cast)
+        && list
+            .arms()
+            .filter(|other| other.syntax().text_range() != arm)
+            .all(|other| other.expr().is_some_and(|expr| diverges(&expr)))
+    {
+        return Some("diverging-arms");
+    }
     None
+}
+
+/// Whether `expr` never gives a value: a `return`, `break` or `continue`, a
+/// `panic!`-like macro, or a block that ends in one.
+fn diverges(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::ReturnExpr(_) | ast::Expr::BreakExpr(_) | ast::Expr::ContinueExpr(_) => true,
+        ast::Expr::MacroExpr(call) => call
+            .macro_call()
+            .and_then(|call| call.path())
+            .and_then(|path| path.segment())
+            .is_some_and(|name| {
+                ["panic", "unreachable", "todo", "unimplemented"]
+                    .contains(&name.to_string().as_str())
+            }),
+        ast::Expr::BlockExpr(block) => block.stmt_list().is_some_and(|list| {
+            list.tail_expr().map_or_else(
+                || {
+                    list.statements().last().is_some_and(|last| {
+                        matches!(last, ast::Stmt::ExprStmt(statement)
+                            if statement.expr().is_some_and(|inner| diverges(&inner)))
+                    })
+                },
+                |tail| diverges(&tail),
+            )
+        }),
+        _ => false,
+    }
 }
 
 /// What a site turns into.
@@ -395,6 +435,24 @@ mod tests {
             "{nested:?}"
         );
         assert!(reasons.contains(&Some("let-chain")));
+        // An arm whose deletion leaves only arms that diverge.
+        let diverging = "fn s(n: Option<u8>, m: Option<u8>) -> u8 {\n    let v = match n {\n        Some(v) => v,\n        _ => return 0,\n    };\n    let w = match m {\n        Some(w) => w,\n        None => { panic!(\"none\"); }\n        _ => unreachable!(),\n    };\n    match n {\n        Some(1) => 2,\n        _ => { v + w }\n    }\n}\n";
+        let arms = crate::rust_mutants::enumerate(diverging).unwrap();
+        let (tree, _) = crate::rust_instrumenter::parse_source(diverging).unwrap();
+        let by_line = arms
+            .iter()
+            .filter(|mutant| mutant.genre == "MatchArm")
+            .map(|mutant| (mutant.start.0, placeable(tree.syntax(), mutant)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            by_line,
+            [
+                (3, Some("diverging-arms")),
+                (7, Some("diverging-arms")),
+                (8, None),
+                (12, None)
+            ]
+        );
         assert!(reasons.contains(&None));
         assert!(runtime("rt", "k").contains("mod rt"));
         assert!(runtime("rt", "k").contains("__supercov_strong_activate_k"));

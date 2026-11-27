@@ -179,6 +179,10 @@ discriminants), a body whose type holds an opaque `impl Trait` anywhere
 (`Result<impl Iterator, E>`; a second value would be a second type), an operator over a `let` chain (an `if` around it
 ends the chain), allocator code (the runtime reads the environment once,
 which allocates), and files of proc-macro crates (the compiler runs them).
+So is a deleted arm whose `match` is left with arms that all diverge
+(`_ => return None`): the `match` is then of type `!`, and the code that
+uses its value may not compile, as cargo-mutants' build finds (regex-syntax
+has four); a switch keeps the arm, and its type.
 Each is written into a plain copy (`.supercov/strong/rust/plain`) and built
 there on its own, as cargo-mutants builds every mutant: unviable where that
 build fails.
@@ -243,7 +247,10 @@ options given to `cargo test`. Then:
 - **Baselines.** Every test a mutant needs runs once with no mutant, in the
   switched build. One that fails there is no candidate; a mutant whose
   candidates all fail is `survived`, with that reason. Its time sets the
-  test's limit: 3 times the baseline and 10 s.
+  test's limit, cargo-mutants' rule: 5 times the baseline, at least 20 s.
+  (It was 3 times and 10 s: on fastrand 2.3.0 a mutant that makes rejection
+  sampling loop longer ended its test in 14 s, a `timeout` here and missed
+  by cargo-mutants.)
 - **Libtest and nextest tests** run by exact name through the test binary
   (`<binary> --exact <name> --test-threads=1`), each in its own process,
   through the target runner Cargo would use, in the package's directory, as
@@ -256,8 +263,8 @@ options given to `cargo test`. Then:
 - **Timeouts, at the machine's speed.** A test past its limit beside the
   pass's other tests decides nothing yet: once every switched mutant has
   run, each such mutant runs again alone, one at a time. Its test first runs
-  again without the mutant, and its limit there is 3 times the slower of
-  that run and its baseline, and 10 s; the mutant then runs against the
+  again without the mutant, and its limit there is 5 times the slower of
+  that run and its baseline, at least 20 s; the mutant then runs against the
   candidates it has not passed. Only past that limit is it a `timeout`
   (`ran past 10120 ms, alone, after its test ran again without the mutant`).
   A baseline measured while the machine was quieter (the baselines run
@@ -420,23 +427,25 @@ names (`strong_reach.rs`), as a JavaScript one is:
   macros build names (`paste!`'s `[<..>]`, `concat_idents!`) gives up the
   bound wherever it is loaded. A change to a file's top level (a `use`, a
   `mod`), a new file, and a function added give it up too: an added `fn`
-  may shadow what a glob import brought in. A doctest is bounded as any test
-  outside a runner's process: unaffected, its file's tests too, and no code
-  changed but tests'.
+  may shadow what a glob import brought in. A doctest keeps its verdict only
+  where no code changed: its code is a comment of a source file, which the
+  run counts among its test files.
 
 `rust_verdicts_carried_across_commits_are_those_a_fresh_pass_reaches`
 (`crates/supercov-cli/tests/rust_mutation.rs`) carries a crate across six
 commits and compares each with a pass from nothing on the same commit:
-every verdict the same each time.
+every verdict the same each time. Of its ten mutants a pass runs, one is
+killed by a doctest, whose name holds its line and whose code is a comment
+of the source: it runs again wherever code changed.
 
 | commit | kept | ran |
 | --- | --- | --- |
-| a comment above every function | 9 | 0 |
-| `double`, which one test names | 6 | 3 |
-| `audit`, which only a mutant of `refund` sends a test into | 6 | 3, the survivor now killed |
-| `Display::fmt`, which `format!` calls and no code names | 6 | 3 |
-| a function nothing names | 9 | 0 |
-| `Cargo.toml` | 0 | 9 |
+| a comment above every function (the doctest's line moved) | 9 | 1 |
+| `double`, which one test names | 6 | 4 |
+| `audit`, which only a mutant of `refund` sends a test into | 6 | 4, the survivor now killed |
+| `Display::fmt`, which `format!` calls and no code names | 6 | 4 |
+| a function nothing names | 9 | 1 (the doctest's) |
+| `Cargo.toml` | 0 | 10 |
 
 ## nextest
 

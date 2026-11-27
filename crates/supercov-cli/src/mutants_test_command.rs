@@ -3534,24 +3534,28 @@ impl Reach {
                     && loads.directories.is_empty()
                     && loads.includes(&mutant.file)
             });
-        let reaches = match (bounded, &self.program) {
-            // A Rust test runs from its own function, named by its path in
-            // its file.
-            (Some(loads), Some(program)) => program.reaches_change_from(
-                &key.0,
-                key.1
-                    .strip_prefix(&format!("{}::", key.0))
-                    .filter(|_| key.0.ends_with(".rs")),
-                &loads.files,
-            ),
-            _ => {
-                affected
-                    || !self
-                        .code_changed
-                        .iter()
-                        .all(|file| self.test_files.contains(file))
-            }
-        };
+        // A doctest's code is a comment of a source file, which the test
+        // files hold: it runs as it did only where no code changed.
+        let doctest_reaches = test.runner == "rustdoc" && !self.code_changed.is_empty();
+        let reaches = doctest_reaches
+            || match (bounded, &self.program) {
+                // A Rust test runs from its own function, named by its path in
+                // its file.
+                (Some(loads), Some(program)) => program.reaches_change_from(
+                    &key.0,
+                    key.1
+                        .strip_prefix(&format!("{}::", key.0))
+                        .filter(|_| key.0.ends_with(".rs")),
+                    &loads.files,
+                ),
+                _ => {
+                    affected
+                        || !self
+                            .code_changed
+                            .iter()
+                            .all(|file| self.test_files.contains(file))
+                }
+            };
         match (reaches, affected) {
             (false, _) => Ok(()),
             (true, true) => Err(TEST_REACHED),

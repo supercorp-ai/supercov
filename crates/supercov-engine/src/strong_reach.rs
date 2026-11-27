@@ -931,6 +931,7 @@ mod tests {
             BTreeSet::from(["P".to_owned(), "Send".to_owned()])
         );
         assert!(implementation_keys("struct S").is_empty());
+        assert!(implementation_keys("impl").is_empty());
         // A generic parameter names no type of the program.
         assert_eq!(
             implementation_keys("impl<'a, T: Into<u8>, const N: usize> From<[T; N]> for P<'a>"),
