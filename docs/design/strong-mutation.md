@@ -393,17 +393,20 @@ takes still goes to the mutant with the most work left, beside its copy
 running, so that the costliest chains do not start last and end the pass
 alone.
 
-**Shares.** `--shard k/n` deals the mutants to run among n shares, most
-costly first and back and forth (1, 2, ..., n, n, ..., 1, ...), and keeps the
-k-th; the decided mutants go to the first. Each share gets its part of the
-costly mutants, and their sum is about the same. Every job computes the same
-split from the same plan. The cost the split reads is the plan's alone --
-how many copies a mutant starts and how many tests they run, a copy counting
-as one test -- not the tests' times: a sharded pass's jobs each measure the
-suite (see `docs/mutation.md`, a pass split across jobs), their times differ,
-and a split that read them would leave some mutants in no share and put some
-in two. What each job's plan lists is the same where the jobs measure the
-same commit, as a merge requires.
+**Shares.** `--shard k/n` keeps the mutants whose share is the k-th: the
+first eight bytes of the SHA-256 of a mutant's id, modulo n
+(`strong_plan::share_of`). Every mutant of the run is dealt, decided or not,
+whatever verdicts it holds already, so shards run one after the other against
+one run, or on machines of their own, each take their own share, and the
+shards' verdicts add up to their merge's. The split reads nothing a job
+measured: up to 4.29.19 it dealt the mutants to run most costly first, back
+and forth, by the candidates each job's own plan listed, and the decided ones
+to the first share. A suite whose coverage differs a little between runs
+(randomized round-trip tests, timing) gave each job another order, and then
+some mutants ran in two shares and others in none: on base64 in 16 jobs, 10
+of 366 verdicts were reached twice, and a sharded pass whose jobs each
+reported their totals merged into far fewer. The cost of a hash split is
+balance: each share has about as many mutants, not about the same cost.
 
 **Budget.** `--budget <seconds>` stops the pass once the time is spent, as a
 termination stops it (below), and ends it as a finished pass: the mutants it

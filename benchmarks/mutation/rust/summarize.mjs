@@ -8,7 +8,8 @@
 //     For each crate: Supercov's shard runs merged (`supercov merge`, in a
 //     fresh clone at the tag), joined with cargo-mutants' outcomes by
 //     scripts/cargo-mutants-agreement.mjs, and both tools' wall and CPU
-//     time summed over their jobs. Writes OUT/<crate>.json, OUT/results.json
+//     time summed over their jobs; a merge that holds other than the
+//     shards' verdicts added up is a violation. Writes OUT/<crate>.json, OUT/results.json
 //     and a Markdown table on standard output. Exits 1 on a soundness
 //     violation.
 
@@ -130,6 +131,28 @@ function report(artifactsDir, outDir) {
     if (merged) {
       const strong = JSON.parse(readFileSync(path.join(runs, merged, "strong-mutation.json"), "utf8"));
       for (const verdict of Object.values(strong.mutants)) statuses[verdict.status] = (statuses[verdict.status] ?? 0) + 1;
+    }
+    // The shards' own verdicts, added up: a merge holds every one of them
+    // once, and each mutant is in one shard's share.
+    const reached = new Map();
+    let shardVerdicts = 0;
+    for (const shard of shards) {
+      const shardRuns = path.join(shard, "runs");
+      if (!existsSync(shardRuns)) continue;
+      for (const run of readdirSync(shardRuns)) {
+        const file = path.join(shardRuns, run, "strong-mutation.json");
+        if (!existsSync(file)) continue;
+        for (const id of Object.keys(JSON.parse(readFileSync(file, "utf8")).mutants)) {
+          shardVerdicts += 1;
+          reached.set(id, (reached.get(id) ?? 0) + 1);
+        }
+      }
+    }
+    const inTwoShares = [...reached.values()].filter((times) => times > 1).length;
+    const mergedVerdicts = Object.values(statuses).reduce((a, b) => a + b, 0);
+    if (crate.supercovShards > 1 && (inTwoShares > 0 || mergedVerdicts !== shardVerdicts)) {
+      note += ` shards: ${shardVerdicts} verdicts, ${inTwoShares} mutant(s) in two shares; merged: ${mergedVerdicts}`;
+      violations += 1;
     }
     const cargoMutants = {};
     for (const file of outcomes) {
