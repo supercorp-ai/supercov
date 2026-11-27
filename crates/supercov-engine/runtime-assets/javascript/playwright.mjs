@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepSnapshotText, recordLine } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
@@ -79,6 +79,21 @@ function internally(owner, work) {
     finally {
         Error.prepareStackTrace = prepareStackTrace;
     }
+}
+/**
+ * The Playwright object behind one of the collector's proxies (`wrap`). The
+ * suite's `page` fixture is the proxy of a page the collector registered
+ * already, when its context opened it: registered again by its proxy, every
+ * page and its context were known twice, and every action told the page and
+ * its cookies its phase twice, the context ran the runtime and the test's
+ * scripts twice, and a test's evidence was read twice and written twice.
+ */
+const proxiedTargets = new WeakMap();
+function unwrapped(value) {
+    // A proxy an earlier test's controller made, wrapped again by this one.
+    while (proxiedTargets.has(value))
+        value = proxiedTargets.get(value);
+    return value;
 }
 function bounded(promise, milliseconds) {
     let timer;
@@ -461,6 +476,7 @@ class CoveragePhaseController {
     }
     /** Read a registered page's evidence while it can still be evaluated. */
     async snapshotBeforeClose(page) {
+        page = unwrapped(page);
         if (!this.pages.has(page) || this.snapshottedPages.has(page) || this.runtimeSnapshots)
             return;
         return internally(page, () => this.snapshotBeforeCloseNow(page));
@@ -552,6 +568,7 @@ class CoveragePhaseController {
      * know its phase, and its hits were left to be placed by their time.
      */
     registerPage(page) {
+        page = unwrapped(page);
         if (this.disposed)
             return Promise.resolve();
         let registration = this.pageRegistrations.get(page);
@@ -609,6 +626,7 @@ class CoveragePhaseController {
             void this.registerWorker(worker);
     }
     async registerContext(context, { adopted = false } = {}) {
+        context = unwrapped(context);
         if (this.contexts.has(context) || this.disposed)
             return;
         this.contexts.add(context);
@@ -713,6 +731,7 @@ class CoveragePhaseController {
             register(page);
     }
     async registerWorker(worker) {
+        worker = unwrapped(worker);
         if (this.workers.has(worker))
             return;
         this.workers.add(worker);
@@ -973,6 +992,7 @@ class CoveragePhaseController {
         });
         this.proxyCache.set(target, proxy);
         this.proxyTargets.set(proxy, target);
+        proxiedTargets.set(proxy, target);
         // Playwright's built-in `page` fixture is created through the wrapped
         // worker-scoped browser. The test-scoped fixture sees that proxy again;
         // treating our own proxy as a fresh target would nest wrappers, emit two
@@ -1380,7 +1400,13 @@ function readSnapshot(target) {
             return undefined;
         // Phase timing counts the bytes each read carried, as its "ms".
         timingCount("transfer.snapshotBytes", text.length);
-        return expandSnapshot(JSON.parse(text));
+        const parsed = JSON.parse(text);
+        const snapshot = expandSnapshot(parsed);
+        // The page wrote it with JSON.stringify, as the record will: kept,
+        // the record takes the text as it came instead of writing it again.
+        if (snapshot === parsed && snapshot && typeof snapshot === "object")
+            keepSnapshotText(snapshot, text);
+        return snapshot;
     });
 }
 let activeController;
@@ -1436,6 +1462,7 @@ function liveTrackedContexts() {
 }
 /** The controller that registered `page`, whichever test it belongs to. */
 function controllerOwning(page) {
+    page = unwrapped(page);
     if (activeController?.pages.has(page))
         return activeController;
     for (const controller of controllers.values())
@@ -2105,7 +2132,7 @@ const instrumentedFixtures = {
                         browser: browser.map(columnarEvents),
                         span: [startedAtMs, endedAtMs],
                     };
-                    appendEvidenceLine(`${JSON.stringify(payload)}\n`);
+                    appendEvidenceLine(`${recordLine(payload)}\n`);
                 }
                 finally {
                     strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true, ...stallDetails(stall) });

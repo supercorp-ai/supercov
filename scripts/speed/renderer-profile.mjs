@@ -1,15 +1,19 @@
 // JavaScript self-time in the browser's pages while a Playwright suite runs:
 // connects to the port the browser was launched with, records V8's sampling
-// profiler as trace chunks of fifteen seconds -- a page that closes keeps its
+// profiler as trace chunks (fifteen seconds, or the third argument's ms) -- a page that closes keeps its
 // samples, which a profiler attached to the page itself would lose -- and
 // writes what each function spent, by script, after every chunk. The browser
 // may start late and start again; the profiler waits for it each time.
 //
-//   node renderer-profile.mjs <port> <output.json>
+//   node renderer-profile.mjs <port> <output.json> [chunk ms]
 import { writeFileSync } from 'node:fs';
 
 const [port, output] = process.argv.slice(2);
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// A browser that closes takes the chunk it was tracing with it: a short
+// suite's browser (a part of the large app lives some ten seconds) left no
+// chunk at fifteen, so chunks are as short as such a browser's life needs.
+const chunkMs = Number(process.argv[4] ?? 15_000);
 const functions = new Map();
 // V8's own work by name (compiling, parsing, instantiating), from its trace
 // events: "(program)" in the samples does not say which.
@@ -42,7 +46,7 @@ function place(callFrame) {
 function aggregate(trace) {
   const events = Array.isArray(trace) ? trace : trace.traceEvents ?? [];
   for (const event of events) {
-    if (event.ph === 'X' && typeof event.dur === 'number' && /(^|,)v8(,|$)/.test(event.cat ?? '')) {
+    if (event.ph === 'X' && typeof event.dur === 'number' && /(^|,)(v8|devtools\.timeline)(,|$)/.test(event.cat ?? '')) {
       const entry = v8Events.get(event.name) ?? { us: 0, count: 0 };
       entry.us += event.dur;
       entry.count += 1;
@@ -112,9 +116,11 @@ async function record(url) {
   while (!closed) {
     await send('Tracing.start', {
       transferMode: 'ReturnAsStream',
-      traceConfig: { includedCategories: ['disabled-by-default-v8.cpu_profiler', 'v8'] },
+      // The renderer's own tasks as well (devtools.timeline: scripts run,
+      // parsing, style, layout, paint), beside the samples of its JavaScript.
+      traceConfig: { includedCategories: ['disabled-by-default-v8.cpu_profiler', 'v8', 'devtools.timeline'] },
     });
-    await Promise.race([sleep(15_000), ended]);
+    await Promise.race([sleep(chunkMs), ended]);
     if (closed) return;
     const complete = new Promise((done) => {
       const listener = (message) => {

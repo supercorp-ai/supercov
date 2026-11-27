@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- The Playwright collector registers a test's page once. The suite's `page` fixture hands the test a proxy of a page the collector had already registered when its context opened it, and registered by its proxy as well, every page and its context were known twice: each action and assertion told the page and the app's cookies its phase twice, each context took Supercov's runtime and the test's scripts twice (and failed to expose its binding the second time), and each page's evidence was read and written twice. On the generated large Next.js app (300 tests in sixteen parts), the Playwright worker made 30 of Supercov's calls per test instead of 60, and the measured run retired 29.7% more instructions than plain where it retired 32.1% more, and took 26.5% more CPU time where it took 28.3%. Every answer a run gives is the same, save one correction: the summary's count of browser events placed by their phase (`attribution.browserExplicit`) counted the events of a page's duplicate snapshot a second time, and now counts each once (4,708 → 3,648 on the deterministic browser bench).
+- Supercov's Docker relay waits for a connection instead of looking for one every 10 ms. Most runs never use it, and its hundred wake-ups a second were about 60 ms of Supercov's own CPU on a half-minute run (6% of it on a part of the generated app).
+- A test's record takes each page's evidence as the text the page wrote, rather than parsing it and writing it again; `tests/runtime/snapshots.test.mjs` pins the record to its `JSON.stringify`.
+
 ## 4.29.17
 
 **Fixed**
