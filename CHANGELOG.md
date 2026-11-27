@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.29.18
 
 **Fixed**
 
@@ -16,6 +16,7 @@
 - A Rust operator mutant that makes its expression group otherwise now runs as cargo-mutants' mutant does. cargo-mutants replaces the operator's text, so `a - b * c` with `*` made `+` is `a - b + c`, `(a - b) + c`, and `p && q && r` with its first `&&` made `||` is `p || (q && r)`; Supercov switched in `a - (b + c)` and `(p || q) && r`, other programs. Such a mutant is now switched around the whole expression the replacement regroups, and its weak verdict reads no operand probe. On regex-syntax 0.8.5, one such mutant survived Supercov's pass and was caught by cargo-mutants'.
 - A Rust function whose return type holds an `impl Trait` deeper inside (`Result<impl Iterator<Item = u8>, E>`) now has its body mutants built on their own, as a top-level `impl Trait` did. Switched beside the body, the replacement was a second type for one opaque type, and the mutant was called `unviable` where cargo-mutants' build compiles it and a test kills it.
 - A deleted arm of a `match` in a Rust `const fn` is no longer `no-coverage`: its branch is in the run's record and never taken, as the rest of a `const fn`'s body is, and the mutant is now linked to nothing there either.
+- A Playwright strong pass no longer calls a mutant a `timeout` or a kill by how busy the machine was. An attempt is stopped at its limit (1.5 × its test's baseline + 5 s). An assertion that started late on a loaded machine, and would fail by its own timeout (an `expect` given 5 s or 12 s), ran past that limit there and was stopped as a `timeout`; on an idle machine the same assertion failed inside the limit and killed the mutant. Now, where every call the test is waiting on started before the limit and ends by a timeout of its own before the test's own timeout, the attempt runs until those calls end, and the test's outcome decides. A call with no timeout of its own, a real hang, still ends at the limit. The mutation score was already unaffected, since a `timeout` counts as detected; the label is now the same on every machine. On a fixture whose route answers three seconds late under the mutant, each of the four mutants that take that route is killed by its assertion past the limit, where all four were `timeout`s.
 
 **Changed**
 
@@ -27,10 +28,6 @@
 - A test's record takes each page's evidence as the text the page wrote, rather than parsing it and writing it again; `tests/runtime/snapshots.test.mjs` pins the record to its `JSON.stringify`.
 - `supercov mutants` on a new commit now keeps Rust verdicts no change could move, as it does JavaScript's. A Rust test kept a verdict only where no code but tests' changed, so any edit to a crate's source ran every mutant again. A Rust test is now bounded by what its own function can name in any Rust file, with a trait implementation's methods reached by their type's or trait's name (an operator, `Drop`, `format!`'s `Display::fmt`, a `for` loop's `Iterator::next`); an item with an attribute other than the compiler's own, a file whose macros build names, and a change to a file's top level give the bound up. A doctest, whose code is a comment of the source, keeps its verdict only where no code changed. On a fixture carried across seven commits, each pass kept 6 to 10 of its 10 verdicts where the change could not reach them, and every verdict was the one a pass from nothing reaches (`docs/design/rust-mutation.md`, "After an edit").
 - A Rust strong pass records each candidate a mutant passes as it passes it, so a pass stopped by its budget or a signal leaves the next pass only the rest of that mutant's candidates (`N mutant(s) resume where earlier passes left them`), as Playwright's pass does.
-
-**Fixed**
-
-- A Playwright strong pass no longer calls a mutant a `timeout` or a kill by how busy the machine was. An attempt is stopped at its limit (1.5 × its test's baseline + 5 s). An assertion that started late on a loaded machine, and would fail by its own timeout (an `expect` given 5 s or 12 s), ran past that limit there and was stopped as a `timeout`; on an idle machine the same assertion failed inside the limit and killed the mutant. Now, where every call the test is waiting on started before the limit and ends by a timeout of its own before the test's own timeout, the attempt runs until those calls end, and the test's outcome decides. A call with no timeout of its own, a real hang, still ends at the limit. The mutation score was already unaffected, since a `timeout` counts as detected; the label is now the same on every machine. On a fixture whose route answers three seconds late under the mutant, each of the four mutants that take that route is killed by its assertion past the limit, where all four were `timeout`s.
 
 ## 4.29.17
 
