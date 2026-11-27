@@ -1,0 +1,115 @@
+name: Strong pass speed (JavaScript)
+
+# Seconds per decided mutant of the JavaScript strong pass, for the pull
+# request's base and its head, on the projects of
+# benchmarks/mutation/js-runners/corpus.json: each project's measured run and
+# strong pass under each binary, then every mutant's two verdicts compared
+# (benchmarks/mutation/js-runners/compare.mjs; a decided verdict that changed
+# fails the job). Add the `strong-bench` label to a pull request; each push to
+# a labelled pull request measures again.
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: "Space-separated project names of the corpus"
+        required: false
+        default: "mini-throttle"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: strong-js-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'strong-bench')
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - variant: old
+            ref: ${{ github.event.pull_request.base.sha || 'main' }}
+          - variant: new
+            ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mutation-rust-supercov
+          save-if: ${{ matrix.variant == 'old' }}
+      - run: cargo build --release --bin supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/release/supercov
+          retention-days: 3
+
+  measure:
+    needs: build
+    name: ${{ matrix.project }} ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [mini-throttle, ms, dot-prop]
+        variant: [old, new]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: bin
+      - run: chmod +x bin/supercov && nproc
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx -y playwright@1.60.0 install-deps chromium
+          key: apt-chromium-strong-bench-${{ runner.os }}-${{ runner.arch }}-1.60.0
+          prefix: apt-chromium-strong-bench-${{ runner.os }}-${{ runner.arch }}-
+      - name: Measure and strong pass
+        run: |
+          node benchmarks/mutation/js-runners/run.mjs --project ${{ matrix.project }} \
+            --supercov bin/supercov --out "$RUNNER_TEMP/out" --work "$RUNNER_TEMP/work" --skip-stryker 1
+          tail -40 "$RUNNER_TEMP/out/supercov-strong.log"
+      - name: Where a browser job's time goes
+        if: matrix.project == 'mini-throttle' && matrix.variant == 'old'
+        run: node benchmarks/mutation/js-runners/diag-browser.mjs "$RUNNER_TEMP/work/${{ matrix.project }}" 5 | tee "$RUNNER_TEMP/out/diag-browser.txt"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.project }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
+  compare:
+    needs: measure
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: bench
+      - name: Old against new
+        run: |
+          status=0
+          for project in $(ls bench | sed -n 's/^bench-\(.*\)-old$/\1/p'); do
+            node benchmarks/mutation/js-runners/compare.mjs "bench/bench-$project-old" "bench/bench-$project-new" --markdown \
+              | tee -a "$GITHUB_STEP_SUMMARY" || status=1
+          done
+          exit $status
