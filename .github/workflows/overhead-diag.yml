@@ -23,13 +23,9 @@ jobs:
       matrix:
         include:
           - variant: base
-            ref: d25da687b1362dc99c6ec403470ef8220d5bacba
+            ref: cf19ae76dac5609abd19a425738a3746ca19ac9e
           - variant: new
-            ref: 3a8d8ec2c1bebe911f8e12abe72403e09c8b56cb
-          - variant: mid
-            ref: 7808d5ccc5ea62f687323bfaccd0696ea4cca342
-          - variant: bytes
-            ref: e7c95cb50a28760111e389fa5ab1219defb77ed7
+            ref: f42248d3ac7b610ba398434d913d376605a55f9f
     steps:
       - uses: actions/checkout@v6
         with:
@@ -51,6 +47,7 @@ jobs:
 
   probe:
     needs: build
+    if: false
     name: probe ${{ matrix.pair }} ${{ matrix.mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -85,7 +82,6 @@ jobs:
         run: tail -40 "$RUNNER_TEMP"/probe-diag/server-*.log || true
 
   measure:
-    if: false
     needs: build
     name: ${{ matrix.kind }} ${{ matrix.shard }} ${{ matrix.variants }}
     runs-on: ubuntu-24.04
@@ -103,22 +99,22 @@ jobs:
       # binary twice each, as sixteen machines of a CI matrix would run it.
       matrix:
         include:
-          - { kind: large, shard: 1/16, variants: 'base,bytes' }
-          - { kind: large, shard: 2/16, variants: 'base,bytes' }
-          - { kind: large, shard: 3/16, variants: 'base,bytes' }
-          - { kind: large, shard: 4/16, variants: 'base,bytes' }
-          - { kind: large, shard: 5/16, variants: 'base,bytes' }
-          - { kind: large, shard: 6/16, variants: 'base,bytes' }
-          - { kind: large, shard: 7/16, variants: 'base,bytes' }
-          - { kind: large, shard: 8/16, variants: 'base,bytes' }
-          - { kind: large, shard: 9/16, variants: 'base,bytes' }
-          - { kind: large, shard: 10/16, variants: 'base,bytes' }
-          - { kind: large, shard: 11/16, variants: 'base,bytes' }
-          - { kind: large, shard: 12/16, variants: 'base,bytes' }
-          - { kind: large, shard: 13/16, variants: 'base,bytes' }
-          - { kind: large, shard: 14/16, variants: 'base,bytes' }
-          - { kind: large, shard: 15/16, variants: 'base,bytes' }
-          - { kind: large, shard: 16/16, variants: 'base,bytes' }
+          - { kind: large, shard: 1/16, variants: 'base,new' }
+          - { kind: large, shard: 2/16, variants: 'base,new' }
+          - { kind: large, shard: 3/16, variants: 'base,new' }
+          - { kind: large, shard: 4/16, variants: 'base,new' }
+          - { kind: large, shard: 5/16, variants: 'base,new' }
+          - { kind: large, shard: 6/16, variants: 'base,new' }
+          - { kind: large, shard: 7/16, variants: 'base,new' }
+          - { kind: large, shard: 8/16, variants: 'base,new' }
+          - { kind: large, shard: 9/16, variants: 'base,new' }
+          - { kind: large, shard: 10/16, variants: 'base,new' }
+          - { kind: large, shard: 11/16, variants: 'base,new' }
+          - { kind: large, shard: 12/16, variants: 'base,new' }
+          - { kind: large, shard: 13/16, variants: 'base,new' }
+          - { kind: large, shard: 14/16, variants: 'base,new' }
+          - { kind: large, shard: 15/16, variants: 'base,new' }
+          - { kind: large, shard: 16/16, variants: 'base,new' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
