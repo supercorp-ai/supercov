@@ -21,8 +21,10 @@ markupsafe's C extension is built in place, and the setup fails if it
 cannot be imported. `mutmut-config.sh` adds mutmut's
 configuration: the source path and what the tests read beside the source
 (python-slugify's `tools/` and README, parse's README, humanize's
-`scripts/`), and humanize's `forkserver` isolation (one of its tests changes
-its own parameter lists, so the suite cannot run twice in one process).
+`scripts/`), and humanize's and semver's `forkserver` isolation (a humanize test
+changes its own parameter lists, and a semver test's parameters are context
+managers that can be entered once, so neither suite can run twice in one
+process).
 
 ## Scripts
 
