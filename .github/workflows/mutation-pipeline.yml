@@ -60,7 +60,9 @@ jobs:
         run: |
           out="$PWD/out"; mkdir -p "$out"
           cd "$RUNNER_TEMP/module"
-          "$RUNNER_TEMP/bin/supercov" -- go test ./... > "$out/measure.log" 2>&1 || true
+          # Measured as `supercov mutants` measures: with the values its
+          # mutants' verdicts read.
+          SUPERCOV_MUTANTS=1 "$RUNNER_TEMP/bin/supercov" -- go test ./... > "$out/measure.log" 2>&1 || true
           start=$(date +%s.%N)
           "$RUNNER_TEMP/bin/supercov" runs latest mutants test --json > "$out/strong.json" 2> "$out/strong.log" || true
           echo "$(date +%s.%N) - $start" | bc > "$out/strong-seconds.txt"
@@ -91,7 +93,7 @@ jobs:
       - run: chmod +x "$RUNNER_TEMP/bin/supercov"
       - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
       - run: |
-          benchmarks/mutation-python/run-supercov.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" pytest "$RUNNER_TEMP/bin/supercov" out
+          benchmarks/mutation-python/run-supercov.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" pytest "$RUNNER_TEMP/bin/supercov" out values
           python3 -c "import json; print(json.load(open('out/timing.json'))['strongSeconds'])" > out/strong-seconds.txt
           tail -5 out/strong.log
       - uses: actions/upload-artifact@v4
@@ -131,6 +133,8 @@ jobs:
           pnpm_config_strict_dep_builds: "false"
           COREPACK_ENABLE_STRICT: "0"
           SUPERCOV_BENCH_BINARY: ${{ runner.temp }}/bin/supercov
+          # Measured as `supercov mutants` measures.
+          SUPERCOV_MUTANTS: "1"
         run: |
           node benchmarks/mutation/run-job.mjs --project ${{ matrix.project }} --scenario supercov-cold --out out
           node -e "const r=require('./out/result.json'); const p=r.phases.find(p=>p.name==='supercov-strong'); console.log(p?.wallS ?? '')" > out/strong-seconds.txt

@@ -12,6 +12,10 @@ candidate selection, ordering, sharding) can be compared with its base:
 - JavaScript: defu, scule, cookie-es, pathe, ufo
   (`benchmarks/mutation/run-job.mjs --scenario supercov-cold`).
 
+Each run is measured as `supercov mutants` measures it, with
+`SUPERCOV_MUTANTS=1`, so the plan decides what the documented command
+decides.
+
 It runs on a push to a branch named `exp/mutation-pipeline*`, or dispatched.
 The `summary` job prints, per project and language, the mutants, those
 decided without running a test, those run, the test executions and the
