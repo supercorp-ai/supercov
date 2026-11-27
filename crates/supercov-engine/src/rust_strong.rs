@@ -145,6 +145,9 @@ struct Job {
     /// is switched into the build only to find whether it compiles, and
     /// runs nothing.
     check_only: bool,
+    /// How many of its candidates passed with it in earlier passes, which
+    /// this one does not run again (`passedBefore` in `plan.json`).
+    passed_before: usize,
 }
 
 /// A test the pass can run.
@@ -562,6 +565,15 @@ fn pass(
             RustCargoCommandKind::CargoTest => None,
         },
         stop: stop.clone(),
+        // Wasm test modules (`wasm-pack test`, a wasm runner such as
+        // wasm-bindgen-test-runner) have no file to say they ran a mutant in.
+        reports_reach: learned.is_none()
+            && !built.artifacts.iter().any(|artifact| {
+                artifact
+                    .executable
+                    .extension()
+                    .is_some_and(|extension| extension == "wasm")
+            }),
     };
 
     // Baselines: every test a mutant runs against, with no mutant.
@@ -713,6 +725,7 @@ fn pass(
                         RustCargoCommandKind::CargoTest => None,
                     },
                     stop: stop.clone(),
+                    reports_reach: false,
                 };
                 let ended = run_job(
                     job,
@@ -828,6 +841,7 @@ fn planned_jobs(
             mutant: mutant.clone(),
             candidates,
             check_only,
+            passed_before: planned["passedBefore"].as_u64().unwrap_or(0) as usize,
         });
     }
     (jobs, sources)
@@ -1653,6 +1667,11 @@ struct TestRunner<'b> {
     /// build, with its configuration.
     nextest: Option<Nextest>,
     stop: Stop,
+    /// Whether a process of this build says when it first evaluates its
+    /// active mutant (`<results>.reached`): a native switched build does;
+    /// a build of one mutant has no switch, and wasm has no file to say it
+    /// in.
+    reports_reach: bool,
 }
 
 /// `cargo nextest run` of one test of a build already made: nextest's
@@ -2379,9 +2398,49 @@ fn run_job(
         Some(Ended::Decided(status))
     });
     decided.unwrap_or_else(|| {
+        // Every candidate passed. Where no process ever ran the mutated
+        // code, the tests never ran it in its mutated form -- they ran a
+        // separately built artifact, such as a Worker's wasm -- and could
+        // not have failed: not a survivor.
+        // Judged only where a test ran: a candidate passed over (one the
+        // test binary no longer lists) ran nothing, and says nothing of
+        // reach either way.
+        if let Some(named) = ordinal
+            && runner.reports_reach
+            && ran > 0
+            && job.passed_before == 0
+            && !reached(&runner.results, named)
+        {
+            results.verdict(
+                &job.id,
+                "no-coverage",
+                None,
+                ran,
+                started,
+                Some(not_reached_reason(ran)),
+            );
+            return Ended::Decided("no-coverage");
+        }
         results.verdict(&job.id, "survived", None, ran, started, None);
         Ended::Decided("survived")
     })
+}
+
+fn not_reached_reason(ran: usize) -> String {
+    format!(
+        "{}: its {ran} test(s) passed but never ran the mutated code; they ran a separately built artifact (such as a Worker's wasm built outside the pass) or a copy of the code the pass did not switch, so they could not fail",
+        crate::strong_verdicts::NOT_REACHED_MUTATED
+    )
+}
+
+/// Whether a process of the pass whose results are at `results` said it
+/// evaluated mutant `named` (`<file>#<index>`) switched on.
+fn reached(results: &Path, named: &str) -> bool {
+    let mut path = results.as_os_str().to_owned();
+    path.push(".reached");
+    // fault-site: rust-strong.reached
+    crate::fault_fs::read_to_string(Path::new(&path))
+        .is_ok_and(|text| text.lines().any(|line| line == named))
 }
 
 /// The processes a mutant's candidates run in, in order: each libtest or
@@ -4444,5 +4503,80 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(fault_root);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A mutant whose candidates all pass is a survivor only where one of
+    /// them ran its mutated code. One no process reached -- its tests ran
+    /// something built apart from the pass, as a Worker's wasm built by
+    /// `wrangler dev` -- is `no-coverage`, saying why; one a test ran
+    /// without checking what it gave survived.
+    #[test]
+    fn a_mutant_no_test_ran_mutated_is_no_survivor() {
+        let (_root, request) = crate_with(
+            "reach",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+                ),
+                (
+                    "src/lib.rs",
+                    "pub fn ran(v: u32) -> u32 {\n    v + 1\n}\npub fn apart(v: u32) -> u32 {\n    v * 2\n}\n",
+                ),
+                (
+                    "tests/t.rs",
+                    "#[test] fn unchecked() { let _ = fixture::ran(1); }\n",
+                ),
+            ],
+            &["src/lib.rs"],
+        );
+        let mut said = Vec::new();
+        assert_eq!(run_strong_rust(&request, &mut said), Ok(0));
+        let said = String::from_utf8(said).unwrap();
+        let found = verdicts(&request);
+        let ran = found
+            .iter()
+            .filter(|(id, _)| id.starts_with("src/lib.rs:2:"))
+            .collect::<Vec<_>>();
+        let apart = found
+            .iter()
+            .filter(|(id, _)| id.starts_with("src/lib.rs:5:"))
+            .collect::<Vec<_>>();
+        assert!(!ran.is_empty() && !apart.is_empty(), "{found:?}\n{said}");
+        for (id, verdict) in ran {
+            assert_eq!(verdict["status"], "survived", "{id}: {verdict}\n{said}");
+        }
+        for (id, verdict) in apart {
+            assert_eq!(verdict["status"], "no-coverage", "{id}: {verdict}\n{said}");
+            let reason = verdict["reason"].as_str().unwrap();
+            assert!(
+                reason.starts_with(
+                    "not-reached-mutated: its 1 test(s) passed but never ran the mutated code"
+                ),
+                "{reason}"
+            );
+        }
+        // Resumed from candidates an earlier pass ran, whose reach is not
+        // kept, a mutant is judged as before: a survivor.
+        let mut plan: Value =
+            serde_json::from_slice(&std::fs::read(&request.plan).unwrap()).unwrap();
+        for mutant in plan["mutants"].as_array_mut().unwrap() {
+            mutant["passedBefore"] = json!(1);
+        }
+        std::fs::write(&request.plan, serde_json::to_vec(&plan).unwrap()).unwrap();
+        let resumed = StrongRustRequest {
+            results: request.root.join("resumed.jsonl"),
+            ..request.clone()
+        };
+        assert_eq!(run_strong_rust(&resumed, &mut Vec::new()), Ok(0));
+        let found = verdicts(&resumed);
+        let apart = found
+            .iter()
+            .filter(|(id, _)| id.starts_with("src/lib.rs:5:"))
+            .collect::<Vec<_>>();
+        assert!(!apart.is_empty(), "{found:?}");
+        for (id, verdict) in apart {
+            assert_eq!(verdict["status"], "survived", "{id}: {verdict}");
+        }
     }
 }

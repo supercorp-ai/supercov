@@ -75,6 +75,25 @@ mod __SUPERCOV_MODULE__ {
         std::process::abort()
     }
 
+    /// The first time a process evaluates its active mutant, it says so in
+    /// a line beside the pass's results: a mutant whose tests all pass and
+    /// that no process reached ran in no test in its mutated form (a Worker
+    /// built apart from the pass, say), and is not called a survivor.
+    #[cold]
+    #[inline(never)]
+    fn reached(file: &str, index: u64) {
+        if let Ok(results) = std::env::var("SUPERCOV_STRONG_RESULTS") {
+            let line = std::format!("{file}#{index}\n");
+            if let Ok(mut out) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(std::format!("{results}.reached"))
+            {
+                let _ = std::io::Write::write_all(&mut out, line.as_bytes());
+            }
+        }
+    }
+
     // A wasm module has no environment: the host that instantiates it (the
     // Node hook of `rust-wasm-node.mjs`) writes the active mutant's file
     // into this buffer and names its index, before any test runs.
@@ -94,6 +113,7 @@ mod __SUPERCOV_MODULE__ {
         let bytes = unsafe { &(*(&raw const BUFFER))[..length] };
         set_file(&String::from_utf8_lossy(bytes));
         LIMIT.store(0, Ordering::Relaxed);
+        HITS.store(0, Ordering::Relaxed);
         ACTIVE.store(if index < NONE { index } else { NONE }, Ordering::Relaxed);
     }
 
@@ -125,6 +145,9 @@ mod __SUPERCOV_MODULE__ {
             return false;
         }
         let hits = HITS.fetch_add(1, Ordering::Relaxed) + 1;
+        if hits == 1 {
+            reached(file, index);
+        }
         let limit = LIMIT.load(Ordering::Relaxed);
         if limit != 0 && hits > limit {
             timeout(file, index);
