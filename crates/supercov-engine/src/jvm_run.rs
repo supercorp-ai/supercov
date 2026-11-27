@@ -6510,6 +6510,9 @@ fn run_strong_jvm_with(
             SupervisionOptions::from_variables(variable).map_err(|error| error.to_string())?;
         let mut exit_code = 0;
         let mut remaining = mutants.clone();
+        // Each start of the build: its round, how many mutants it was given
+        // and how long it took, for the pass's summary.
+        let mut builds = Vec::new();
         for start in 0..STRONG_STARTS {
             remaining.retain(|mutant| !results.decided(&mutant.id));
             remaining.retain(|mutant| {
@@ -6568,9 +6571,15 @@ fn run_strong_jvm_with(
                 console: None,
             };
             let before = remaining.len();
+            let build_started = std::time::Instant::now();
             let outcome = supervisor
                 .supervise(&spec, options, diagnostics)
                 .map_err(|error| error.to_string())?;
+            builds.push(serde_json::json!({
+                "retry": retry,
+                "mutants": round.len(),
+                "ms": build_started.elapsed().as_millis() as u64,
+            }));
             exit_code = outcome.exit_code();
             if let Some(signal) = outcome.interrupted_signal {
                 return Err(format!(
@@ -6651,6 +6660,13 @@ fn run_strong_jvm_with(
                 break;
             }
         }
+        // The builds this pass started, beside the JVMs' own summaries.
+        let mut summaries = fs::read_to_string(&request.results).unwrap_or_default();
+        summaries.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"summary": true, "driver": "jvm-builds", "builds": builds})
+        ));
+        let _ = fs::write(&request.results, summaries);
         Ok(exit_code)
     })();
     let release = lock.release().map_err(|error| error.to_string());
