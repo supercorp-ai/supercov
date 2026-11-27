@@ -206,7 +206,9 @@ if (diagnose) {
   if (process.env.SPEED_PERF && (name.startsWith('python-') || name.startsWith('ruby-') || name.startsWith('go-'))) {
     // Supercov's own process: where its evidence and publication time goes.
     const data = join(diag, 'perf.data');
+    process.env.SUPERCOV_VERBOSE = '1';
     const { seconds } = shell(dir, `${process.env.SPEED_PERF} record -F 499 --call-graph dwarf,32768 -o ${data} -- ${diagnose.path} -- ${project.test}`, 'diag-perf', true);
+    delete process.env.SUPERCOV_VERBOSE;
     record({ project: name, variant: 'diag-perf', round: 0, kind: 'diag', seconds });
     shell(dir, `${process.env.SPEED_PERF} report -i ${data} --stdio --no-children --comm supercov --sort symbol --percent-limit 0.3 -g none > ${diag}/perf-supercov.txt 2>&1; ${process.env.SPEED_PERF} report -i ${data} --stdio --children --comm supercov --sort symbol --percent-limit 2 -g none > ${diag}/perf-supercov-inclusive.txt 2>&1; ${process.env.SPEED_PERF} report -i ${data} --stdio --no-children --sort comm,dso --percent-limit 0.5 > ${diag}/perf-processes.txt 2>&1; rm -f ${data}`, 'diag-perf-report', true);
   }
