@@ -367,6 +367,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
                 file: Some("main_test.go".into()),
                 status: "passed".into(),
                 attributed: true,
+                setup: false,
             },
             OwnedTestOutcome {
                 name: "TestZero".into(),
@@ -375,6 +376,7 @@ fn instrumented_go_compiles_and_reports_what_actually_ran() {
                 file: Some("main_test.go".into()),
                 status: "passed".into(),
                 attributed: true,
+                setup: false,
             },
         ],
         run_id: "run_go",

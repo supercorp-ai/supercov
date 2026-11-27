@@ -1,0 +1,28 @@
+// Applies PIT (with its JUnit 5 plugin) to every Java or Kotlin project of a
+// Gradle build, for the JVM mutation benchmark: `gradle --init-script pit-init.gradle pitest`.
+initscript {
+    repositories { gradlePluginPortal() }
+    dependencies { classpath "info.solidsoft.gradle.pitest:gradle-pitest-plugin:${System.getenv("PIT_GRADLE_PLUGIN") ?: "1.15.0"}" }
+}
+allprojects { project ->
+    project.plugins.withId("java") {
+        project.apply plugin: info.solidsoft.gradle.pitest.PitestPlugin
+        project.pitest {
+            pitestVersion = "1.17.1"
+            if (System.getenv("PIT_JUNIT5") == "1") { junit5PluginVersion = "1.2.1" }
+            outputFormats = ["XML"]
+            timestampedReports = false
+            fullMutationMatrix = System.getenv("PIT_MATRIX") == "1"
+            threads = Integer.parseInt(System.getenv("PIT_THREADS") ?: "4")
+            if (System.getenv("PIT_TARGETS")) { targetClasses = System.getenv("PIT_TARGETS").split(",") as List }
+            // The plugin's tests default to the target classes, which a
+            // shard's class names leave without a test: every test of the
+            // project, as Maven's plugin does.
+            if (System.getenv("PIT_TESTS")) { targetTests = System.getenv("PIT_TESTS").split(",") as List }
+            if (System.getenv("PIT_TESTNG") == "1") { testPlugin = "testng" }
+            failWhenNoMutations = false
+            timeoutConstInMillis = 10000
+            jvmArgs = ["-Xmx1g"]
+        }
+    }
+}

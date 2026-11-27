@@ -173,7 +173,9 @@ Each language uses its established tool's mutants, and its verdicts were
 compared with that tool's on public projects: StrykerJS for JavaScript and
 TypeScript, under Vitest, Playwright, Jest, `node:test`, Mocha, AVA,
 node-tap, `bun:test` and Vitest Browser Mode; cargo-mutants for Rust, under
-`cargo test` and cargo-nextest; and in preview, mutmut for Python, Gremlins
+`cargo test` and cargo-nextest; PIT for Java and Kotlin, under JUnit 5,
+JUnit 4, Kotest, Spock and TestNG with Maven, Gradle and Ant; and in
+preview, mutmut for Python, Gremlins
 for Go and mutant for Ruby. The run already knows which tests reach
 each mutant and which never change its value, so a mutant no test reaches or
 infects is decided without running anything, and the rest run only against
@@ -338,7 +340,7 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-mutants' mutants |
 | pytest and `python -m unittest` | Exact test and setup/call/teardown phase identity | Preview: mutmut's mutants |
 | `go test` | Exact per test | Preview: Gremlins' mutants |
-| JUnit 5, JUnit 4, Kotest, Spock and TestNG | Exact per test | Not yet |
+| JUnit 5, JUnit 4, Kotest, Spock and TestNG | Exact per test | PIT's mutants |
 | RSpec | Exact example and before/example/after phase identity | Preview: mutant's mutants |
 | Minitest and test-unit | Exact test and setup/test/teardown identity | Preview: mutant's mutants |
 | Cucumber | Exact scenario and hook-phase identity | Preview: mutant's mutants |

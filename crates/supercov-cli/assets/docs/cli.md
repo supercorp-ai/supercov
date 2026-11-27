@@ -178,7 +178,7 @@ npx supercov runs <run-id> [query] [options]
 | `runners` | Group coverage by test runner |
 | `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
 | `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
-| `mutants [path[:line]]` | See, for each mutant the language's established tool would make (StrykerJS, cargo-mutants; in preview mutmut, Gremlins and mutant), whether a test reached it and changed its value |
+| `mutants [path[:line]]` | See, for each mutant the language's established tool would make (StrykerJS, cargo-mutants, PIT; in preview mutmut, Gremlins and mutant), whether a test reached it and changed its value |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -308,7 +308,8 @@ npx supercov runs <run-id> mutants --diff origin/main --fail-on not-infected,not
 ```
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
-(JavaScript, TypeScript) or cargo-mutants 27.1.0 (Rust) would make, or in
+(JavaScript, TypeScript), cargo-mutants 27.1.0 (Rust) or PIT 1.17.1 (Java,
+Kotlin) would make, or in
 preview mutmut 3.8.1 (Python), Gremlins 0.6.0 (Go) or mutant 0.17.1 (Ruby)
 would make (see [Mutation testing](mutation.md)), whether a test
 ran the mutated code and whether the mutant's value would have differed there.
@@ -533,7 +534,9 @@ node-tap, bun:test and Vitest's Browser Mode run one test file per start of the
 command, with the mutant switched on in every process from its start (in the
 page, under Browser Mode) and only that file's candidate tests, stopping at
 the first failure; Jest and Mocha keep resident runners for it. Python, Go
-and Ruby are in preview. Rust mutants
+and Ruby are in preview. Java and Kotlin mutants run inside the build's own
+test JVM (Maven, Gradle or Ant), one test at a time, each mutant in fresh
+classes. Rust mutants
 run through cargo's tests, or through the JavaScript tests that load the
 crate compiled to wasm. Go mutants run each package's test binary, built once.
 Ruby mutants run in a fork of the loaded suite under RSpec, Minitest, test-unit

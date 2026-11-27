@@ -92,7 +92,7 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
-Test the tests with mutants (JavaScript, TypeScript, Rust; Python, Go and Ruby in preview):
+Test the tests with mutants (JavaScript, TypeScript, Rust, Java, Kotlin; Python, Go and Ruby in preview):
   supercov mutants                     which mutants the tests kill, run by run
   supercov mutants --diff main         only the mutants on changed lines
 
@@ -3640,6 +3640,12 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
         return mutants_test_command::command(&arguments);
     }
     if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "mutants")
+        && arguments.get(2).is_some_and(|a| a == "pit")
+    {
+        return mutants_pit_command::command(&arguments);
+    }
+    if command == "runs"
         && arguments.get(1).is_some_and(|a| a == "gaps")
         && arguments.iter().any(|a| a == "--format")
     {
@@ -4285,6 +4291,7 @@ fn instrument_js() -> ExitCode {
 }
 
 mod mutants_export;
+mod mutants_pit_command;
 mod mutants_test_command;
 mod strong_status;
 

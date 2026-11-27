@@ -1,0 +1,251 @@
+name: JVM mutation validation
+
+# Supercov's strong pass for Java and Kotlin against PIT 1.17.1 on the public
+# projects of benchmarks/mutation-jvm/projects.json, on the same runner type
+# with the same parallelism: PIT as a team runs it (it stops at a mutant's
+# first kill) on a shard of each project's source files, Supercov's measured
+# run and strong pass over the same files, then the join of the two
+# (`supercov runs latest mutants pit`) and the times. A project's shards are
+# sized so each job ends within 10 minutes (`shards` in projects.json).
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: "Space-separated project names (default: every project)"
+        required: false
+        default: ""
+      handchecks:
+        description: "Disagreements to check by hand, separated by `;`: project|file:line:from:to|test. Each applies the mutant (the line's text `from` made `to`), runs the test alone and the whole suite."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # PIT's threads and the strong pass's JVMs: the runner's CPUs.
+  THREADS: 4
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pit: ${{ steps.plan.outputs.pit }}
+      supercov: ${{ steps.plan.outputs.supercov }}
+      handchecks: ${{ steps.plan.outputs.handchecks }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: plan
+        env:
+          PROJECTS: ${{ inputs.projects }}
+          HANDCHECKS: ${{ inputs.handchecks }}
+        run: |
+          node -e '
+            const projects = require("./benchmarks/mutation-jvm/projects.json");
+            const wanted = (process.env.PROJECTS || "").split(/\s+/).filter(Boolean);
+            const jobs = Object.entries(projects)
+              .filter(([name]) => wanted.length === 0 || wanted.includes(name))
+              .flatMap(([name, project]) =>
+                Array.from({ length: project.shards ?? 1 }, (_, index) => ({
+                  project: name,
+                  shard: index + 1,
+                  shards: project.shards ?? 1,
+                  pit: project.pit !== false,
+                })),
+              );
+            console.log(`pit=${JSON.stringify(jobs.filter((job) => job.pit))}`);
+            console.log(`supercov=${JSON.stringify(jobs)}`);
+            const checks = (process.env.HANDCHECKS || "").split(";").map((c) => c.trim()).filter(Boolean)
+              .map((check, index) => {
+                const [project, mutant, test] = check.split("|");
+                return { index: index + 1, project, mutant, test: test ?? "" };
+              });
+            console.log(`handchecks=${JSON.stringify(checks)}`);
+          ' >> "$GITHUB_OUTPUT"
+
+  # A release build from a cold cache takes longer than ten minutes; the
+  # cache it saves brings the next under five.
+  build:
+    needs: plan
+    if: ${{ needs.plan.outputs.supercov != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mutation-jvm-supercov
+      - run: cargo build --release --bin supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-bin
+          path: target/release/supercov
+
+  pit:
+    name: PIT ${{ matrix.project }} ${{ matrix.shard }}/${{ matrix.shards }}
+    needs: plan
+    if: ${{ needs.plan.outputs.pit != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.pit) }}
+    steps:
+      - uses: actions/checkout@v6
+      # Each project's JDK is in JAVA_HOME_<version>_X64 (run.sh).
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            11
+            17
+            21
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: mutation-jvm-${{ matrix.project }}-${{ hashFiles('benchmarks/mutation-jvm/**') }}
+          restore-keys: mutation-jvm-${{ matrix.project }}-
+      - name: PIT
+        env:
+          SHARD: ${{ matrix.shard }}/${{ matrix.shards }}
+          WORK: ${{ runner.temp }}/work
+        run: |
+          out="out/${{ matrix.project }}/${{ matrix.shard }}"
+          /usr/bin/time -v -o time.txt timeout 540 \
+            benchmarks/mutation-jvm/run.sh "${{ matrix.project }}" pit "$out" || echo "exit $?"
+          head -12 time.txt
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: pit-${{ matrix.project }}-${{ matrix.shard }}
+          path: out
+
+  supercov:
+    name: supercov ${{ matrix.project }} ${{ matrix.shard }}/${{ matrix.shards }}
+    needs: [plan, build, pit]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.plan.outputs.supercov != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.supercov) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            11
+            17
+            21
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: mutation-jvm-${{ matrix.project }}-${{ hashFiles('benchmarks/mutation-jvm/**') }}
+          restore-keys: mutation-jvm-${{ matrix.project }}-
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-bin
+          path: bin
+      - run: chmod +x bin/supercov
+      # This shard's PIT report, for the join.
+      - if: ${{ matrix.pit }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pit-${{ matrix.project }}-${{ matrix.shard }}
+          path: out
+      - name: supercov
+        env:
+          SHARD: ${{ matrix.shard }}/${{ matrix.shards }}
+          WORK: ${{ runner.temp }}/work
+          SUPERCOV: ${{ github.workspace }}/bin/supercov
+          # The pass stops in time, its verdicts so far saved; what it
+          # leaves shows as mutants without a verdict.
+          BUDGET: 420
+        run: |
+          out="out/${{ matrix.project }}/${{ matrix.shard }}"
+          /usr/bin/time -v -o time.txt timeout 540 \
+            benchmarks/mutation-jvm/run.sh "${{ matrix.project }}" supercov "$out" || echo "exit $?"
+          head -12 time.txt
+          tail -15 "$out/supercov-strong.log" || true
+          head -40 "$out/supercov-pit.txt" || true
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: supercov-${{ matrix.project }}-${{ matrix.shard }}
+          path: |
+            out/**/*.json
+            out/**/*.txt
+            out/**/*.log
+
+  # A disagreement checked by hand (run.sh handcheck): the mutant applied to
+  # the source, the test named run alone, then the whole suite.
+  handcheck:
+    name: hand check ${{ matrix.index }} ${{ matrix.project }}
+    needs: plan
+    if: ${{ needs.plan.outputs.handchecks != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.handchecks) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            11
+            17
+            21
+      - name: Hand check
+        env:
+          WORK: ${{ runner.temp }}/work
+          HANDCHECK: ${{ matrix.mutant }}
+          HANDCHECK_TEST: ${{ matrix.test }}
+        run: |
+          timeout 540 benchmarks/mutation-jvm/run.sh "${{ matrix.project }}" handcheck out || echo "exit $?"
+          grep -E '^(== |PASSED|FAILED|BUILD ERROR)' out/handcheck-*.log | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: handcheck-${{ matrix.index }}
+          path: out
+
+  agreement:
+    needs: [plan, pit, supercov]
+    if: ${{ !cancelled() && needs.plan.outputs.supercov != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*-*
+          path: artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pit-*
+          path: artifacts
+          merge-multiple: true
+      - name: Join and summarize
+        run: python3 benchmarks/mutation-jvm/summarize.py artifacts | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: agreement
+          path: artifacts

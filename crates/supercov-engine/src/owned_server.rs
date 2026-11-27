@@ -176,6 +176,7 @@ fn credit(
             file: Some(test.file.clone()),
             status: status.into(),
             attributed: true,
+            setup: false,
         });
     }
     (

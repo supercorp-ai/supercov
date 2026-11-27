@@ -19593,6 +19593,490 @@ fn standalone_doctests_named_alike_are_each_run_alone() {
     );
 }
 
+/// Java mutants through Maven, end to end: the run lists PIT's mutants
+/// and records their values, the strong pass runs each in the build's own
+/// test JVM against its candidates, a switch javac refuses is `unviable`
+/// and the rest of the pass goes on, and a boundary whose operands were
+/// never equal is decided without running.
+#[test]
+fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-mutants");
+    small_maven_project(&project);
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static boolean small(int n) {\n        return n < 10;\n    }\n\n    public static String named(String s) {\n        return System.getProperty(\"w\") + System.getenv(\"w\");\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n\n    @Test\n    void small() {\n        assertTrue(W.small(3));\n    }\n\n    @Test\n    void named() {\n        assertEquals(\"nullnull\", W.named(\"\"));\n    }\n}\n",
+    );
+    // A source with nothing to mutate lists no mutants.
+    project.write(
+        "src/main/java/w/Marker.java",
+        "package w;\n\npublic interface Marker {\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tested = project
+        .supercov(&["mutants", "--json", "--", "mvn", "-q", "test"])
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let status = |id: &str| {
+        verdicts["mutants"][id]["status"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let file = "src/main/java/w/W.java";
+    assert_eq!(verdicts["mutantSet"], "pitest@1.17.1", "{verdicts}");
+    // `n * 2` is told from `n / 2` by twice(2), and its return from 0.
+    assert_eq!(
+        status(&format!("{file}:5:16-5:21:Math:/")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    assert_eq!(
+        status(&format!("{file}:5:16-5:21:PrimitiveReturns:0")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    // `n < 10` with n = 3 never had its operands equal: the boundary
+    // mutant survives without running.
+    assert_eq!(
+        status(&format!("{file}:9:16-9:22:ConditionalsBoundary:<=")).as_deref(),
+        Some("survived"),
+        "{tested}"
+    );
+    assert_eq!(
+        status(&format!("{file}:9:16-9:22:NegateConditionals:negated")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    // A `+` of a call whose type the source does not show was taken for an
+    // addition: javac refuses its switch, and the mutant is unviable.
+    assert_eq!(
+        status(&format!("{file}:13:16-13:60:Math:-")).as_deref(),
+        Some("unviable"),
+        "{tested}"
+    );
+    // named() returns "nullnull" without the properties: "" is caught.
+    assert_eq!(
+        status(&format!("{file}:13:16-13:60:EmptyObjectReturnVals:\"\"")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+
+    // PIT's report beside the run's verdicts: `n * 2`'s division both
+    // kill, the boundary PIT kills and Supercov decided survived is a
+    // violation (exit 1), a negation PIT could not start is not compared,
+    // and a call PIT removed that the source does not show is PIT's alone.
+    let mutation = |status: &str, line: u32, mutator: &str, method: &str, description: &str| {
+        format!(
+            "<mutation detected='{}' status='{status}' numberOfTestsRun='1'><sourceFile>W.java</sourceFile><mutatedClass>w.W</mutatedClass><mutatedMethod>{method}</mutatedMethod><methodDescription>(I)I</methodDescription><lineNumber>{line}</lineNumber><mutator>org.pitest.mutationtest.engine.gregor.mutators.{mutator}</mutator><indexes><index>4</index></indexes><killingTests>w.WTest.twice()|w.WTest.small()</killingTests><description>{description}</description></mutation>\n",
+            status == "KILLED"
+        )
+    };
+    let report = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mutations>\n{}{}{}{}</mutations>\n",
+        mutation(
+            "KILLED",
+            5,
+            "MathMutator",
+            "twice",
+            "Replaced integer multiplication with division"
+        ),
+        mutation(
+            "KILLED",
+            9,
+            "ConditionalsBoundaryMutator",
+            "small",
+            "changed conditional boundary"
+        ),
+        mutation(
+            "NON_VIABLE",
+            9,
+            "NegateConditionalsMutator",
+            "small",
+            "negated conditional"
+        ),
+        mutation(
+            "SURVIVED",
+            5,
+            "VoidMethodCallMutator",
+            "twice",
+            "removed call to w/W::log &amp; more"
+        ),
+    );
+    project.write("mutations.xml", &report);
+    let joined = project.supercov(&["runs", "latest", "mutants", "pit", "mutations.xml"]);
+    assert_eq!(joined.code(), 1, "{}{}", joined.stdout(), joined.stderr());
+    let said = joined.stdout();
+    assert!(said.contains("PIT's 4 mutants beside the run's"), "{said}");
+    assert!(said.contains("1 soundness violation(s)"), "{said}");
+    assert!(said.contains("only PIT        1"), "{said}");
+    assert!(said.contains("not compared    1"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "violation  {file}:9:16-9:22:ConditionalsBoundary:<=  supercov survived / pit KILLED"
+        )),
+        "{said}"
+    );
+    let as_json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "pit",
+            "mutations.xml",
+            "--file",
+            file,
+            "--json",
+        ])
+        .json();
+    assert_eq!(as_json["agree"], 1, "{as_json}");
+    assert_eq!(
+        as_json["soundnessViolations"]["mutants"][0]["pitKillingTests"],
+        serde_json::json!(["w.WTest.twice()", "w.WTest.small()"]),
+        "{as_json}"
+    );
+    assert_eq!(
+        as_json["onlyPit"]["mutants"][0]["description"], "removed call to w/W::log & more",
+        "{as_json}"
+    );
+    assert_eq!(
+        as_json["onlyPit"]["byCategory"]["other"]["VoidMethodCall"],
+        1
+    );
+    // Only another file's mutants: nothing of PIT's is left.
+    let elsewhere = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "pit",
+            "mutations.xml",
+            "--file",
+            "src/main/java/w/Other.java",
+            "--json",
+        ])
+        .json();
+    assert_eq!(elsewhere["pit"], 0, "{elsewhere}");
+    // What it refuses, naming why.
+    for (args, says) in [
+        (vec!["mutations.xml", "--file"], "--file needs a path"),
+        (vec!["mutations.xml", "--fast"], "Unknown option: --fast"),
+        (vec![], "give PIT's mutations.xml"),
+        (vec!["missing.xml"], "missing.xml"),
+    ] {
+        let mut command = vec!["runs", "latest", "mutants", "pit"];
+        command.extend(args);
+        let refused = project.supercov(&command);
+        assert_ne!(refused.code(), 0, "{command:?}");
+        assert!(
+            format!("{}{}", refused.stdout(), refused.stderr()).contains(says),
+            "{command:?}: {}{}",
+            refused.stdout(),
+            refused.stderr()
+        );
+    }
+    let help = project.supercov(&["runs", "latest", "mutants", "pit", "--help"]);
+    assert_eq!(help.code(), 0);
+    assert!(
+        help.stdout()
+            .contains("Usage: supercov runs <run-id> mutants pit")
+    );
+}
+
+/// `mutants pit` against runs it cannot join: a run that listed no
+/// mutants is refused, as are an unknown run and a store or project it
+/// cannot read; a run of JavaScript alone has none of PIT's mutants to
+/// join, and an empty report leaves nothing to compare, nothing PIT's
+/// alone and no violation. A source it cannot read again is left out.
+#[test]
+fn mutants_pit_refuses_runs_it_cannot_join() {
+    let project = Project::empty("mutants-pit-unjoined");
+    project.write(
+        "package.json",
+        r#"{ "name": "unjoined", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    project.write(
+        "test/math.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"adds\", () => assert.equal(1 + 1, 2));\n",
+    );
+    project.write("src/math.js", "// Nothing here yet.\n");
+    project.write(".gitignore", ".supercov\n");
+    project.write(
+        "mutations.xml",
+        "<?xml version=\"1.0\"?>\n<mutations>\n</mutations>\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("tests alone");
+    let empty_run = project.measure(&[]);
+    let pit = |extra: &[&str], fault: &str| -> common::Ran {
+        let mut args = vec!["runs", "latest", "mutants", "pit", "mutations.xml"];
+        args.extend_from_slice(extra);
+        let env = if fault.is_empty() {
+            vec![]
+        } else {
+            vec![("SUPERCOV_TEST_FAULT", fault)]
+        };
+        project.supercov_with(&args, &env)
+    };
+    let none = pit(&[], "").exits(2);
+    assert!(
+        none.contains(&format!(
+            "run {empty_run} listed no mutants and measured no source to list them from"
+        )),
+        "{none}"
+    );
+    project.write(
+        "src/math.js",
+        "export function add(a, b) {\n  return a + b;\n}\n",
+    );
+    project.write(
+        "test/math.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { add } from \"../src/math.js\";\ntest(\"adds\", () => assert.equal(add(1, 1), 2));\n",
+    );
+    project.commit("code");
+    project.measure(&[]);
+    let joined = pit(&["--json"], "").json();
+    assert_eq!(joined["pit"], 0, "{joined}");
+    assert_eq!(joined["supercov"], 0, "{joined}");
+    assert_eq!(joined["matched"], 0, "{joined}");
+    let said = pit(&[], "").succeeds();
+    assert_eq!(
+        said,
+        "PIT's 0 mutants beside the run's 0: 0 matched, 0 agree, 0 soundness violation(s)\n  only PIT        0\n  only Supercov   0\n"
+    );
+    // The source read again fails: it is left out, and the rest goes on.
+    let unread = pit(&[], "fs.read_to_string#mutants-pit.read-source");
+    assert_eq!(unread.code(), 0, "{}", unread.stderr());
+    assert!(
+        fired_at(&unread.stderr(), "mutants-pit.read-source"),
+        "{}",
+        unread.stderr()
+    );
+    assert_eq!(unread.stdout(), said);
+    // A store or a project it cannot read: refused, naming the place.
+    for place in ["run-store.discover-runs", "jvm-project.walk"] {
+        let refused = pit(&[], &format!("fs.read_dir#{place}"));
+        assert_eq!(refused.code(), 2, "{place}: {}", refused.stderr());
+        assert!(fired_at(&refused.stderr(), place), "{}", refused.stderr());
+    }
+    let unknown = project
+        .supercov(&["runs", "nosuch", "mutants", "pit", "mutations.xml"])
+        .exits(2);
+    assert!(
+        unknown.contains("coverage run not found: nosuch"),
+        "{unknown}"
+    );
+}
+
+/// `mutants pit` started in a directory deleted under the shell has no
+/// project to join and refuses. Linux's `getcwd` refuses a removed
+/// directory; macOS may still name it.
+#[cfg(target_os = "linux")]
+#[test]
+fn mutants_pit_whose_directory_is_gone_refuses() {
+    let parent = std::env::temp_dir().join(format!("supercov-pit-gone-{}", std::process::id()));
+    let gone = parent.join("gone");
+    std::fs::create_dir_all(&gone).unwrap();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"cd "$1" && rmdir "$1" && shift && exec "$@""#)
+        .arg("sh")
+        .arg(&gone)
+        .arg(env!("CARGO_BIN_EXE_supercov"))
+        .args(["runs", "latest", "mutants", "pit", "mutations.xml"])
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&parent).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("Usage: supercov runs <run-id> mutants pit"),
+        "{stderr}"
+    );
+}
+
+/// A JUnit 4 parameterized test whose parameters print as Object's
+/// toString does, an identity hash in each name, is found again in the
+/// strong pass's JVM, where the hashes differ, and decides its mutants. A
+/// random hash stands in for the identity hash, which a small program may
+/// happen to repeat.
+#[test]
+fn a_junit_4_parameter_named_by_its_identity_hash_decides_its_mutants() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-junit4-hash");
+    small_maven_project(&project);
+    let pom = std::fs::read_to_string(project.root.join("pom.xml"))
+        .unwrap()
+        .replace(
+            "<groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>",
+            "<groupId>junit</groupId>\n      <artifactId>junit</artifactId>\n      <version>4.13.2</version>",
+        );
+    project.write("pom.xml", &pom);
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.Assert.assertEquals;\n\nimport java.util.Arrays;\nimport java.util.Collection;\nimport java.util.concurrent.ThreadLocalRandom;\nimport org.junit.Test;\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Parameterized;\n\n@RunWith(Parameterized.class)\npublic class WTest {\n    static class Case {\n        final int n;\n        final int twice;\n        final String hash = Integer.toHexString(ThreadLocalRandom.current().nextInt(1 << 28, Integer.MAX_VALUE));\n\n        Case(int n, int twice) {\n            this.n = n;\n            this.twice = twice;\n        }\n    }\n\n    static class Small extends Case {\n        Small() {\n            super(2, 4);\n        }\n\n        @Override\n        public String toString() {\n            return \"w.WTest$Small@\" + hash;\n        }\n    }\n\n    static class Large extends Case {\n        Large() {\n            super(5, 10);\n        }\n\n        @Override\n        public String toString() {\n            return \"w.WTest$Large@\" + hash;\n        }\n    }\n\n    @Parameterized.Parameters(name = \"{0}\")\n    public static Collection<Object[]> cases() {\n        return Arrays.asList(new Object[] {new Small()}, new Object[] {new Large()});\n    }\n\n    private final Case value;\n\n    public WTest(Case value) {\n        this.value = value;\n    }\n\n    @Test\n    public void twice() {\n        assertEquals(value.twice, W.twice(value.n));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tested = project
+        .supercov(&["mutants", "--json", "--", "mvn", "-q", "test"])
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let file = "src/main/java/w/W.java";
+    // `n * 2` against `n / 2`: both cases tell them apart.
+    assert_eq!(
+        verdicts["mutants"][format!("{file}:5:29-5:34:Math:/")]["status"],
+        "killed",
+        "{tested}\n{verdicts}"
+    );
+    let errors = verdicts["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, mutant)| mutant["status"] == "error")
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(errors, Vec::<String>::new(), "{verdicts}");
+}
+
+/// Code a test class runs for all its tests -- a `@BeforeAll`, a
+/// `@MethodSource` -- is credited to every test of the class: a mutant
+/// there is run against them, though another class's test, which ignores
+/// what it returns, also runs it. Each JVM that shares the pass works in a
+/// directory of its own, made of links to the project's files: a test reads
+/// them by relative path, and the files a test makes are its JVM's alone.
+#[test]
+fn class_setup_is_credited_to_the_class_s_tests_and_each_jvm_has_its_own_directory() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-class-setup");
+    small_maven_project(&project);
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\n\npublic class W {\n    public static String label() {\n        return \"set\";\n    }\n\n    public static String source() {\n        return \"given\";\n    }\n\n    public static int twice(int n) {\n        return n * 2 + 0 * n;\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport java.util.stream.Stream;\nimport org.junit.jupiter.api.BeforeAll;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.params.ParameterizedTest;\nimport org.junit.jupiter.params.provider.MethodSource;\n\nclass WTest {\n    static String label;\n\n    @BeforeAll\n    static void setUp() {\n        label = W.label();\n    }\n\n    static Stream<String> sources() {\n        return Stream.of(W.source());\n    }\n\n    @Test\n    void labelled() {\n        assertEquals(\"set\", label);\n    }\n\n    @ParameterizedTest\n    @MethodSource(\"sources\")\n    void given(String value) {\n        assertEquals(\"given\", value);\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/CallsTest.java",
+        "package w;\n\nimport org.junit.jupiter.api.Test;\n\nclass CallsTest {\n    @Test\n    void calls() {\n        W.label();\n        W.source();\n    }\n}\n",
+    );
+    // Each run of `twice` reads what to expect from a project file by its
+    // relative path, takes long enough for the other JVMs to claim mutants
+    // too, and says where it ran.
+    project.write("src/test/resources/expected.txt", "4\n");
+    project.write(
+        "src/test/java/w/TwiceTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport java.nio.file.Files;\nimport java.nio.file.Paths;\nimport java.nio.file.StandardOpenOption;\nimport org.junit.jupiter.api.Test;\n\nclass TwiceTest {\n    @Test\n    void twice() throws Exception {\n        String expected = new String(Files.readAllBytes(Paths.get(\"src/test/resources/expected.txt\"))).trim();\n        Thread.sleep(1000);\n        String log = System.getenv(\"W_LOG\");\n        if (log != null) {\n            Files.write(Paths.get(log), (System.getProperty(\"user.dir\") + \"\\n\").getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);\n        }\n        assertEquals(Integer.parseInt(expected), W.twice(2));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let log = project.root.join("dirs.log");
+    let log_value = log.display().to_string();
+    let tested = project
+        .supercov_with(
+            &["mutants", "--json", "--", "mvn", "-q", "test"],
+            &[("W_LOG", log_value.as_str()), ("SUPERCOV_STRONG_JVMS", "4")],
+        )
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let file = "src/main/java/w/W.java";
+    let of_line = |line: u32| {
+        verdicts["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id.starts_with(&format!("{file}:{line}:")))
+            .map(|(id, mutant)| (id.clone(), mutant["status"].as_str().unwrap().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    // `label()`'s return reached in `@BeforeAll`, `source()`'s in a
+    // `@MethodSource`: each killed by the class's tests.
+    for line in [5, 9, 13] {
+        let mutants = of_line(line);
+        assert!(!mutants.is_empty(), "line {line}: {verdicts}");
+        assert!(
+            mutants
+                .iter()
+                .all(|(_, status)| status == "killed" || status == "survived" && line == 13),
+            "line {line}: {mutants:?}\n{tested}"
+        );
+    }
+    assert!(
+        of_line(13).iter().any(|(_, status)| status == "killed"),
+        "{verdicts}"
+    );
+    // The JVMs that shared the pass each ran in a directory of their own,
+    // removed once they ended; the build's own JVM in the copy's.
+    let directories = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    let own = directories
+        .iter()
+        .filter(|directory| {
+            std::path::Path::new(directory)
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("jvm-"))
+        })
+        .collect::<Vec<_>>();
+    assert!(!own.is_empty(), "{directories:?}");
+    for directory in own {
+        assert!(!std::path::Path::new(directory).exists(), "{directory}");
+    }
+}
+
 /// A Maven project with one class and its test.
 /// A JVM test whose class is declared in a file of another name has no
 /// file to name, and is listed without evidence all the same.
@@ -19638,6 +20122,223 @@ fn small_maven_project(project: &Project) {
         "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n}\n",
     );
     project.write(".gitignore", "target/\n");
+}
+
+/// A product class of two methods for a strong pass: `twice` a test checks,
+/// `thrice` a test runs and does not check. Its `n * 2` is on line 5 and
+/// its `n * 3` on line 9.
+const STRONG_CALC: &str = "package app;\n\npublic class Calc {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static int thrice(int n) {\n        return n * 3;\n    }\n}\n";
+
+/// The verdicts the last strong pass of `project` saved.
+fn saved_strong_verdicts(project: &Project) -> Option<serde_json::Value> {
+    std::fs::read_dir(project.root.join(".supercov/runs"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+}
+
+/// Runs `command` under `supercov mutants` and asserts what the strong pass
+/// decided for `STRONG_CALC` at `file`: `n * 2`'s division killed by the
+/// test that checks it (a test named with `killer`), and `n * 3`'s, which
+/// a test runs and nothing checks, survived. A driver that ran nothing, or
+/// failed every mutant, decides neither so.
+fn assert_strong_pass_decides_calc(project: &Project, command: &[&str], file: &str, killer: &str) {
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let mut arguments = vec!["mutants", "--json", "--"];
+    arguments.extend_from_slice(command);
+    let ran = project.supercov(&arguments);
+    let tested = format!("{}\n{}", ran.stdout(), ran.stderr());
+    let verdicts =
+        saved_strong_verdicts(project).unwrap_or_else(|| panic!("no verdicts saved:\n{tested}"));
+    let division = |line: u32| {
+        let found = verdicts["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id.starts_with(&format!("{file}:{line}:")) && id.ends_with(":Math:/"))
+            .map(|(_, verdict)| verdict.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "line {line}: {verdicts}\n{tested}");
+        found[0].clone()
+    };
+    let checked = division(5);
+    assert_eq!(checked["status"], "killed", "{verdicts}\n{tested}");
+    assert!(
+        checked["killedBy"]
+            .as_str()
+            .is_some_and(|test| test.contains(killer)),
+        "{verdicts}\n{tested}"
+    );
+    assert_eq!(division(9)["status"], "survived", "{verdicts}\n{tested}");
+}
+
+/// Apache Ant's launcher, from `ANT_HOME`.
+fn ant_launcher() -> Option<std::path::PathBuf> {
+    let launcher = std::path::PathBuf::from(std::env::var_os("ANT_HOME")?).join("bin/ant");
+    launcher.is_file().then_some(launcher)
+}
+
+/// Jars from the local Maven repository, every one of them or none.
+fn local_jars(relative: &[&str]) -> Option<String> {
+    let repository = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".m2/repository");
+    relative
+        .iter()
+        .map(|jar| {
+            let path = repository.join(jar);
+            path.is_file()
+                .then(|| format!("<pathelement location=\"{}\"/>", path.display()))
+        })
+        .collect()
+}
+
+/// A Spock specification on the JUnit Platform, through Gradle: the strong
+/// pass runs Calc's mutants against the feature that reaches each, killed
+/// by the one that checks and survived where the one that runs it checks
+/// nothing.
+#[test]
+fn a_spock_specification_s_strong_pass_runs_each_mutant_against_its_features() {
+    if !std::process::Command::new("gradle")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("[jvm] skipped: no Gradle found");
+        return;
+    }
+    let project = Project::empty("jvm-spock-strong");
+    project.write(
+        "settings.gradle",
+        "plugins {\n    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'\n}\nrootProject.name = 'demo'\n",
+    );
+    // Groovy cannot read the newest JDKs' class files: the build asks for
+    // one it can.
+    project.write(
+        "build.gradle",
+        "plugins {\n    id 'groovy'\n    id 'java'\n}\n\nrepositories { mavenCentral() }\n\njava {\n    toolchain { languageVersion = JavaLanguageVersion.of(21) }\n}\n\ndependencies {\n    testImplementation 'org.spockframework:spock-core:2.3-groovy-4.0'\n    testImplementation 'org.apache.groovy:groovy:4.0.22'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\ntest { useJUnitPlatform() }\n",
+    );
+    project.write("src/main/java/app/Calc.java", STRONG_CALC);
+    project.write(
+        "src/test/groovy/app/CalcSpec.groovy",
+        "package app\n\nimport spock.lang.Specification\n\nclass CalcSpec extends Specification {\n    def \"doubles a number\"() {\n        expect:\n        Calc.twice(2) == 4\n    }\n\n    def \"triples a number unchecked\"() {\n        setup:\n        Calc.thrice(2)\n\n        expect:\n        true\n    }\n}\n",
+    );
+    project.write(".gitignore", "build/\n.gradle/\n");
+    assert_strong_pass_decides_calc(
+        &project,
+        &["gradle", "--console=plain", "test"],
+        "src/main/java/app/Calc.java",
+        "doubles a number",
+    );
+}
+
+/// An Ant build whose `<junitlauncher>` runs JUnit 5 on the platform: the
+/// strong pass runs Calc's mutants in the JVM the task forks, killed by
+/// the test that checks and survived where the one that runs it checks
+/// nothing.
+#[test]
+fn an_ant_junitlauncher_build_s_strong_pass_runs_each_mutant_against_its_tests() {
+    let Some(ant) = ant_launcher() else {
+        eprintln!("[jvm] skipped: no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some(classpath) = local_jars(&[
+        "org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar",
+        "org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar",
+        "org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar",
+        "org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar",
+        "org/junit/platform/junit-platform-launcher/1.10.2/junit-platform-launcher-1.10.2.jar",
+        "org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar",
+        "org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar",
+    ]) else {
+        eprintln!("[jvm] skipped: no JUnit 5.10.2 jars in ~/.m2");
+        return;
+    };
+    let project = Project::empty("jvm-ant-launcher-strong");
+    project.write(
+        "build.xml",
+        &format!(
+            r#"<project name="app" default="test">
+    <path id="platform">{classpath}</path>
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <javac srcdir="src/main" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="src/test" destdir="out/test-classes" includeantruntime="false">
+            <classpath><path refid="platform"/><pathelement location="out/classes"/></classpath>
+        </javac>
+        <junitlauncher haltOnFailure="true" printSummary="true">
+            <classpath>
+                <path refid="platform"/>
+                <pathelement location="out/classes"/>
+                <pathelement location="out/test-classes"/>
+            </classpath>
+            <testclasses><fileset dir="out/test-classes" includes="**/*Test.class"/><fork/></testclasses>
+        </junitlauncher>
+    </target>
+</project>
+"#
+        ),
+    );
+    project.write("src/main/app/Calc.java", STRONG_CALC);
+    project.write(
+        "src/test/app/CalcTest.java",
+        "package app;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void twice() {\n        assertEquals(4, Calc.twice(2));\n    }\n\n    @Test\n    void thriceUnchecked() {\n        Calc.thrice(2);\n    }\n}\n",
+    );
+    project.write(".gitignore", "out/\n");
+    let ant = ant.display().to_string();
+    assert_strong_pass_decides_calc(&project, &[&ant, "test"], "src/main/app/Calc.java", "twice");
+}
+
+/// An Ant build whose `<testng>` task runs TestNG: the strong pass runs
+/// Calc's mutants in the JVM the task forks, killed by the test that
+/// checks and survived where the one that runs it checks nothing.
+#[test]
+fn an_ant_testng_build_s_strong_pass_runs_each_mutant_against_its_tests() {
+    let Some(ant) = ant_launcher() else {
+        eprintln!("[jvm] skipped: no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some(classpath) = local_jars(&[
+        "org/testng/testng/6.14.3/testng-6.14.3.jar",
+        "com/beust/jcommander/1.72/jcommander-1.72.jar",
+    ]) else {
+        eprintln!("[jvm] skipped: no TestNG 6.14.3 and JCommander 1.72 jars in ~/.m2");
+        return;
+    };
+    let project = Project::empty("jvm-ant-testng-strong");
+    project.write(
+        "build.xml",
+        &format!(
+            r#"<project name="app" default="test">
+    <path id="testng.path">{classpath}</path>
+    <taskdef resource="testngtasks" classpathref="testng.path"/>
+    <path id="test.path"><path refid="testng.path"/><pathelement location="out/classes"/><pathelement location="out/test-classes"/></path>
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <javac srcdir="src" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="test" destdir="out/test-classes" includeantruntime="false" classpathref="test.path"/>
+        <testng classpathref="test.path" outputdir="out/testng" haltonfailure="true">
+            <classfileset dir="out/test-classes" includes="**/*Test.class"/>
+        </testng>
+    </target>
+</project>
+"#
+        ),
+    );
+    project.write("src/app/Calc.java", STRONG_CALC);
+    project.write(
+        "test/app/CalcTest.java",
+        "package app;\n\nimport static org.testng.Assert.assertEquals;\n\nimport org.testng.annotations.Test;\n\npublic class CalcTest {\n    @Test\n    public void twice() {\n        assertEquals(Calc.twice(2), 4);\n    }\n\n    @Test\n    public void thriceUnchecked() {\n        Calc.thrice(2);\n    }\n}\n",
+    );
+    project.write(".gitignore", "out/\n");
+    let ant = ant.display().to_string();
+    assert_strong_pass_decides_calc(&project, &[&ant, "test"], "src/app/Calc.java", "twice");
 }
 
 /// A Python run beside a test file that does not parse measures the rest:
@@ -24090,7 +24791,7 @@ fn mutants_test_runs_python_mutants_under_unittest() {
 /// given into one process, so each job names its file.
 #[cfg(unix)]
 #[test]
-fn mutants_test_runs_bun_test_mutants_one_job_at_a_time() {
+fn mutants_test_runs_mutants_one_job_at_a_time_under_bun() {
     if std::process::Command::new("bun")
         .arg("--version")
         .output()
@@ -28618,12 +29319,18 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         .succeeds();
     contains_all(
         &weak_help,
-        &["in preview", "cargo-mutants", "Gremlins", "mutant for Ruby"],
+        &[
+            "in preview",
+            "cargo-mutants",
+            "PIT for\nJava and Kotlin",
+            "Gremlins",
+            "mutant for Ruby",
+        ],
     );
     let overview = project.supercov(&["--help"]).succeeds();
     assert!(
         overview.contains(
-            "Test the tests with mutants (JavaScript, TypeScript, Rust; Python, Go and Ruby in preview)"
+            "Test the tests with mutants (JavaScript, TypeScript, Rust, Java, Kotlin; Python, Go and Ruby in preview)"
         ),
         "{overview}"
     );

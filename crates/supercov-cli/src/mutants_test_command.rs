@@ -271,8 +271,8 @@ Usage: supercov mutants [options] [-- <test command>]
 
 Mutation-tests the project: lists the mutants of every source the tests ran,
 as each language's established tool makes them (StrykerJS for JavaScript and
-TypeScript, cargo-mutants for Rust; in preview, mutmut for Python, Gremlins
-for Go and mutant for Ruby), runs each against only the tests that run its
+TypeScript, cargo-mutants for Rust, PIT for Java and Kotlin; in preview,
+mutmut for Python, Gremlins for Go and mutant for Ruby), runs each against only the tests that run its
 code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
 command or the one after --, when there is none, the checkout changed since,
@@ -942,6 +942,11 @@ fn run_command(args: &[String], carry: bool, before: Before) -> ExitCode {
             }
         }
     }
+}
+
+/// The run's plan, as `mutants test` makes it.
+pub(crate) fn plan_of(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
+    run_plan(root, run)
 }
 
 /// The pass over run `selector`, or `--plan`'s answer.

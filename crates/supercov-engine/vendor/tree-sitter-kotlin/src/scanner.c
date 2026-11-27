@@ -256,7 +256,10 @@ bool tree_sitter_kotlin_external_scanner_scan(void *payload, TSLexer *lexer, con
                         return false;
                     }
                     if (lexer->lookahead == 'i') {
-                        return scan_word(lexer, "import");
+                        // Word boundary: `return importedType` continues the
+                        // return; only the keyword `import` starts a statement.
+                        return scan_word(lexer, "import") && !iswalnum(lexer->lookahead) &&
+                               lexer->lookahead != '_';
                     }
                     return false;
                 case ';':

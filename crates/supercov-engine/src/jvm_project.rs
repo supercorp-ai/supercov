@@ -75,6 +75,12 @@ pub struct PreparedJvmProject {
     /// Files that did not parse, with the reason. Reported rather than skipped:
     /// a hole in the denominator nobody is told about is a wrong number.
     pub unparseable: Vec<(String, String)>,
+    /// Where the run lists its mutants (`SUPERCOV_MUTANTS=1`): each file's
+    /// mutants, linked to its points and value probes.
+    pub mutants: Option<BTreeMap<String, Vec<crate::mutant_list::CandidateMutant>>>,
+    /// The value probes' slots in the probe array, past the coverage
+    /// probes'.
+    pub value_sites: BTreeMap<u64, crate::jvm_strong::ValueSite>,
 }
 
 /// Which build system, decided by what is actually in the tree.
@@ -419,6 +425,19 @@ pub fn prepare_jvm_project(
     let mut unparseable = Vec::new();
     let mut next_probe = 0_u64;
     let mut next_decision = 0_u32;
+    // A run that lists its mutants places a value probe at each mutant that
+    // can take one, and keeps the list.
+    let listing = std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| value == "1");
+    let index = listing.then(|| {
+        let sources = files
+            .sources
+            .iter()
+            .map(|(file, _)| file.clone())
+            .collect::<Vec<_>>();
+        crate::jvm_strong::index_of(root, &sources)
+    });
+    let mut mutants = listing.then(BTreeMap::new);
+    let mut value_sites = BTreeMap::new();
     for (relative, language) in &files.sources {
         let path = root.join(relative);
         let Ok(source) = crate::fault_fs::read_to_string(&path) else {
@@ -445,9 +464,41 @@ pub fn prepare_jvm_project(
                     .extend(obligations.manifest.limitations);
                 probes.extend(obligations.probes);
                 widths.extend(obligations.decision_widths);
+                let mut edits = obligations.edits;
+                let mut plain = false;
+                if let (Some(index), Some(mutants)) = (&index, &mut mutants) {
+                    let tree = crate::jvm_instrumenter::parse(&source, *language)
+                        .expect("a source whose obligations were built parses");
+                    let found = crate::jvm_mutants::enumerate(&source, &tree, *language, index);
+                    let mut listed = found
+                        .iter()
+                        .map(|mutant| {
+                            crate::jvm_strong::candidate(mutant, &obligations.point_spans)
+                        })
+                        .collect::<Vec<_>>();
+                    let (probe_edits, sites) = crate::jvm_strong::probe_edits(
+                        relative,
+                        &source,
+                        &found,
+                        &mut listed,
+                        &mut next_probe,
+                    );
+                    plain = !probe_edits.is_empty();
+                    edits.extend(probe_edits);
+                    value_sites.extend(sites);
+                    if !listed.is_empty() {
+                        mutants.insert(relative.clone(), listed);
+                    }
+                }
                 instrumented.push((
                     relative.clone(),
-                    crate::jvm_instrumenter::rewrite(&source, &obligations.edits),
+                    if plain {
+                        // A probe hides an operator in a comment, which a
+                        // comment the rewrite places inside it would end.
+                        crate::jvm_instrumenter::rewrite_plain(&source, &edits)
+                    } else {
+                        crate::jvm_instrumenter::rewrite(&source, &edits)
+                    },
                 ));
             }
             Err(error) => {
@@ -515,6 +566,8 @@ pub fn prepare_jvm_project(
         decision_widths: widths,
         instrumented,
         unparseable,
+        mutants,
+        value_sites,
     })
 }
 

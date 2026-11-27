@@ -69,6 +69,13 @@ public final class Supercov {
   private static List<long[]> runWide = new ArrayList<>();
   private static final List<Record> records = new ArrayList<>();
   private static int current = -1;
+  /// The class-level work open around the running test, innermost last: a
+  /// class's `@BeforeAll`, its parameter sources, a nested class's own.
+  /// What runs while no test does is credited to the innermost.
+  private static final List<Integer> setups = new ArrayList<>();
+  /// Each class's setup record, by its name: a class opened again (a
+  /// nested class's parent, a TestNG class its tests return to) adds to it.
+  private static final java.util.Map<String, Integer> setupRecords = new java.util.HashMap<>();
   private static int open = 0;
   private static boolean overlapped = false;
   private static boolean armed = false;
@@ -96,6 +103,10 @@ public final class Supercov {
     /// never ran, and a suite of nothing but concurrent tests then published
     /// no tests at all.
     boolean unattributed = false;
+    /// Whether this is a test class's own work (`@BeforeAll`, `@AfterAll`,
+    /// a parameter source, a static initializer) rather than a test's: every
+    /// test of the class runs after it, so every one is credited with it.
+    boolean setup = false;
     final List<int[]> probes = new ArrayList<>();
     final List<long[]> vectors = new ArrayList<>();
 
@@ -130,6 +141,9 @@ public final class Supercov {
       runWide.add(new long[0]);
     }
     records.clear();
+    outsideRecord = null;
+    setups.clear();
+    setupRecords.clear();
     current = -1;
     open = 0;
     overlapped = false;
@@ -154,6 +168,7 @@ public final class Supercov {
   /** Binds every probe that fires next to this test, which carries these tags. */
   public static synchronized void enterTest(String name, String runner, String[] tags) {
     harvest();
+    claimOutside(runner);
     if (open > 0) {
       overlap();
     }
@@ -204,7 +219,109 @@ public final class Supercov {
     }
     harvest();
     open = Math.max(0, open - 1);
-    current = -1;
+    current = overlapped || setups.isEmpty() ? -1 : setups.get(setups.size() - 1);
+  }
+
+  /** The status a class's setup record is written with: it is no test. */
+  static final String SETUP = "setup:";
+
+  /**
+   * Opens a test class's own work: what runs from here until a test starts,
+   * and again between its tests and after the last, until {@link
+   * #exitSetup}, is the class's (`@BeforeAll`, a `@MethodSource`, a static
+   * initializer, `@AfterAll`). The engine credits it to every test of the
+   * class's file: each of them runs after it, and a mutant there changes
+   * what they see.
+   */
+  public static synchronized void enterSetup(String name, String runner) {
+    harvest();
+    claimOutside(runner);
+    if (overlapped) {
+      return;
+    }
+    String recordName = name + "#" + SETUP_NAME;
+    Integer at = setupRecords.get(recordName);
+    if (at == null) {
+      Record record = new Record(recordName);
+      record.runner = runner;
+      record.setup = true;
+      records.add(record);
+      at = records.size() - 1;
+      setupRecords.put(recordName, at);
+    }
+    setups.add(at);
+    // Inside a running test (an engine that reports a class within one) the
+    // test keeps what it reaches; the class takes over once it ends.
+    if (open == 0) {
+      current = at;
+    }
+  }
+
+  /**
+   * Passes from one test class to the next where the framework reports no
+   * class boundary (TestNG's tests alone): what ran since the previous
+   * class's last test is its `@AfterClass` or the next one's `@BeforeClass`,
+   * and no telling which, so both classes are credited with it.
+   */
+  public static synchronized void switchSetup(String name, String runner) {
+    if (overlapped || open > 0 || current < 0 || !records.get(current).setup) {
+      exitSetup("passed");
+      enterSetup(name, runner);
+      return;
+    }
+    Record previous = records.get(current);
+    int probes = previous.probes.size();
+    int vectors = previous.vectors.size();
+    harvest();
+    List<int[]> between = new ArrayList<>(previous.probes.subList(probes, previous.probes.size()));
+    List<long[]> evaluated =
+        new ArrayList<>(previous.vectors.subList(vectors, previous.vectors.size()));
+    exitSetup("passed");
+    enterSetup(name, runner);
+    Record next = records.get(current);
+    next.probes.addAll(between);
+    next.vectors.addAll(evaluated);
+  }
+
+  /// What ran while no test and no test class did: a suite's or an
+  /// engine's own setup (`@BeforeSuite`), a class loaded between two others.
+  /// Any test may depend on it, so it names no class.
+  private static Record outside() {
+    if (outsideRecord == null) {
+      outsideRecord = new Record(OUTSIDE);
+      outsideRecord.setup = true;
+      records.add(outsideRecord);
+    }
+    return outsideRecord;
+  }
+
+  private static Record outsideRecord;
+
+  /// The framework whose tests ran around what ran outside them.
+  private static void claimOutside(String runner) {
+    if (outsideRecord != null && outsideRecord.runner.isEmpty() && runner != null) {
+      outsideRecord.runner = runner;
+    }
+  }
+
+  static final String OUTSIDE = "#<outside every test>";
+
+  /// What a setup record's name ends in, after its class's.
+  static final String SETUP_NAME = "<class setup>";
+
+  /** Closes the innermost class's own work, as the framework says it ended. */
+  public static synchronized void exitSetup(String status) {
+    harvest();
+    if (overlapped || setups.isEmpty()) {
+      return;
+    }
+    Record record = records.get(setups.remove(setups.size() - 1));
+    if (!"passed".equals(status)) {
+      record.status = "failed";
+    }
+    if (open == 0) {
+      current = setups.isEmpty() ? -1 : setups.get(setups.size() - 1);
+    }
   }
 
   /// Which record belongs to the test this thread is running, once records
@@ -263,8 +380,10 @@ public final class Supercov {
   }
 
   private static void harvest() {
-    Record into =
-        !overlapped && current >= 0 && current < records.size() ? records.get(current) : null;
+    Record into = null;
+    if (!overlapped) {
+      into = current >= 0 && current < records.size() ? records.get(current) : outside();
+    }
     for (int index = 0; index < HITS.length; index++) {
       int value = HITS[index];
       if (value == 0) {
@@ -473,12 +592,19 @@ public final class Supercov {
       for (int value : global) {
         putLong(out, value);
       }
-      putLong(out, records.size());
+      // A class whose own work reached nothing has nothing to credit.
+      List<Record> written = new ArrayList<>();
       for (Record record : records) {
+        if (!record.setup || !record.probes.isEmpty() || !record.vectors.isEmpty()) {
+          written.add(record);
+        }
+      }
+      putLong(out, written.size());
+      for (Record record : written) {
         byte[] name = record.name.getBytes("UTF-8");
         putLong(out, name.length);
         out.write(name);
-        byte[] status = record.status.getBytes("UTF-8");
+        byte[] status = ((record.setup ? SETUP : "") + record.status).getBytes("UTF-8");
         putLong(out, status.length);
         out.write(status);
         // Whether the probes below are this test's own. Every JUnit Platform
@@ -496,10 +622,17 @@ public final class Supercov {
           putLong(out, bytes.length);
           out.write(bytes);
         }
-        putLong(out, record.probes.size());
+        // A record harvested more than once (a class's setup, around each
+        // of its tests) holds a probe once per harvest: one entry each, with
+        // every bit any harvest saw.
+        java.util.Map<Integer, Integer> probes = new java.util.TreeMap<>();
         for (int[] hit : record.probes) {
-          putLong(out, hit[0]);
-          putLong(out, hit[1]);
+          probes.merge(hit[0], hit[1], (a, b) -> a | b);
+        }
+        putLong(out, probes.size());
+        for (java.util.Map.Entry<Integer, Integer> hit : probes.entrySet()) {
+          putLong(out, hit.getKey());
+          putLong(out, hit.getValue());
         }
         putLong(out, record.vectors.size());
         for (long[] hit : record.vectors) {
@@ -519,6 +652,1092 @@ public final class Supercov {
         }
       }
     }
+  }
+
+  // --- Strong mutation: the mutant switches ---------------------------------
+  //
+  // A strong copy calls these where it holds a mutant (`jvm_schemata.rs`):
+  // `on(file, index)` says whether that mutant is the active one, and each
+  // helper applies its operator or the mutant's replacement. One mutant is
+  // active at a time, for the whole JVM; none while the file is -1.
+
+  private static int activeFile = -1;
+  private static int activeIndex = -1;
+  private static long mutantHits = 0;
+  private static long mutantHitLimit = 1_000_000L;
+  private static long mutantHitsAllowed = 1_000_000L;
+  private static boolean mutantHitLimitReached = false;
+  /** Until when the test may run on, in nanoseconds; 0 for no time. */
+  private static long mutantDeadline = 0;
+
+  /** Thrown once the active mutant has been evaluated past its limit. */
+  public static final class MutantTimeoutError extends Error {
+    private static final long serialVersionUID = 1L;
+
+    public MutantTimeoutError() {
+      super("SUPERCOV_MUTANT_TIMEOUT: the active mutant passed its evaluation limit");
+    }
+  }
+
+  /** Switches one mutant on: every switch of it reads true until cleared. */
+  public static void setActiveMutant(int file, int index) {
+    activeFile = file;
+    activeIndex = index;
+    mutantHits = 0;
+    mutantHitsAllowed = mutantHitLimit;
+    mutantHitLimitReached = false;
+    mutantDeadline = 0;
+  }
+
+  /**
+   * Switches one mutant on for a test with {@code budgetMillis} to run: past
+   * the evaluation limit within that time, the mutant is busy, not stuck
+   * (a hot loop of a heavy algorithm), and is allowed as many again.
+   */
+  public static void setActiveMutant(int file, int index, int budgetMillis) {
+    setActiveMutant(file, index);
+    mutantDeadline = System.nanoTime() + budgetMillis * 1_000_000L;
+  }
+
+  public static void clearActiveMutant() {
+    activeFile = -1;
+    activeIndex = -1;
+    mutantHits = 0;
+  }
+
+  public static void setMutantHitLimit(long limit) {
+    mutantHitLimit = limit;
+  }
+
+  public static long mutantHitCount() {
+    return mutantHits;
+  }
+
+  /** Whether the limit was passed since the mutant was switched on. */
+  public static boolean mutantHitLimitReached() {
+    return mutantHitLimitReached;
+  }
+
+  public static boolean isMutantTimeout(Throwable error) {
+    for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+      if (cause instanceof MutantTimeoutError) {
+        return true;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  /** Whether mutant {@code index} of file {@code file} is on; counts it if so. */
+  public static boolean on(int file, int index) {
+    if (index != activeIndex || file != activeFile) {
+      return false;
+    }
+    if (++mutantHits > mutantHitsAllowed) {
+      if (mutantDeadline != 0 && System.nanoTime() < mutantDeadline) {
+        mutantHitsAllowed += mutantHitLimit;
+        return true;
+      }
+      mutantHitLimitReached = true;
+      throw new MutantTimeoutError();
+    }
+    return true;
+  }
+
+  /** A condition, negated while its mutant is on. */
+  public static boolean n(int file, int index, boolean value) {
+    return on(file, index) ? !value : value;
+  }
+
+  /** Evaluates a choice made as a statement. */
+  public static void v(boolean value) {}
+
+  public static void v(char value) {}
+
+  public static void v(byte value) {}
+
+  public static void v(short value) {}
+
+  public static void v(int value) {}
+
+  public static void v(long value) {}
+
+  public static void v(float value) {}
+
+  public static void v(double value) {}
+
+  public static void v(Object value) {}
+
+  public static boolean lt(int file, int index, int a, int b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean lt(int file, int index, long a, long b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean lt(int file, int index, float a, float b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean lt(int file, int index, double a, double b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean le(int file, int index, int a, int b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean le(int file, int index, long a, long b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean le(int file, int index, float a, float b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean le(int file, int index, double a, double b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean gt(int file, int index, int a, int b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean gt(int file, int index, long a, long b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean gt(int file, int index, float a, float b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean gt(int file, int index, double a, double b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean ge(int file, int index, int a, int b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static boolean ge(int file, int index, long a, long b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static boolean ge(int file, int index, float a, float b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static boolean ge(int file, int index, double a, double b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static int add(int file, int index, int a, int b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static long add(int file, int index, long a, long b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static float add(int file, int index, float a, float b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static double add(int file, int index, double a, double b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static int sub(int file, int index, int a, int b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static long sub(int file, int index, long a, long b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static float sub(int file, int index, float a, float b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static double sub(int file, int index, double a, double b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static int mul(int file, int index, int a, int b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static long mul(int file, int index, long a, long b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static float mul(int file, int index, float a, float b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static double mul(int file, int index, double a, double b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static int div(int file, int index, int a, int b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static long div(int file, int index, long a, long b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static float div(int file, int index, float a, float b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static double div(int file, int index, double a, double b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static int rem(int file, int index, int a, int b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static long rem(int file, int index, long a, long b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static float rem(int file, int index, float a, float b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static double rem(int file, int index, double a, double b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static boolean and(int file, int index, boolean a, boolean b) {
+    return on(file, index) ? a | b : a & b;
+  }
+
+  public static int and(int file, int index, int a, int b) {
+    return on(file, index) ? a | b : a & b;
+  }
+
+  public static long and(int file, int index, long a, long b) {
+    return on(file, index) ? a | b : a & b;
+  }
+
+  public static boolean or(int file, int index, boolean a, boolean b) {
+    return on(file, index) ? a & b : a | b;
+  }
+
+  public static int or(int file, int index, int a, int b) {
+    return on(file, index) ? a & b : a | b;
+  }
+
+  public static long or(int file, int index, long a, long b) {
+    return on(file, index) ? a & b : a | b;
+  }
+
+  public static boolean xor(int file, int index, boolean a, boolean b) {
+    return on(file, index) ? a & b : a ^ b;
+  }
+
+  public static int xor(int file, int index, int a, int b) {
+    return on(file, index) ? a & b : a ^ b;
+  }
+
+  public static long xor(int file, int index, long a, long b) {
+    return on(file, index) ? a & b : a ^ b;
+  }
+
+  public static int shl(int file, int index, int a, int b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static int shl(int file, int index, int a, long b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static long shl(int file, int index, long a, int b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static long shl(int file, int index, long a, long b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static int shr(int file, int index, int a, int b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static int shr(int file, int index, int a, long b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static long shr(int file, int index, long a, int b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static long shr(int file, int index, long a, long b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static int ushr(int file, int index, int a, int b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static int ushr(int file, int index, int a, long b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static long ushr(int file, int index, long a, int b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static long ushr(int file, int index, long a, long b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static int inv(int file, int index, int a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static long inv(int file, int index, long a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static float inv(int file, int index, float a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static double inv(int file, int index, double a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static int rZ(int file, int index, int value) {
+    return on(file, index) ? 0 : value;
+  }
+
+  public static long rZ(int file, int index, long value) {
+    return on(file, index) ? (long) 0 : value;
+  }
+
+  public static float rZ(int file, int index, float value) {
+    return on(file, index) ? (float) 0 : value;
+  }
+
+  public static double rZ(int file, int index, double value) {
+    return on(file, index) ? (double) 0 : value;
+  }
+
+  public static byte rZ(int file, int index, byte value) {
+    return on(file, index) ? (byte) 0 : value;
+  }
+
+  public static short rZ(int file, int index, short value) {
+    return on(file, index) ? (short) 0 : value;
+  }
+
+  public static char rZ(int file, int index, char value) {
+    return on(file, index) ? (char) 0 : value;
+  }
+
+  public static boolean rT(int file, int index, boolean value) {
+    return on(file, index) ? true : value;
+  }
+
+  public static boolean rF(int file, int index, boolean value) {
+    return on(file, index) ? false : value;
+  }
+
+  // The object returns are generic so that one helper serves every declared
+  // type: the caller casts the replacement to the type it returns, which the
+  // replacement has (an empty list is a Collection and an Iterable).
+
+  @SuppressWarnings("unchecked")
+  private static <T> T as(Object value) {
+    return (T) value;
+  }
+
+  public static <T> T rBT(int file, int index, T value) {
+    return on(file, index) ? as(Boolean.TRUE) : value;
+  }
+
+  public static <T> T rBF(int file, int index, T value) {
+    return on(file, index) ? as(Boolean.FALSE) : value;
+  }
+
+  public static <T> T rN(int file, int index, T value) {
+    return on(file, index) ? null : value;
+  }
+
+  public static <T> T rBI(int file, int index, T value) {
+    return on(file, index) ? as(Integer.valueOf(0)) : value;
+  }
+
+  public static <T> T rBS(int file, int index, T value) {
+    return on(file, index) ? as(Short.valueOf((short) 0)) : value;
+  }
+
+  public static <T> T rBC(int file, int index, T value) {
+    return on(file, index) ? as(Character.valueOf((char) 0)) : value;
+  }
+
+  public static <T> T rBL(int file, int index, T value) {
+    return on(file, index) ? as(Long.valueOf(0L)) : value;
+  }
+
+  public static <T> T rBF0(int file, int index, T value) {
+    return on(file, index) ? as(Float.valueOf(0f)) : value;
+  }
+
+  public static <T> T rBD(int file, int index, T value) {
+    return on(file, index) ? as(Double.valueOf(0d)) : value;
+  }
+
+  public static String rS(int file, int index, String value) {
+    return on(file, index) ? "" : value;
+  }
+
+  public static <T> T rList(int file, int index, T value) {
+    return on(file, index) ? as(java.util.Collections.emptyList()) : value;
+  }
+
+  public static <T> T rSet(int file, int index, T value) {
+    return on(file, index) ? as(java.util.Collections.emptySet()) : value;
+  }
+
+  public static <T> T rMap(int file, int index, T value) {
+    return on(file, index) ? as(java.util.Collections.emptyMap()) : value;
+  }
+
+  // Optional and Stream by name, so that the runtime still compiles where a
+  // project's main source is Java 7.
+  public static <T> T rOpt(int file, int index, T value) {
+    return on(file, index) ? as(empty("java.util.Optional")) : value;
+  }
+
+  public static <T> T rStream(int file, int index, T value) {
+    return on(file, index) ? as(empty("java.util.stream.Stream")) : value;
+  }
+
+  private static Object empty(String type) {
+    try {
+      return Class.forName(type).getMethod("empty").invoke(null);
+    } catch (ReflectiveOperationException error) {
+      throw new IllegalStateException(error);
+    }
+  }
+
+
+  // --- Weak mutation: value probes -------------------------------------------
+  //
+  // A run that lists its mutants (SUPERCOV_MUTANTS=1) calls these where a
+  // mutant's value can be told from the original's: each returns exactly
+  // what the code as written computes, and ORs into its slot a bit for what
+  // decides the mutant (`jvm_strong::value_outcomes` names the bits). The
+  // slot is swept at each test boundary as every probe is.
+
+  private static void value(int slot, int bit) {
+    if (slot >= 0 && slot < HITS.length) {
+      HITS[slot] |= bit;
+    }
+  }
+
+  private static int relation(long a, long b) {
+    return a < b ? 1 : a == b ? 2 : 4;
+  }
+
+  private static int relation(double a, double b) {
+    return a < b ? 1 : a == b ? 2 : a > b ? 4 : 8;
+  }
+
+  private static int sameOrDiffers(boolean same) {
+    return same ? 1 : 2;
+  }
+
+  public static boolean wlt(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a < b;
+  }
+
+  public static boolean wlt(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a < b;
+  }
+
+  public static boolean wlt(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a < b;
+  }
+
+  public static boolean wlt(int slot, double a, double b) {
+    value(slot, relation(a, b));
+    return a < b;
+  }
+
+  public static boolean wle(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a <= b;
+  }
+
+  public static boolean wle(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a <= b;
+  }
+
+  public static boolean wle(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a <= b;
+  }
+
+  public static boolean wle(int slot, double a, double b) {
+    value(slot, relation(a, b));
+    return a <= b;
+  }
+
+  public static boolean wgt(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a > b;
+  }
+
+  public static boolean wgt(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a > b;
+  }
+
+  public static boolean wgt(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a > b;
+  }
+
+  public static boolean wgt(int slot, double a, double b) {
+    value(slot, relation(a, b));
+    return a > b;
+  }
+
+  public static boolean wge(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a >= b;
+  }
+
+  public static boolean wge(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a >= b;
+  }
+
+  public static boolean wge(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a >= b;
+  }
+
+  public static boolean wge(int slot, double a, double b) {
+    value(slot, relation(a, b));
+    return a >= b;
+  }
+
+  public static int wadd(int slot, int a, int b) {
+    int result = a + b;
+    boolean same;
+    try {
+      int mutant = a - b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wadd(int slot, long a, long b) {
+    long result = a + b;
+    boolean same;
+    try {
+      long mutant = a - b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wadd(int slot, float a, float b) {
+    float result = a + b;
+    boolean same;
+    try {
+      float mutant = a - b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wadd(int slot, double a, double b) {
+    double result = a + b;
+    boolean same;
+    try {
+      double mutant = a - b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wsub(int slot, int a, int b) {
+    int result = a - b;
+    boolean same;
+    try {
+      int mutant = a + b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wsub(int slot, long a, long b) {
+    long result = a - b;
+    boolean same;
+    try {
+      long mutant = a + b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wsub(int slot, float a, float b) {
+    float result = a - b;
+    boolean same;
+    try {
+      float mutant = a + b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wsub(int slot, double a, double b) {
+    double result = a - b;
+    boolean same;
+    try {
+      double mutant = a + b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wmul(int slot, int a, int b) {
+    int result = a * b;
+    boolean same;
+    try {
+      int mutant = a / b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wmul(int slot, long a, long b) {
+    long result = a * b;
+    boolean same;
+    try {
+      long mutant = a / b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wmul(int slot, float a, float b) {
+    float result = a * b;
+    boolean same;
+    try {
+      float mutant = a / b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wmul(int slot, double a, double b) {
+    double result = a * b;
+    boolean same;
+    try {
+      double mutant = a / b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wdiv(int slot, int a, int b) {
+    int result = a / b;
+    boolean same;
+    try {
+      int mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wdiv(int slot, long a, long b) {
+    long result = a / b;
+    boolean same;
+    try {
+      long mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wdiv(int slot, float a, float b) {
+    float result = a / b;
+    boolean same;
+    try {
+      float mutant = a * b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wdiv(int slot, double a, double b) {
+    double result = a / b;
+    boolean same;
+    try {
+      double mutant = a * b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wrem(int slot, int a, int b) {
+    int result = a % b;
+    boolean same;
+    try {
+      int mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wrem(int slot, long a, long b) {
+    long result = a % b;
+    boolean same;
+    try {
+      long mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wrem(int slot, float a, float b) {
+    float result = a % b;
+    boolean same;
+    try {
+      float mutant = a * b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wrem(int slot, double a, double b) {
+    double result = a % b;
+    boolean same;
+    try {
+      double mutant = a * b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static boolean wand(int slot, boolean a, boolean b) {
+    boolean result = a & b;
+    value(slot, sameOrDiffers(result == (a | b)));
+    return result;
+  }
+
+  public static int wand(int slot, int a, int b) {
+    int result = a & b;
+    value(slot, sameOrDiffers(result == (a | b)));
+    return result;
+  }
+
+  public static long wand(int slot, long a, long b) {
+    long result = a & b;
+    value(slot, sameOrDiffers(result == (a | b)));
+    return result;
+  }
+
+  public static boolean wor(int slot, boolean a, boolean b) {
+    boolean result = a | b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static int wor(int slot, int a, int b) {
+    int result = a | b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static long wor(int slot, long a, long b) {
+    long result = a | b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static boolean wxor(int slot, boolean a, boolean b) {
+    boolean result = a ^ b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static int wxor(int slot, int a, int b) {
+    int result = a ^ b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static long wxor(int slot, long a, long b) {
+    long result = a ^ b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static int wshl(int slot, int a, int b) {
+    int result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static int wshl(int slot, int a, long b) {
+    int result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static long wshl(int slot, long a, int b) {
+    long result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static long wshl(int slot, long a, long b) {
+    long result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static int wshr(int slot, int a, int b) {
+    int result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wshr(int slot, int a, long b) {
+    int result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wshr(int slot, long a, int b) {
+    long result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wshr(int slot, long a, long b) {
+    long result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wushr(int slot, int a, int b) {
+    int result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wushr(int slot, int a, long b) {
+    int result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wushr(int slot, long a, int b) {
+    long result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wushr(int slot, long a, long b) {
+    long result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wneg(int slot, int a) {
+    int result = -a;
+    value(slot, sameOrDiffers(result == a));
+    return result;
+  }
+
+  public static long wneg(int slot, long a) {
+    long result = -a;
+    value(slot, sameOrDiffers(result == a));
+    return result;
+  }
+
+  public static float wneg(int slot, float a) {
+    float result = -a;
+    value(slot, sameOrDiffers(Float.floatToIntBits(result) == Float.floatToIntBits(a)));
+    return result;
+  }
+
+  public static double wneg(int slot, double a) {
+    double result = -a;
+    value(slot, sameOrDiffers(Double.doubleToLongBits(result) == Double.doubleToLongBits(a)));
+    return result;
+  }
+
+  // A returned value: bit 0 false, 1 true, 2 zero, 3 not zero (a float's
+  // zero is +0.0 alone, as the mutant returns), 4 null, then the replacements
+  // the return mutants make where the value is that very object.
+
+  public static boolean wr(int slot, boolean value) {
+    value(slot, value ? 2 : 1);
+    return value;
+  }
+
+  public static int wr(int slot, int value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static long wr(int slot, long value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static byte wr(int slot, byte value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static short wr(int slot, short value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static char wr(int slot, char value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static float wr(int slot, float value) {
+    value(slot, Float.floatToIntBits(value) == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static double wr(int slot, double value) {
+    value(slot, Double.doubleToLongBits(value) == 0L ? 4 : 8);
+    return value;
+  }
+
+  public static <T> T wr(int slot, T value) {
+    value(slot, returned(value));
+    return value;
+  }
+
+  private static Object emptyOptional;
+  private static boolean emptyOptionalRead;
+
+  private static int returned(Object value) {
+    if (value == null) {
+      return 1 << 4;
+    }
+    if (value == "") {
+      return 1 << 5;
+    }
+    if (value == java.util.Collections.emptyList()) {
+      return 1 << 6;
+    }
+    if (value == java.util.Collections.emptySet()) {
+      return 1 << 7;
+    }
+    if (value == java.util.Collections.emptyMap()) {
+      return 1 << 8;
+    }
+    if (!emptyOptionalRead) {
+      emptyOptionalRead = true;
+      try {
+        emptyOptional = Class.forName("java.util.Optional").getMethod("empty").invoke(null);
+      } catch (ReflectiveOperationException | LinkageError absent) {
+        emptyOptional = null;
+      }
+    }
+    if (emptyOptional != null && value == emptyOptional) {
+      return 1 << 9;
+    }
+    if (value == Integer.valueOf(0)
+        || value == Long.valueOf(0L)
+        || value == Short.valueOf((short) 0)
+        || value == Character.valueOf((char) 0)) {
+      return 1 << 10;
+    }
+    if (value == Boolean.TRUE) {
+      return 1 << 11;
+    }
+    if (value == Boolean.FALSE) {
+      return 1 << 12;
+    }
+    return 1 << 13;
   }
 
   /** Little-endian, matching every other Supercov transport. */

@@ -801,7 +801,9 @@ impl SupervisionOptions {
     }
 
     /// [`Self::from_environment`], with the variables `variable` gives.
-    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, SupervisionError> {
+    pub(crate) fn from_variables(
+        variable: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, SupervisionError> {
         Ok(Self {
             diagnostic_interval: positive_milliseconds(
                 variable("SUPERCOV_DIAGNOSTIC_INTERVAL_MS").as_deref(),

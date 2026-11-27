@@ -248,6 +248,10 @@ pub struct OwnedTestOutcome {
     /// test that called `t.Parallel()`, an Example or a Fuzz target: it ran,
     /// and its coverage is in the run-wide record rather than in its own.
     pub attributed: bool,
+    /// Whether this is a test class's own work rather than a test: what ran
+    /// outside every test of the class (its `@BeforeAll`, its parameter
+    /// sources), which each of its tests runs after.
+    pub setup: bool,
 }
 
 /// How a language's runner attributes what it records.
@@ -738,6 +742,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
             let test = if outcome.attributed { test } else { &empty };
             let test_id = format!("{}::{}", outcome.package, outcome.name);
             let phase = test_phase(&test_id);
+            let role = if outcome.setup { "setup" } else { "test" };
             let provenance = TestProvenance {
                 // What the record says, when the frontend declares it. A JVM
                 // project can run JUnit and TestNG in one JVM, and a result
@@ -783,7 +788,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                 expected_status: None,
                 flaky: false,
                 provenance: provenance.clone(),
-                role: "test".into(),
+                role: role.into(),
                 attribution: if outcome.attributed {
                     crate::coverage_report::ATTRIBUTION_EXACT
                 } else {
@@ -797,7 +802,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                 // point rather than at a phase nobody declared.
                 phases: vec![CoveragePhase {
                     id: phase.clone(),
-                    kind: "test".into(),
+                    kind: role.into(),
                     operation: format!("{} {}", provenance.runner, outcome.name),
                     source: outcome.file.clone(),
                     caused_by_phase_id: None,
@@ -1316,6 +1321,12 @@ mod tests {
                     probes: BTreeMap::from([(0, 1), (1, 1)]),
                     vectors: Vec::new(),
                 },
+                OwnedTestEvidence {
+                    name: "p#<class setup>".into(),
+                    status: "passed".into(),
+                    probes: BTreeMap::from([(0, 1)]),
+                    ..OwnedTestEvidence::default()
+                },
             ],
             ..OwnedEvidence::default()
         };
@@ -1326,6 +1337,7 @@ mod tests {
             file: Some("p/x_test.go".into()),
             status: "passed".into(),
             attributed,
+            setup: false,
         };
         let run = build_frontend_run(OwnedRunInputs {
             declaration: go_declaration(),
@@ -1333,7 +1345,14 @@ mod tests {
             manifest: &manifest,
             probes: &probes,
             evidence: &evidence,
-            outcomes: &[outcome("TestSerial", true), outcome("TestParallel", false)],
+            outcomes: &[
+                outcome("TestSerial", true),
+                outcome("TestParallel", false),
+                OwnedTestOutcome {
+                    setup: true,
+                    ..outcome("p#<class setup>", true)
+                },
+            ],
             run_id: "run",
             generated_at: "now",
             test_exit_code: 0,
@@ -1374,6 +1393,12 @@ mod tests {
             "it was handed the record's probes and they are not its own: {:?}",
             parallel.runtime[0].hits
         );
+
+        // A test class's own work: a setup, not a test, in a setup phase.
+        let setup = result("p#<class setup>");
+        assert_eq!(setup.role, "setup");
+        assert_eq!(setup.phases[0].kind, "setup");
+        assert_eq!(setup.runtime[0].hits, ["go:statement:one"]);
     }
 
     #[test]
@@ -1403,6 +1428,7 @@ mod tests {
                 file: Some("p/x_test.go".into()),
                 status: "passed".into(),
                 attributed: true,
+                setup: false,
             }],
             run_id: "run",
             generated_at: "now",
@@ -1463,6 +1489,7 @@ mod tests {
                 file: None,
                 status: "passed".into(),
                 attributed: true,
+                setup: false,
             }],
             run_id: "run",
             generated_at: "now",
@@ -1527,6 +1554,7 @@ mod tests {
             file: None,
             status: "passed".into(),
             attributed: true,
+            setup: false,
         };
         let run = build_frontend_run(OwnedRunInputs {
             declaration: go_declaration(),

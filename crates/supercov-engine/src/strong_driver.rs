@@ -179,6 +179,11 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "tap",
     "bun:test",
     "vitest-browser",
+    // Java and Kotlin: the build's test JVM drives itself through the JUnit
+    // Platform, TestNG or Ant's `<junit>` (`SupercovStrongPass.java`).
+    "junit-platform",
+    "testng",
+    "ant-junit",
     // Rust's (`rust_strong`): libtest and nextest tests by name through
     // their binaries, doctests through `cargo test --doc`.
     "rust-libtest",
@@ -245,6 +250,9 @@ pub fn driver_of<'a>(
     }
 }
 
+/// The runners the JVM driver runs: the build's test JVM drives itself.
+const JVM_RUNNERS: &[&str] = &["junit-platform", "testng", "ant-junit"];
+
 /// Whether the driver of `language` (as `driver_of` names it) runs tests
 /// under `runner`.
 /// The runners in [`STRONG_RUNNERS`] whose tests another language's driver
@@ -265,9 +273,12 @@ const OTHER_LANGUAGES_RUNNERS: &[&str] = &[
 pub fn drives(language: &str, runner: &str) -> bool {
     match language {
         crate::mutant_list::JAVASCRIPT => {
-            STRONG_RUNNERS.contains(&runner) && !OTHER_LANGUAGES_RUNNERS.contains(&runner)
+            STRONG_RUNNERS.contains(&runner)
+                && !OTHER_LANGUAGES_RUNNERS.contains(&runner)
+                && !JVM_RUNNERS.contains(&runner)
         }
         crate::mutant_list::RUST => matches!(runner, "rust-libtest" | "nextest" | "rustdoc"),
+        crate::mutant_list::JVM => JVM_RUNNERS.contains(&runner),
         crate::go_mutants::GO => runner == "go-test",
         // Python's and Ruby's drivers fork the loaded suite for each job,
         // which Windows cannot: there their mutants are not run.
@@ -307,6 +318,7 @@ pub fn has_driver(language: &str) -> bool {
     matches!(
         language,
         crate::mutant_list::JAVASCRIPT
+            | crate::mutant_list::JVM
             | crate::mutant_list::RUST
             | crate::go_mutants::GO
             | crate::python_mutants::PYTHON
@@ -341,6 +353,22 @@ pub fn run_strong_pass(
                 finished => finished.map_err(|error| error.to_string()),
             }
         }
+        crate::mutant_list::JVM => crate::jvm_run::run_strong_jvm(
+            &crate::jvm_run::StrongJvmRequest {
+                root: pass.root.clone(),
+                command: pass.command.clone(),
+                run_id: pass.run_id.clone(),
+                started_at: format!(
+                    "unix-ms-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_millis())
+                ),
+                plan: pass.strong.plan.clone(),
+                results: pass.strong.results.clone(),
+            },
+            diagnostics,
+        ),
         crate::mutant_list::RUST => crate::rust_strong::run_strong_rust(
             &crate::rust_strong::StrongRustRequest {
                 root: pass.root.clone(),
@@ -508,6 +536,8 @@ mod tests {
         assert!(drives(javascript, "jest") && !drives(javascript, "nextest"));
         assert!(!drives(javascript, "pytest"));
         assert!(drives(rust, "nextest") && !drives(rust, "jest"));
+        let jvm = crate::mutant_list::JVM;
+        assert!(drives(jvm, "testng") && !drives(jvm, "jest") && !drives(javascript, "testng"));
         assert_eq!(drives("python", "pytest"), cfg!(unix));
         assert!(!drives("python", "jest"));
         assert_eq!(drives("ruby", "rspec"), cfg!(unix));

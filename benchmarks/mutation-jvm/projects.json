@@ -1,0 +1,97 @@
+{
+  "commons-cli": {
+    "repository": "https://github.com/apache/commons-cli.git",
+    "tag": "rel/commons-cli-1.9.0",
+    "build": "maven",
+    "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip",
+    "targets": "org.apache.commons.cli.*",
+    "junit5": true,
+    "jdk": "21",
+    "shards": 2
+  },
+  "commons-csv": {
+    "repository": "https://github.com/apache/commons-csv.git",
+    "tag": "rel/commons-csv-1.12.0",
+    "build": "maven",
+    "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip -Dmaven.javadoc.skip",
+    "targets": "org.apache.commons.csv.*",
+    "junit5": true,
+    "jdk": "21",
+    "shards": 3
+  },
+  "typetools": {
+    "repository": "https://github.com/jhalterman/typetools.git",
+    "tag": "typetools-0.6.3",
+    "build": "maven",
+    "flags": "-Dmaven.javadoc.skip",
+    "targets": "net.jodah.typetools.*",
+    "testng": true,
+    "jdk": "11",
+    "surefire": "2.22.2",
+    "shards": 1
+  },
+  "kotlinpoet": {
+    "repository": "https://github.com/square/kotlinpoet.git",
+    "tag": "1.14.2",
+    "build": "gradle",
+    "module": "kotlinpoet",
+    "flags": "-x spotlessCheck -x apiCheck",
+    "targets": "com.squareup.kotlinpoet.*",
+    "junit5": false,
+    "jdk": "17",
+    "shards": 12
+  },
+  "picnic": {
+    "repository": "https://github.com/JakeWharton/picnic.git",
+    "tag": "0.5.0",
+    "build": "gradle",
+    "module": "picnic",
+    "flags": "",
+    "targets": "com.jakewharton.picnic.*",
+    "junit5": false,
+    "jdk": "11",
+    "gradlePlugin": "1.5.2",
+    "shards": 1
+  },
+  "ant": {
+    "repository": "https://github.com/apache/ant.git",
+    "tag": "rel/1.10.15",
+    "build": "ant",
+    "antVersion": "1.10.15",
+    "antTarget": "junit-tests",
+    "antCompile": "compile-tests",
+    "flags": "-Djunit.includes=org/apache/tools/ant/util/*Test.java -Doffline=true",
+    "sources": "src/main/org/apache/tools/ant/util",
+    "targets": "org.apache.tools.ant.util.*",
+    "targetTests": "org.apache.tools.ant.util.*Test",
+    "excludedTests": "org.apache.tools.ant.util.*.*",
+    "antClasspath": "build/classes,build/testcases,src/tests/junit,src/etc/testcases,lib/optional/*.jar",
+    "antSourceDir": "src/main",
+    "antJvmArgs": "-Droot=ROOT,-Dbuild.tests.value=ROOT/build/testcases,-Dbuild.classes.value=ROOT/build/classes,-Dant.home=ANTHOME,-Doffline=true,-Djava.io.tmpdir=ROOT/build/testcases/tmp",
+    "junit5": false,
+    "jdk": "17",
+    "shards": 3
+  },
+  "java-diff-utils": {
+    "repository": "https://github.com/java-diff-utils/java-diff-utils.git",
+    "tag": "java-diff-utils-parent-4.12",
+    "build": "maven",
+    "flags": "",
+    "targets": "com.github.difflib.*",
+    "junit5": true,
+    "jdk": "17",
+    "shards": 6
+  },
+  "aedile": {
+    "repository": "https://github.com/sksamuel/aedile.git",
+    "tag": "v3.0.4",
+    "build": "gradle",
+    "module": "aedile-core",
+    "flags": "-Porg.gradle.java.installations.fromEnv=JAVA_HOME_11_X64",
+    "targets": "com.sksamuel.aedile.*",
+    "junit5": true,
+    "jdk": "21",
+    "pit": false,
+    "shards": 1
+  }
+}

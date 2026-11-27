@@ -63,8 +63,21 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
     }
   }
 
+  /** The class whose tests ran last, whose own work is credited to it. */
+  private String testClass;
+
   @Override
   public void onTestStart(ITestResult result) {
+    // TestNG reports no class boundary to a test listener, only tests: the
+    // class's `@BeforeClass`, data providers and `@AfterClass` run between
+    // them, and are credited to the classes on either side.
+    String type = result.getTestClass().getRealClass().getName();
+    if (testClass == null) {
+      Supercov.enterSetup(type, RUNNER);
+    } else if (!testClass.equals(type)) {
+      Supercov.switchSetup(type, RUNNER);
+    }
+    testClass = type;
     Supercov.enterTest(name(result), RUNNER, groups(result));
   }
 
@@ -129,6 +142,10 @@ public final class SupercovTestNGListener implements IExecutionListener, ITestLi
 
   @Override
   public void onExecutionFinish() {
+    if (testClass != null) {
+      Supercov.exitSetup("passed");
+      testClass = null;
+    }
     try {
       Supercov.writeInto(evidenceDirectory);
     } catch (Exception e) {

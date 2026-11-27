@@ -996,6 +996,7 @@ pub fn run_direct_go(
                         file: package.declared_in.get(&test.name).cloned(),
                         status: kept_status(&test.status, exit_code),
                         attributed: !test.unattributed,
+                        setup: false,
                     });
                 }
                 parts.push(evidence);

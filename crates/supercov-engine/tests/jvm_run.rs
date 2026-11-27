@@ -509,15 +509,22 @@ const TESTNG_POM: &str = r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
 "#;
 
 /// TestNG's own idioms: a data provider that runs one method several times,
-/// and a skip. Neither has a JUnit Platform equivalent to fall back on.
+/// and a skip. Neither has a JUnit Platform equivalent to fall back on. And
+/// a `@BeforeClass`, which runs outside every test.
 const TESTNG_SUITE: &str = r#"package app;
 
 import org.testng.SkipException;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 import static org.testng.Assert.assertEquals;
 
 public class CalculatorTest {
+    @BeforeClass
+    public void warm() {
+        Calculator.size(0, false);
+    }
+
     @DataProvider(name = "sizes")
     public Object[][] sizes() {
         return new Object[][] {{20, true, "BIG"}, {1, false, "small"}};
@@ -630,6 +637,16 @@ fn a_testng_suite_is_attributed_through_its_own_lifecycle() {
         records
             .iter()
             .all(|record| record.contains("\"runner\":\"testng\"")),
+        "{records:?}"
+    );
+    // The `@BeforeClass` runs before TestNG reports a test of its class:
+    // what ran outside every test, which every test is credited with.
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("#<outside every test>")
+                && record.contains("\"role\":\"setup\"")
+                && !record.contains("\"testFile\"")),
         "{records:?}"
     );
     std::fs::remove_dir_all(root).ok();
@@ -1875,7 +1892,7 @@ fn ant_fixture(top: &Path) -> PathBuf {
     write(
         &project,
         "test/src/app/CalcTest.java",
-        "package app;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.Ignore;\nimport org.junit.Test;\n\npublic class CalcTest {\n  @Test\n  public void clampsHighValues() {\n    assertEquals(3, Calc.clamp(5, 3));\n  }\n\n  @Test\n  public void namesASign() {\n    assertEquals(\"negative\", Calc.sign(-1));\n  }\n\n  @Ignore\n  @Test\n  public void notYet() {}\n}\n",
+        "package app;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.BeforeClass;\nimport org.junit.Ignore;\nimport org.junit.Test;\n\npublic class CalcTest {\n  @BeforeClass\n  public static void warm() {\n    Calc.sign(null);\n  }\n\n  @Test\n  public void clampsHighValues() {\n    assertEquals(3, Calc.clamp(5, 3));\n  }\n\n  @Test\n  public void namesASign() {\n    assertEquals(\"negative\", Calc.sign(-1));\n  }\n\n  @Ignore\n  @Test\n  public void notYet() {}\n}\n",
     );
     project
 }
@@ -1974,6 +1991,22 @@ fn an_ant_build_with_its_harness_beside_the_project_is_measured_per_test() {
         serde_json::json!([2]),
         "{executions}"
     );
+    // The `@BeforeClass` runs outside every test: its class's own work,
+    // credited to the file of the suite that ran it.
+    let records = records_of(&result);
+    for (suite, file) in [
+        ("app.CalcTest", "test/src/app/CalcTest.java"),
+        ("app.AllCalcTest", "test/src/app/AllCalcTest.java"),
+    ] {
+        assert!(
+            records
+                .iter()
+                .any(|record| record.contains(&format!("{suite}#<class setup>"))
+                    && record.contains("\"role\":\"setup\"")
+                    && record.contains(&format!("\"testFile\":\"{file}\""))),
+            "{suite}: {records:?}"
+        );
+    }
     std::fs::remove_dir_all(top).ok();
 }
 
