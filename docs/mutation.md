@@ -798,9 +798,9 @@ and baseline, or its own measured run.
 | unicode-width 0.2.1 | generated tables | 383 | 383 | 0 | 0 | 576 / 1,598 s | 218 / 410 s |
 | bitflags 2.9.1 | macro-generated code | 107 | 107 | 0 | 0 | 267 / 577 s | 134 / 309 s |
 | anyhow 1.0.98 | build script, `deny(dead_code)` | 201 | 192 | 0 | 9 lint | 218 / 796 s | 74 / 238 s |
-| fastrand 2.3.0 | under cargo-nextest | 205 | 195 | 0 | 10 (8 lint) | 508 / 1,537 s | 719 / 340 s |
+| fastrand 2.3.0 | under cargo-nextest | 211 | 203 | 0 | 8 lint | 501 / 1,555 s | 828 / 616 s |
 | regex-syntax 0.8.5 | workspace member, parser | 1,301 | 1,301 | 0 | 0 | 13,679 / 50,595 s (39 jobs) | 3,611 / 8,964 s |
-| base64 0.22.1 | randomized round trips | 311 | 311 | 0 | 0 | 9,561 / 30,615 s (23 jobs) | 3,247 / 9,470 s |
+| base64 0.22.1 | randomized round trips | 305 of 619 | 305 | 0 | 0 | 15,249 / 50,394 s (48 jobs) | 5,684 / 17,390 s (16 jobs) |
 
 No mutant one tool detects is one the other lets live. The other
 disagreements, each applied by hand:
@@ -812,21 +812,26 @@ disagreements, each applied by hand:
   it, or none reaches it.
 - **`vec!` in a `no_std` crate** (fastrand, 2): a body replaced by `vec![]`
   where no `vec!` is in scope does not compile, an error rustc gives no code.
-  The run measured here called those mutants `no-coverage`; this release reads
-  that error as the mutant's own, and calls them `unviable`.
+  4.29.18 reads that error as the mutant's own and calls them `unviable`, as
+  cargo-mutants does: in the fastrand row, measured with it, they agree.
 - **Time limits**: a test's limit is cargo-mutants' rule applied to that test,
   5 × its baseline and at least 20 s, where cargo-mutants applies it to the
   whole suite. A mutant of fastrand that makes rejection sampling loop far
   longer ended its one test past 20 s in one run, within 5 × the suite: a
   `timeout` here, missed there; in another run it ended in time, as there.
 
-Mutants the table does not join were left by a job's time: base64's tests
-are slow under mutation (cargo-mutants' 24 jobs reached 375 of its 619
-mutants), fastrand runs each test through nextest (27 of Supercov's left for
-a next pass), and regex-syntax's mutants of a `const fn`'s arms are each
-built on their own (19). Supercov's wall time is the larger on fastrand:
-nextest starts a process per test, against cargo-mutants' one per mutant;
-its CPU time is a fifth. Each earlier gap the benchmark found is fixed and held by a test (`CHANGELOG.md`,
+Mutants the table does not join were left by a job's time limit (6
+minutes of mutants per job, to keep each job under ten): base64's tests
+are slow under mutation, so cargo-mutants' 48 jobs decided 509 of its 619
+mutants and Supercov's 16 left 204 of those without a verdict; under
+fastrand, which runs each test through nextest, Supercov left 21. Every
+mutant both tools decided is in the table, and none of them is a soundness
+violation; joining the rest needs about twice the jobs. Supercov's wall time
+is the larger on fastrand: nextest starts a process per test, against
+cargo-mutants' one per mutant; its CPU time is two fifths. cargo-mutants
+runs under a 10 GiB address-space cap: one of base64's mutants made a test
+allocate without end, which took the runner, and every outcome of its job,
+down twice. Each earlier gap the benchmark found is fixed and held by a test (`CHANGELOG.md`,
 4.29.18): a probe that failed `u128` tests, `const fn` mutants read as never
 run, operator mutants that regroup their expression, unviable mutants no
 test reaches.
