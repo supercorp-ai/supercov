@@ -31000,6 +31000,33 @@ fn ruby_children_without_rubygems_keep_their_error_output_clean() {
         .succeeds();
 }
 
+/// A suite whose coverage tool stops Ruby's Coverage as its tests end
+/// (SimpleCov takes `Coverage.result` at exit) is still measured: Supercov
+/// read Coverage once more after it, which raised, and the run was lost.
+#[cfg(unix)]
+#[test]
+fn a_ruby_suite_whose_coverage_tool_stops_coverage_is_still_measured() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-coverage-stopped");
+    ruby_project(&project);
+    // Registered before Minitest's, so it runs after the tests, as
+    // SimpleCov's does.
+    project.write(
+        "test/w_test.rb",
+        "require 'coverage'\nat_exit { Coverage.result }\nrequire 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_doubles\n    assert_equal 4, W.double(2)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let output = project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/w_test.rb"])
+        .succeeds();
+    assert!(!output.contains("coverage measurement is not enabled"), "{output}");
+    let file = project.supercov(&["runs", "latest", "file", "lib/w.rb"]).succeeds();
+    assert!(file.contains("Tests touching this file: 1"), "{file}");
+}
+
 /// A Ruby run measured for mutants records, per test, whether each mutant
 /// a value probe computes would have given the original's value: a call's
 /// other method, its receiver alone, a condition's truth.
