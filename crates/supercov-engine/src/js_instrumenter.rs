@@ -9992,9 +9992,13 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         };
         if index == 0 {
             steps.push(self.assign(&applied.frame, self.number(1)));
-            for name in &applied.values[1..] {
-                steps.push(self.assign(name, self.number(0)));
-            }
+            // A decision that keeps its values has two conditions at least:
+            // a lone condition keeps none, and a value decision is compound.
+            steps.extend(
+                applied.values[1..]
+                    .iter()
+                    .map(|name| self.assign(name, self.number(0))),
+            );
         } else {
             steps.push(self.ast.expression_assignment(
                 Span::default(),
@@ -16911,6 +16915,41 @@ export function shapes(n: number): unknown {
         assert!(!code.contains("__supercovRawother"), "{code}");
         let code = wrap("function launch(options) {}\nlaunch({ hostPath: 1, guestPath: 2 });\n");
         assert!(!code.contains("wrapImportedCapability"), "{code}");
+    }
+
+    #[test]
+    fn a_declaration_with_nothing_to_map_selects_no_capability() {
+        // A declarator with no initializer, or one that destructures, names
+        // no mapping variable; the call beside it still selects its root.
+        let code = instrument_with_import_policy(
+            concat!(
+                "import { launch } from './sdk.mjs';\n",
+                "let pending;\n",
+                "const { cwd } = process;\n",
+                "launch({ hostPath: cwd(), guestPath: '/workspace' }, pending);\n",
+            ),
+            "src/run.mjs",
+            "./capability.mjs",
+            false,
+        )
+        .unwrap()
+        .code;
+        assert!(code.contains("__supercovRawlaunch"), "{code}");
+    }
+
+    #[test]
+    fn a_mutant_probe_leaves_the_arrow_a_parameter_default_is_measured_in() {
+        // A parameter default's compound decision is evaluated in an arrow
+        // the instrumenter adds to declare its temporaries. That arrow is no
+        // site of the source, and the mutant probes pass over it.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
+        let output = instrument_candidate(
+            "export function pick(n, tag = n > 5 && n < 9 ? 'high' : 'low') {\n  return [n].map((x) => x + tag);\n}\n",
+            "src/defaults.mjs",
+        )
+        .unwrap();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        assert!(output.code.contains("(() => {"), "{}", output.code);
     }
 
     #[test]
