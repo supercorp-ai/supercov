@@ -38,25 +38,23 @@ jobs:
 
   measure:
     needs: build
-    name: ${{ matrix.app }} ${{ matrix.shard }}${{ matrix.offset }} ${{ matrix.variants }}
+    name: ${{ matrix.app }} ${{ matrix.shard }}${{ matrix.offset }} ${{ matrix.variants }} ${{ matrix.profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 7/16, offset: 3, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 9/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 11/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 13/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: large, shard: 15/16, offset: 3, rounds: 2, diagnose: 0, variants: 'new,nosmap,cache' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new,hook,nosmap,cache' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new,hook,nosmap,cache' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 2, rounds: 1, diagnose: 0, variants: 'new,hook,nosmap,cache' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 3, rounds: 1, diagnose: 0, variants: 'new,hook,nosmap,cache' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'noinstr' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'noinstr' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'maps-none' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'maps-none' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'record-s' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'record-s' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 0, diagnose: 1, profile: 'plain', variants: 'new' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 0, diagnose: 1, profile: 'new', variants: 'new' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -74,7 +72,7 @@ jobs:
           for variant in $(echo "${{ matrix.variants }}" | tr ',' ' '); do
             case "$variant" in
               new) extra="SPEED_NOTHING=1" ;;
-              noinstr) extra="SUPERCOV_SOURCE_ROOTS=lib/db.ts" ;;
+              noinstr) extra="SUPERCOV_SOURCE_ROOTS=${{ matrix.app == 'large' && 'lib/db.ts' || 'packages/math/src/angle.ts' }}" ;;
               maps-*) extra="SUPERCOV_DIAG_MAPS=${variant#maps-}" ;;
               nosmap) extra="SUPERCOV_DIAG_NO_SOURCE_MAPS=1" ;;
               *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
@@ -113,6 +111,8 @@ jobs:
           SPEED_DIAGNOSE: ${{ matrix.diagnose }}
           SPEED_SHARD: ${{ matrix.shard }}
           SPEED_SUITES: ${{ matrix.suites }}
+          SPEED_DIAGNOSE_PASS: '0'
+          SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs
       - if: always()
         uses: actions/upload-artifact@v4

@@ -469,7 +469,7 @@ for (let round = 1; round <= rounds; round += 1) {
 if (process.env.SPEED_DIAGNOSE === '1') {
   const { name, path } = binaries.at(-1);
   rmSync(join(project, '.supercov'), { recursive: true, force: true });
-  for (const suite of suites) {
+  for (const suite of process.env.SPEED_DIAGNOSE_PASS === '0' ? [] : suites) {
     reset(`diagnose-${name}-${suite.name}`);
     if (suite.name === 'e2e' && process.env.SPEED_SAMPLY) {
       // The e2e run's Supercov process alone, natively profiled: its setup,
@@ -522,7 +522,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
   );
   const profiled = {};
   // Every binary, so one binary's change shows against the other's.
-  for (const [variant, binary] of [['plain'], ...binaries.map((entry) => [entry.name, entry.path])]) {
+  for (const [variant, binary] of [['plain'], ...binaries.map((entry) => [entry.name, entry.path])].filter(([variant]) => !process.env.SPEED_PROFILE_VARIANTS || process.env.SPEED_PROFILE_VARIANTS.split(',').includes(variant))) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
     for (const suite of suites) {
       reset(`profile-${variant}-${suite.name}`);
