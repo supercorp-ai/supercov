@@ -236,7 +236,7 @@ pub fn merged_verdicts(
         {
             Some(definite)
         } else if survived_in.is_empty() {
-            first_of("error")
+            first_of("no-coverage").or_else(|| first_of("error"))
         } else {
             let whole = plan.tests.iter().filter(|test| {
                 test.file
@@ -254,6 +254,9 @@ pub fn merged_verdicts(
                 .all(|test| survived_in.iter().any(|tests| tests.contains(&test.id)));
             all_measured.then(|| first_of("survived")).flatten()
         };
+        // A pass's own `no-coverage` (its tests passed but never ran the
+        // mutated code): where no run killed it or let it survive.
+        let kept = kept.or_else(|| first_of("no-coverage"));
         if let Some((index, verdict)) = kept {
             taken[index] += 1;
             merged.insert(mutant.id.clone(), verdict);
@@ -672,6 +675,47 @@ mod tests {
             .iter()
             .map(|(id, verdict)| (id.as_str(), verdict.status.as_str()))
             .collect()
+    }
+
+    /// A pass's own `no-coverage` -- its tests passed but never ran the
+    /// mutated code -- is kept by a merge where no run killed the mutant or
+    /// let it survive, over an `error`; a kill elsewhere still wins.
+    #[test]
+    fn a_pass_s_no_coverage_is_kept_unless_another_run_decided_more() {
+        let plan = StrongPlan {
+            mutant_set: "set".into(),
+            tests: vec![test("t1", "t/a.test.js")],
+            mutants: ["apart", "killed", "errored"]
+                .iter()
+                .map(|id| mutant(id, "src/a.js", &[0], &[]))
+                .collect(),
+        };
+        let first = verdicts(&[
+            ("apart", "no-coverage"),
+            ("killed", "no-coverage"),
+            ("errored", "error"),
+        ]);
+        let second = verdicts(&[("killed", "killed"), ("errored", "no-coverage")]);
+        let tests = ids(&["t1"]);
+        let none = BTreeSet::new();
+        let nothing = Progress::new();
+        let lent = [&first, &second].map(|verdicts| Lent {
+            verdicts,
+            progress: &nothing,
+            lived: &none,
+            tests: &tests,
+            other_bytes: &none,
+        });
+        let (merged, taken) = merged_verdicts(&plan, &lent);
+        assert_eq!(
+            statuses(&merged),
+            [
+                ("apart", "no-coverage"),
+                ("errored", "no-coverage"),
+                ("killed", "killed")
+            ]
+        );
+        assert_eq!(taken, [1, 2]);
     }
 
     /// The plan decides what it decides; the rest are each said once, and

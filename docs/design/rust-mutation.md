@@ -230,6 +230,18 @@ one that does keeps the plan's verdict, and nothing runs it. One a switch
 cannot hold is not built on its own for this: it keeps the plan's verdict
 (semver's unreached `const`, below).
 
+**Reached in mutated form.** A process of the switched build appends
+`<file>#<index>` to `<results>.reached` the first time it evaluates its
+active mutant (`rust-strong-runtime.rs`, once per process). A mutant whose
+candidates all pass and that no process reached is `no-coverage`, reason
+`not-reached-mutated`: the tests ran code the pass never switched, as a
+Worker whose wasm `wrangler dev` built from the sources, or a subprocess
+started with a cleared environment, and could not have failed. A merge keeps
+such a verdict where no run killed the mutant or let it survive. Not judged
+so: a mutant built on its own (no switch), a `wasm-pack test` pass (wasm has
+no file to append to), and a mutant resumed from candidates an earlier pass
+ran (that pass's reach is not kept).
+
 A mutant in a `const fn` is linked to no statement: the instrumenter
 declares a `const fn`'s body (`unmeasured`) and cannot probe it, so its
 points are in the run's record and never hit. Linked to one, the mutant read
