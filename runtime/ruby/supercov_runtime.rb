@@ -447,6 +447,9 @@ module Supercov
       @id_numbers = {}
       @line_ids = {}
       @seen_vectors = {}
+      # Per context and decision probe, the evaluations already recorded,
+      # by their condition values and outcome (see probe_decision).
+      @finished_decisions = {}
       # Per context, each value record's outcomes seen, as bits.
       @value_bits = {}
       # Per context, the value probes whose every kind has differed there.
@@ -1329,7 +1332,17 @@ module Supercov
                else
                  Array.new(target["width"])
                end
+      # What an evaluation records follows from its condition values and
+      # outcome alone, and within one context each record is written once: a
+      # combination this context has already finished records nothing new.
+      context = current_context
+      code = truthy ? 1 : 0
+      values.each { |each| code = (code << 2) | (each.nil? ? 0 : (each ? 2 : 1)) }
+      finished = ((@finished_decisions[context] ||= {})[key] ||= {})
+      return value if finished[code]
+
       finish_decision(target, values, truthy)
+      finished[code] = true
       value
     end
 
