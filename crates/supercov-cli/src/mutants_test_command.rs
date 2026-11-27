@@ -535,17 +535,16 @@ fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
     // A part the merged run no longer holds names no command: none is
     // then taken for it.
     let mut commands = Vec::new();
-    for part in run
-        .metadata
+    run.metadata
         .parents
         .iter()
         .flatten()
         .filter_map(|id| supercov_engine::run_store::merged_part(&kept, run, id))
-    {
-        if !commands.contains(&part.metadata.command) {
-            commands.push(part.metadata.command);
-        }
-    }
+        .for_each(|part| {
+            if !commands.contains(&part.metadata.command) {
+                commands.push(part.metadata.command);
+            }
+        });
     let unfiltered = commands
         .iter()
         .map(|command| without_test_names(command))
@@ -4067,6 +4066,10 @@ mod tests {
         assert_eq!(
             without_test_names(&words("cargo test name")),
             words("cargo test name")
+        );
+        assert_eq!(
+            without_test_names(&words("cargo test --")),
+            words("cargo test --")
         );
         assert_eq!(
             without_test_names(&words("node --test -- a.test.js")),

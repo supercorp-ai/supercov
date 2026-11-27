@@ -1925,6 +1925,36 @@ mod tests {
                 ("k", false)
             ]
         );
+        // A test is skipped where every attempt that says how it ended was
+        // skipped (`#[ignore]`): not where one passed or failed, before or
+        // after.
+        let passed_then = |id: &str| record(id, "test", None, &[]);
+        let attempts = super::plan(
+            &[
+                skipped("twice", "rust-libtest"),
+                skipped("twice", "rust-libtest"),
+                passed_then("then"),
+                skipped("then", "rust-libtest"),
+                skipped("before", "rust-libtest"),
+                passed_then("before"),
+                passed_then("never"),
+            ],
+            listed(Vec::new(), &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            attempts
+                .tests
+                .iter()
+                .map(|test| (test.id.as_str(), test.skipped))
+                .collect::<Vec<_>>(),
+            [
+                ("twice", true),
+                ("then", false),
+                ("before", false),
+                ("never", false)
+            ]
+        );
     }
 
     /// A test failed where an attempt failed or timed out, or passed where
