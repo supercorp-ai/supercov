@@ -1374,10 +1374,9 @@ const at = named.lastIndexOf("#");
 const file = at < 0 ? null : new TextEncoder().encode(named.slice(0, at));
 const index = at < 0 ? 0n : BigInt(named.slice(at + 1));
 let reached = false;
-function check(exports) {{
+function check(exports, hits) {{
   if (reached || !file) return;
-  for (const name of Object.keys(exports)) {{
-    if (!name.startsWith("__supercov_strong_hits_")) continue;
+  for (const name of hits) {{
     try {{
       if (Number(exports[name]()) > 0) {{
         reached = true;
@@ -1403,10 +1402,11 @@ function switched(instance) {{
     }} catch {{}}
   }}
   if (!any || !file) return instance;
+  const hits = Object.keys(exports).filter((name) => name.startsWith("__supercov_strong_hits_"));
   const wrapped = {{}};
   for (const [name, value] of Object.entries(exports)) {{
     wrapped[name] = typeof value === "function" && !name.startsWith("__supercov_")
-      ? function (...args) {{ try {{ return value.apply(this, args); }} finally {{ check(exports); }} }}
+      ? function (...args) {{ try {{ return value.apply(this, args); }} finally {{ check(exports, hits); }} }}
       : value;
   }}
   return new Proxy(instance, {{ get: (target, key) => key === "exports" ? wrapped : Reflect.get(target, key) }});
