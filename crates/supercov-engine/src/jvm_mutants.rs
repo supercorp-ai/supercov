@@ -4281,7 +4281,7 @@ impl Enumerator<'_> {
         };
         // Kotlin marks a non-null reference return `@NotNull`, which PIT
         // reads as a promise that `null` is never returned.
-        let nullable = kotlin_declared_nullable(node, self.source);
+        let nullable = kotlin_declared_nullable(node);
         let not_null = !nullable || modifiers.contains("@NotNull");
         {
             let method = self.methods.last_mut().expect("pushed");
@@ -5636,7 +5636,7 @@ fn nullable_property(property: Node, source: &str) -> bool {
 
 /// Whether a function declares a nullable return type: the type between
 /// its parameters and its body (a receiver's comes before the parameters).
-fn kotlin_declared_nullable(node: Node, source: &str) -> bool {
+fn kotlin_declared_nullable(node: Node) -> bool {
     children(node)
         .skip_while(|child| child.kind() != "function_value_parameters")
         .take_while(|child| child.kind() != "function_body")
@@ -5646,9 +5646,9 @@ fn kotlin_declared_nullable(node: Node, source: &str) -> bool {
                 "nullable_type" | "user_type" | "function_type"
             )
         })
-        .is_some_and(|ty| {
-            ty.kind() == "nullable_type" || text(ty, source).trim_end().ends_with('?')
-        })
+        // The grammar reads any trailing `?` as a `nullable_type` around
+        // the type it ends.
+        .is_some_and(|ty| ty.kind() == "nullable_type")
 }
 
 #[cfg(test)]
