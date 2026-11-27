@@ -1,0 +1,166 @@
+{
+  "evidenceDigest": "d9e56ce5a447e0e301c19ae55b2e5b68e41a73ae444290bcc7a2da18d495cfa7",
+  "manifest": {
+    "schemaVersion": 3,
+    "language": "python",
+    "files": {
+      "pyproject.toml": {
+        "sha256": "fb884b391ae5f1230a749a9c8da94e1713be85e507e0b175c284f6c8c6d8d9b8",
+        "bytes": 69
+      },
+      "src/shop/__init__.py": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0,
+        "code": {
+          "semantic": "e3b0c44298fc1c149afbf4c8996fb924",
+          "structure": "e3b0c44298fc1c149afbf4c8996fb924",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 1,
+              "endColumn": 1,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb924"
+            }
+          ]
+        }
+      },
+      "src/shop/price.py": {
+        "sha256": "6ec011ca269a534514b0ce51307d53ca640d28b599f94ddd32ba558458311df5",
+        "bytes": 354,
+        "code": {
+          "semantic": "0537457149651584382b45878ade22dd",
+          "structure": "797b137d69f7fb75d59bab98d2df5eb8",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 19,
+              "endColumn": 1,
+              "digest": "9c72cf23f21f5e78952ce21c73af24b8"
+            },
+            {
+              "path": "price",
+              "kind": "function",
+              "line": 1,
+              "column": 1,
+              "endLine": 7,
+              "endColumn": 25,
+              "digest": "483dc8d97b129bf0c858b09405f5ded1",
+              "parent": 0
+            },
+            {
+              "path": "label",
+              "kind": "function",
+              "line": 10,
+              "column": 1,
+              "endLine": 11,
+              "endColumn": 46,
+              "digest": "1b5a2dc24839374006ec6f0f30b4ed9e",
+              "parent": 0
+            },
+            {
+              "path": "unused",
+              "kind": "function",
+              "line": 14,
+              "column": 1,
+              "endLine": 18,
+              "endColumn": 16,
+              "digest": "e9616f3675f4f85ae7d4f537e219a080",
+              "parent": 0
+            }
+          ],
+          "erased": [
+            8,
+            9,
+            12,
+            13
+          ]
+        }
+      },
+      "tests/test_label.py": {
+        "sha256": "39b352df742e1660d6004ff7b772184d8b799ea28869c9539c2b2910e8a4fdb6",
+        "bytes": 70,
+        "code": {
+          "semantic": "32188974cc00c6129e221f3a87a628a5",
+          "structure": "1833035aaadb4c2da8b0ba0eb908f242",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 6,
+              "endColumn": 1,
+              "digest": "ebfd92eebec34270a9f38e2756cc59d8"
+            },
+            {
+              "path": "test_large_totals",
+              "kind": "function",
+              "line": 4,
+              "column": 1,
+              "endLine": 5,
+              "endColumn": 14,
+              "digest": "7e340c53fbf986c2da2b02cd3d01b933",
+              "parent": 0
+            }
+          ],
+          "erased": [
+            2,
+            3
+          ]
+        }
+      },
+      "tests/test_price.py": {
+        "sha256": "a883cfb3645540e8e8c4425283fd28590a82001879ad30ed9034f314903cb3a0",
+        "bytes": 190,
+        "code": {
+          "semantic": "221c01b543b40c2400e386ed3fce0675",
+          "structure": "6147434a562478a166ba7ab4ef0cade4",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 10,
+              "endColumn": 1,
+              "digest": "3bbfa4eeab1b4be9b1f95e297cf02dd6"
+            },
+            {
+              "path": "test_members_save_on_large_orders",
+              "kind": "function",
+              "line": 4,
+              "column": 1,
+              "endLine": 5,
+              "endColumn": 42,
+              "digest": "5cc003689968d14252efdb4cc8878729",
+              "parent": 0
+            },
+            {
+              "path": "test_coupons_take_five_off",
+              "kind": "function",
+              "line": 8,
+              "column": 1,
+              "endLine": 9,
+              "endColumn": 40,
+              "digest": "0ba0dc7dde19e26e4dac64deda3e4073",
+              "parent": 0
+            }
+          ],
+          "erased": [
+            2,
+            3,
+            6,
+            7
+          ]
+        }
+      }
+    }
+  },
+  "statementExclusions": []
+}
