@@ -9,8 +9,8 @@
 #   pit         PIT as a team runs it (stops at the first kill): the time
 #               the strong pass is measured against.
 #   supercov    `supercov -- <tests>`, `supercov runs latest mutants test`,
-#               and, given PIT's matrix in <results-dir>/pit-matrix.xml,
-#               `supercov runs latest mutants pit`.
+#               and, given PIT's report in <results-dir> (pit-matrix.xml,
+#               else pit.xml), `supercov runs latest mutants pit`.
 #
 # Projects are in projects.json, cloned shallow at their tag. SUPERCOV is the
 # binary to run; THREADS how many threads PIT and the strong pass use.
@@ -257,15 +257,23 @@ case "$scenario" in
     # shellcheck disable=SC2086
     file_options=()
     for f in "${shard_files[@]}"; do file_options+=(--file "$f"); done
-    SUPERCOV_STRONG_JVMS="$threads" "$supercov" runs latest mutants test --json "${file_options[@]}" -- $command \
+    # BUDGET (seconds) ends the pass in time, the verdicts reached saved:
+    # what it leaves shows as mutants without a verdict.
+    budget_options=()
+    [ -n "${BUDGET:-}" ] && budget_options=(--budget "$BUDGET")
+    SUPERCOV_STRONG_JVMS="$threads" "$supercov" runs latest mutants test --json "${budget_options[@]}" "${file_options[@]}" -- $command \
       > "$results/supercov-strong.json" 2> "$results/supercov-strong.log" || true
     ended="$(now)"
     cp .supercov/runs/*/strong-mutation.json "$results/" 2>/dev/null || true
     mkdir -p "$results/strong"
     cp -r .supercov/strong/* "$results/strong/" 2>/dev/null || true
-    if [ -f "$results/pit-matrix.xml" ]; then
-      "$supercov" runs latest mutants pit "$results/pit-matrix.xml" --json "${file_options[@]}" > "$results/supercov-pit.json" || true
-      "$supercov" runs latest mutants pit "$results/pit-matrix.xml" "${file_options[@]}" > "$results/supercov-pit.txt" || true
+    # PIT's full matrix where it ran, else its report as a team runs it:
+    # both say which mutants PIT detects.
+    pit_report="$results/pit-matrix.xml"
+    [ -f "$pit_report" ] || pit_report="$results/pit.xml"
+    if [ -f "$pit_report" ]; then
+      "$supercov" runs latest mutants pit "$pit_report" --json "${file_options[@]}" > "$results/supercov-pit.json" || true
+      "$supercov" runs latest mutants pit "$pit_report" "${file_options[@]}" > "$results/supercov-pit.txt" || true
     fi
     echo "{\"project\":\"$project\",\"scenario\":\"supercov\",\"measureMs\":$(elapsed "$started" "$measured"),\"strongMs\":$(elapsed "$measured" "$ended"),\"threads\":$threads}" > "$results/supercov.json"
     ;;

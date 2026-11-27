@@ -4,8 +4,9 @@ shard's) join with PIT and the times.
 
     python3 benchmarks/mutation-jvm/summarize.py <artifacts-dir>
 
-<artifacts-dir> holds the run's artifacts as `superci artifacts retrieve`
-writes them, one directory each.
+<artifacts-dir> holds the run's artifacts as `actions/download-artifact`
+merges them (.github/workflows/mutation-jvm.yml): <project>/<shard>/ for
+each job's files.
 """
 import collections
 import json
@@ -24,7 +25,8 @@ for path in root.rglob("*.json"):
         data = json.loads(path.read_text())
     except (ValueError, UnicodeDecodeError):
         continue
-    project = path.parent.name
+    # <project>/<shard>/<file>: a project's shards are summed.
+    project = path.relative_to(root).parts[0]
     if name in ("pit.json", "pit-matrix.json"):
         times[project][data["scenario"]] += data["ms"]
     elif name == "supercov.json":

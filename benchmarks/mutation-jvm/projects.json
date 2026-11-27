@@ -6,7 +6,8 @@
     "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip",
     "targets": "org.apache.commons.cli.*",
     "junit5": true,
-    "jdk": "21"
+    "jdk": "21",
+    "shards": 2
   },
   "commons-csv": {
     "repository": "https://github.com/apache/commons-csv.git",
@@ -15,7 +16,8 @@
     "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip -Dmaven.javadoc.skip",
     "targets": "org.apache.commons.csv.*",
     "junit5": true,
-    "jdk": "21"
+    "jdk": "21",
+    "shards": 3
   },
   "typetools": {
     "repository": "https://github.com/jhalterman/typetools.git",
@@ -25,7 +27,8 @@
     "targets": "net.jodah.typetools.*",
     "testng": true,
     "jdk": "11",
-    "surefire": "2.22.2"
+    "surefire": "2.22.2",
+    "shards": 1
   },
   "kotlinpoet": {
     "repository": "https://github.com/square/kotlinpoet.git",
@@ -36,7 +39,7 @@
     "targets": "com.squareup.kotlinpoet.*",
     "junit5": false,
     "jdk": "17",
-    "shards": 12
+    "shards": 30
   },
   "picnic": {
     "repository": "https://github.com/JakeWharton/picnic.git",
@@ -47,7 +50,8 @@
     "targets": "com.jakewharton.picnic.*",
     "junit5": false,
     "jdk": "11",
-    "gradlePlugin": "1.5.2"
+    "gradlePlugin": "1.5.2",
+    "shards": 2
   },
   "ant": {
     "repository": "https://github.com/apache/ant.git",
@@ -65,7 +69,8 @@
     "antSourceDir": "src/main",
     "antJvmArgs": "-Droot=ROOT,-Dbuild.tests.value=ROOT/build/testcases,-Dbuild.classes.value=ROOT/build/classes,-Dant.home=ANTHOME,-Doffline=true,-Djava.io.tmpdir=ROOT/build/testcases/tmp",
     "junit5": false,
-    "jdk": "17"
+    "jdk": "17",
+    "shards": 3
   },
   "java-diff-utils": {
     "repository": "https://github.com/java-diff-utils/java-diff-utils.git",
@@ -74,7 +79,8 @@
     "flags": "",
     "targets": "com.github.difflib.*",
     "junit5": true,
-    "jdk": "17"
+    "jdk": "17",
+    "shards": 3
   },
   "aedile": {
     "repository": "https://github.com/sksamuel/aedile.git",
@@ -85,6 +91,7 @@
     "targets": "com.sksamuel.aedile.*",
     "junit5": true,
     "jdk": "21",
-    "pit": false
+    "pit": false,
+    "shards": 1
   }
 }
