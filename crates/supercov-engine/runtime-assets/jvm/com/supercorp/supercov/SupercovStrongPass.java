@@ -50,6 +50,15 @@ public final class SupercovStrongPass {
    */
   static final String SLOW = "SUPERCOV_STRONG_SLOW";
   static final String RETRY = "SUPERCOV_STRONG_RETRY";
+  /**
+   * Where the JVMs of a pass share their baselines, one line a test:
+   * {@code index, passed, ms, unrepeatable}. A test's baseline is run once
+   * for the whole pass, every round included, not once in each JVM: each
+   * JVM runs a test in a fresh class loader and a working directory of its
+   * own, so another JVM's baseline is what its own would be, and a kill is
+   * still confirmed in the JVM that saw it.
+   */
+  static final String BASELINES = "SUPERCOV_STRONG_BASELINES";
   /** Set in a JVM a driver started to share the pass. */
   static final String MINION = "supercov.strong.minion";
 
@@ -159,6 +168,7 @@ public final class SupercovStrongPass {
   /** A test thread that ran past the short limit and was left running. */
   private Thread abandoned;
   private final File claims;
+  private final File baselines;
   private final String module;
   private final Executor executor;
   /** Where this JVM's time went, written as the pass's summary line. */
@@ -173,6 +183,8 @@ public final class SupercovStrongPass {
     this.retry = "1".equals(System.getenv(RETRY));
     String claimed = System.getenv(CLAIMS);
     this.claims = claimed == null ? null : new File(claimed);
+    String shared = System.getenv(BASELINES);
+    this.baselines = shared == null ? null : new File(shared);
     String limit = System.getenv("SUPERCOV_MUTANT_HIT_LIMIT");
     if (limit != null) {
       try {
@@ -493,6 +505,9 @@ public final class SupercovStrongPass {
     int ran = 0;
     String unrepeatable = null;
     for (Test test : candidates) {
+      if (test.baseline == null && sharedBaseline(test)) {
+        profile.sharedBaselines++;
+      }
       if (test.baseline == null) {
         long before = System.nanoTime();
         Outcome baseline = execute(test, false, -1, -1);
@@ -520,6 +535,7 @@ public final class SupercovStrongPass {
                 "supercov: " + test.name + " fails when run a second time: " + again.reason);
           }
         }
+        shareBaseline(test);
       }
       if (!test.baseline) {
         if (test.unrepeatable && unrepeatable == null) {
@@ -604,6 +620,7 @@ public final class SupercovStrongPass {
     long compileAtBegin;
     int mutants;
     int baselines;
+    int sharedBaselines;
     long baselineNanos;
     int runs;
     long runNanos;
@@ -653,6 +670,7 @@ public final class SupercovStrongPass {
       line.append(",\"mutants\":").append(mutants);
       line.append(",\"baselines\":").append(baselines);
       line.append(",\"baselineMs\":").append(baselineNanos / 1_000_000L);
+      line.append(",\"sharedBaselines\":").append(sharedBaselines);
       line.append(",\"runs\":").append(runs);
       line.append(",\"runMs\":").append(runNanos / 1_000_000L);
       line.append(",\"firstRunMs\":").append(firstRunNanos / 1_000_000L);
@@ -666,6 +684,48 @@ public final class SupercovStrongPass {
       } catch (IOException e) {
         // The profile is for reading, not for verdicts.
       }
+    }
+  }
+
+  /** Takes another JVM's baseline of {@code test}, where one ran: whether it did. */
+  private boolean sharedBaseline(Test test) {
+    if (baselines == null || !baselines.isFile()) {
+      return false;
+    }
+    String prefix = test.index + "\t";
+    try (BufferedReader reader =
+        new BufferedReader(
+            new InputStreamReader(new FileInputStream(baselines), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        String[] parts = line.split("\t", -1);
+        // A line cut short by a JVM still writing it says nothing yet.
+        if (!line.startsWith(prefix) || parts.length < 4) {
+          continue;
+        }
+        test.baselineMillis = Long.parseLong(parts[2]);
+        test.unrepeatable = parts[3].equals("1");
+        test.baseline = parts[1].equals("1");
+        return true;
+      }
+    } catch (IOException | NumberFormatException e) {
+      // Run it here instead.
+    }
+    return false;
+  }
+
+  /** Gives this JVM's baseline of {@code test} to the others, in one write. */
+  private void shareBaseline(Test test) {
+    if (baselines == null) {
+      return;
+    }
+    String line =
+        test.index + "\t" + (test.baseline ? "1" : "0") + "\t" + test.baselineMillis + "\t"
+            + (test.unrepeatable ? "1" : "0") + "\n";
+    try (FileOutputStream out = new FileOutputStream(baselines, true)) {
+      out.write(line.getBytes(StandardCharsets.UTF_8));
+    } catch (IOException e) {
+      // The others run it themselves.
     }
   }
 

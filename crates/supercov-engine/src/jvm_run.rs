@@ -6504,6 +6504,10 @@ fn run_strong_jvm_with(
         // verdicts.
         let slow = work.join("slow");
         let _ = fs::remove_file(&slow);
+        // Each test's baseline, run once for the whole pass and shared by
+        // its JVMs and rounds.
+        let baselines = work.join("baselines.tsv");
+        let _ = fs::remove_file(&baselines);
         let supervisor = crate::process_supervision::ProcessSupervisor::new()
             .map_err(|error| error.to_string())?;
         let options =
@@ -6556,6 +6560,7 @@ fn run_strong_jvm_with(
                 ("SUPERCOV_STRONG_RESULTS", request.results.as_os_str()),
                 ("SUPERCOV_STRONG_CLAIMS", claims.as_os_str()),
                 ("SUPERCOV_STRONG_SLOW", slow.as_os_str()),
+                ("SUPERCOV_STRONG_BASELINES", baselines.as_os_str()),
             ] {
                 environment.push((OsString::from(name), value.to_owned()));
             }
