@@ -172,7 +172,9 @@ fn a_python_test_past_its_limit_runs_again_alone_before_it_is_a_timeout() {
     let project = Project::empty("strong-python-alone");
     project.write(".gitignore", ".supercov\n__pycache__\n");
     project.write("names/__init__.py", "");
-    project.write("names/tag.py", "def tag():\n    return 'x'\n");
+    // No letters: `XX` is the string's only mutant (`lower` and `upper`
+    // change nothing).
+    project.write("names/tag.py", "def tag():\n    return '1'\n");
     project.write("tests/__init__.py", "");
     project.write(
         "tests/test_tag.py",
