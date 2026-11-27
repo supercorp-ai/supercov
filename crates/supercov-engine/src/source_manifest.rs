@@ -165,6 +165,11 @@ pub struct Executions {
 pub struct Execution {
     pub test: TestSelector,
     pub passed: bool,
+    /// The runner skipped it in every appearance (`#[ignore]`, `test.skip`):
+    /// it did not pass, and it did not fail either. A test that skipped
+    /// itself as it ran may still have run code, so it stays in the record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
     /// Per file, the innermost unit of every probe this test fired.
     pub files: BTreeMap<String, Vec<usize>>,
     /// How completely `files` describes what this test ran: `exact`, `partial`
@@ -612,11 +617,6 @@ pub fn executions(
         let Some(file) = &test.file else {
             continue;
         };
-        // A test the runner skipped (`#[ignore]`, `test.skip`) ran nothing:
-        // it neither passed nor failed, and no record of it says either.
-        if test.outcome == "skipped" {
-            continue;
-        }
         let selector = TestSelector {
             file: file.clone(),
             name: test.name.clone(),
@@ -624,10 +624,12 @@ pub fn executions(
         let record = tests.entry(selector.clone()).or_insert_with(|| Execution {
             test: selector,
             passed: false,
+            skipped: true,
             files: BTreeMap::new(),
             attribution: crate::coverage_report::ATTRIBUTION_EXACT.to_owned(),
         });
         record.passed |= test.outcome == "passed";
+        record.skipped &= test.outcome == "skipped";
         // One name can be recorded more than once -- retries, a test declared
         // in two files -- and a single incomplete appearance is enough to make
         // the whole record's file list a lower bound.

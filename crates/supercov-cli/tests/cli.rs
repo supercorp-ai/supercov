@@ -1501,7 +1501,11 @@ fn a_merged_run_s_mutants_run_under_its_parts_command() {
     assert_ne!(refused.code(), 0, "{}", refused.stderr());
     contains_all(
         &refused.stderr(),
-        &["is a merged run", "--test-name-pattern=total", "mutants test -- <test command>"],
+        &[
+            "is a merged run",
+            "--test-name-pattern=total",
+            "mutants test -- <test command>",
+        ],
     );
 }
 

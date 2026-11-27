@@ -575,11 +575,22 @@ fn without_test_names(command: &[String]) -> Vec<String> {
             .file_stem()
             .is_some_and(|stem| stem == "cargo")
     });
-    let Some(separator) = command.iter().position(|word| word == "--").filter(|_| cargo) else {
+    let Some(separator) = command
+        .iter()
+        .position(|word| word == "--")
+        .filter(|_| cargo)
+    else {
         return command.to_vec();
     };
     // libtest's options that take their value as the next word.
-    const VALUED: [&str; 6] = ["--test-threads", "--skip", "--logfile", "--format", "--color", "-Z"];
+    const VALUED: [&str; 6] = [
+        "--test-threads",
+        "--skip",
+        "--logfile",
+        "--format",
+        "--color",
+        "-Z",
+    ];
     let mut kept = command[..=separator].to_vec();
     let mut value = false;
     for word in &command[separator + 1..] {
@@ -4053,7 +4064,10 @@ mod tests {
             )),
             words("/usr/bin/cargo test -p x -- --test-threads 2 --skip slow --nocapture")
         );
-        assert_eq!(without_test_names(&words("cargo test name")), words("cargo test name"));
+        assert_eq!(
+            without_test_names(&words("cargo test name")),
+            words("cargo test name")
+        );
         assert_eq!(
             without_test_names(&words("node --test -- a.test.js")),
             words("node --test -- a.test.js")

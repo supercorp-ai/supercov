@@ -676,8 +676,8 @@ A merged run's mutants run under its parts' test command; parts that differ
 only in the test names after `--` (`cargo test -- --exact a b`) give it
 without those names, since the pass names each test it runs. A test the
 measured run skipped (`#[ignore]`, unless the command asked for
-`--ignored` or `--include-ignored`) is neither passed nor failed, and is
-never a candidate.
+`--ignored` or `--include-ignored`) is recorded `skipped`, not failed, and
+is never a candidate.
 
 ### Go (preview)
 

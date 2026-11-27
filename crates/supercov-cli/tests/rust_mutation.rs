@@ -558,7 +558,13 @@ fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
     project.commit("fixture");
     let part = |names: &[&str]| {
         let mut args = vec![
-            "--", "cargo", "test", "--workspace", "--no-fail-fast", "--", "--test-threads=4",
+            "--",
+            "cargo",
+            "test",
+            "--workspace",
+            "--no-fail-fast",
+            "--",
+            "--test-threads=4",
             "--exact",
         ];
         args.extend_from_slice(names);
@@ -567,8 +573,7 @@ fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
     };
     let first = part(&["tests::adds", "tests::needs_credentials"]);
     let second = part(&["tests::bigs"]);
-    // The ignored test was skipped, not failed: no record says it did not
-    // pass.
+    // The ignored test was skipped, not failed: its record says so.
     let executions = serde_json::from_str::<Value>(
         &project.read(&format!(".supercov/runs/{first}/test-executions.json")),
     )
@@ -577,11 +582,28 @@ fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|test| (test["test"]["name"].as_str().unwrap().to_owned(), test["passed"].clone()))
+        .map(|test| {
+            (
+                test["test"]["name"].as_str().unwrap().to_owned(),
+                test["passed"].clone(),
+                test["skipped"].clone(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         recorded,
-        [("a/src/lib.rs::tests::adds".to_owned(), Value::Bool(true))],
+        [
+            (
+                "a/src/lib.rs::tests::adds".to_owned(),
+                Value::Bool(true),
+                Value::Null
+            ),
+            (
+                "b/src/lib.rs::tests::needs_credentials".to_owned(),
+                Value::Bool(false),
+                Value::Bool(true)
+            ),
+        ],
         "{executions}"
     );
     project.supercov(&["merge", &first, &second]).succeeds();
@@ -590,20 +612,29 @@ fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
     // other, the second continues the first's verdicts.
     let mut last = Value::Null;
     for shard in ["1/2", "2/2"] {
-        let ran = project.supercov(&["runs", "latest", "mutants", "test", "--shard", shard, "--json"]);
+        let ran = project.supercov(&[
+            "runs", "latest", "mutants", "test", "--shard", shard, "--json",
+        ]);
         let reply = ran.json();
         assert_eq!(ran.code(), 0, "{reply}\n{}", ran.stderr());
-        assert!(!ran.stderr().contains("stable Cargo invocation"), "{}", ran.stderr());
+        assert!(
+            !ran.stderr().contains("stable Cargo invocation"),
+            "{}",
+            ran.stderr()
+        );
         assert!(!ran.stderr().contains("did not pass"), "{}", ran.stderr());
         assert_eq!(reply["summary"]["error"], 0, "{reply}");
         assert!(reply["summary"]["ran"].as_u64() > Some(0), "{reply}");
         last = reply;
     }
-    let whole_pass = project.supercov(&["runs", "latest", "mutants", "test", "--json"]).json();
+    let whole_pass = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
     assert_eq!(whole_pass["summary"]["error"], 0, "{whole_pass}");
-    let saved = serde_json::from_str::<Value>(
-        &project.read(&format!(".supercov/runs/{}/strong-mutation.json", whole_pass["run"].as_str().unwrap())),
-    )
+    let saved = serde_json::from_str::<Value>(&project.read(&format!(
+        ".supercov/runs/{}/strong-mutation.json",
+        whole_pass["run"].as_str().unwrap()
+    )))
     .unwrap();
     let verdicts = saved["mutants"]
         .as_object()
@@ -615,7 +646,14 @@ fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
     assert_ne!(merged, first);
     // One pass over the whole suite, from nothing.
     let whole = Project::empty("strong-rust-merged-whole");
-    for file in ["Cargo.toml", "a/Cargo.toml", "b/Cargo.toml", "a/src/lib.rs", "b/src/lib.rs", ".gitignore"] {
+    for file in [
+        "Cargo.toml",
+        "a/Cargo.toml",
+        "b/Cargo.toml",
+        "a/src/lib.rs",
+        "b/src/lib.rs",
+        ".gitignore",
+    ] {
         whole.write(file, &project.read(file));
     }
     whole.git(&["init", "-q"]);
@@ -623,9 +661,10 @@ fn a_merged_rust_run_s_shards_run_under_its_parts_cargo_command() {
     let reply = whole
         .supercov(&["mutants", "--json", "--", "cargo", "test", "--workspace"])
         .json();
-    let saved = serde_json::from_str::<Value>(
-        &whole.read(&format!(".supercov/runs/{}/strong-mutation.json", reply["run"].as_str().unwrap())),
-    )
+    let saved = serde_json::from_str::<Value>(&whole.read(&format!(
+        ".supercov/runs/{}/strong-mutation.json",
+        reply["run"].as_str().unwrap()
+    )))
     .unwrap();
     let fresh = saved["mutants"]
         .as_object()
