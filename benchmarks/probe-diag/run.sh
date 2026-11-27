@@ -16,7 +16,7 @@ if [ ! -d "$SRC" ]; then
   (cd "$SRC" && git init -q && npm install --no-audit --no-fund >/dev/null 2>&1 && npx playwright install chromium >/dev/null 2>&1 \
     && git add -A && git -c user.name=diag -c user.email=diag@example.com commit -qm generated)
 fi
-port_of() { case $1 in plain) echo 3401;; base) echo 3402;; new) echo 3403;; bytes) echo 3404;; esac; }
+port_of() { case $1 in plain) echo 3401;; base) echo 3402;; new) echo 3403;; bytes) echo 3404;; base-nohook) echo 3405;; bytes-nohook) echo 3406;; esac; }
 start() {
   local v=$1 port; port=$(port_of "$v")
   local dir=$WORK/app-$v
@@ -28,10 +28,14 @@ start() {
     mkdir -p "$WORK/server-profile-$v"
     serve="NODE_OPTIONS=\"\${NODE_OPTIONS:-} --cpu-prof --cpu-prof-dir=$WORK/server-profile-$v\" exec npx next start -p $port"
   fi
+  # A variant `<binary>-<part>` is that binary with part of its runtime off.
+  local binary=${v%%-*} part=""
+  [ "$binary" != "$v" ] && part=${v#*-}
+  [ -n "$part" ] && serve="node $HERE/patch-runtime.mjs .supercov/node_modules/runtime.mjs $part && $serve"
   if [ "$v" = plain ]; then
     (cd "$dir" && sh -c "$timed && $serve" >"$WORK/server-$v.log" 2>&1 &)
   else
-    (cd "$dir" && "$BINARIES/supercov-$v/supercov" -- sh -c "$timed && $serve" >"$WORK/server-$v.log" 2>&1 &)
+    (cd "$dir" && "$BINARIES/supercov-$binary/supercov" -- sh -c "$timed && $serve" >"$WORK/server-$v.log" 2>&1 &)
   fi
 }
 start "$A"; start "$B"
@@ -46,7 +50,7 @@ done
 server_ticks() { # utime+stime of the next-server processes running in app-$1
   local total=0
   for pid in $(pgrep -f "next-server" || true); do
-    if [ -r "/proc/$pid/stat" ] && readlink "/proc/$pid/cwd" | grep -q "/app-$1"; then
+    if [ -r "/proc/$pid/stat" ] && readlink "/proc/$pid/cwd" | grep -qE "/app-$1(/|$)"; then
       read -r -a f < "/proc/$pid/stat"; total=$((total + f[13] + f[14]))
     fi
   done

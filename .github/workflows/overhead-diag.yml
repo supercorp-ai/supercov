@@ -57,10 +57,9 @@ jobs:
       matrix:
         include:
           - { pair: 'base bytes', mode: trace, count: 6 }
-          - { pair: 'base bytes', mode: abba, count: 45 }
-          - { pair: 'base bytes', mode: abba, count: 45 }
-          - { pair: 'bytes base', mode: abba, count: 45 }
-          - { pair: 'bytes base', mode: abba, count: 45 }
+          - { pair: 'base base-nohook', mode: abba, count: 40 }
+          - { pair: 'base-nohook base', mode: abba, count: 40 }
+          - { pair: 'plain base', mode: abba, count: 40 }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -82,6 +81,7 @@ jobs:
         run: tail -40 "$RUNNER_TEMP"/probe-diag/server-*.log || true
 
   measure:
+    if: false
     needs: build
     name: ${{ matrix.kind }} ${{ matrix.shard }} ${{ matrix.variants }}
     runs-on: ubuntu-24.04
