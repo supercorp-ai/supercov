@@ -168,8 +168,10 @@ function record(round, binary, step, result) {
 }
 
 // What each binary answered, with the merged run's id named alike.
+let mergedStarted;
 function keep(binary, name, text, merged) {
-  const normal = merged ? text.split(merged).join('<merged>') : text;
+  let normal = merged ? text.split(merged).join('<merged>') : text;
+  if (merged && mergedStarted) normal = normal.split(mergedStarted).join('<merged-started>');
   writeFileSync(join(outputs, `${binary}-${name}`), normal);
 }
 
@@ -191,6 +193,7 @@ for (let round = 1; round <= rounds; round += 1) {
     const merge = q(['merge', ...shards], 'merge');
     const merged = /merged run (\S+)/.exec(merge.stdout)?.[1];
     assert.ok(merged, `no merged run id in ${label}-merge`);
+    mergedStarted = JSON.parse(readFileSync(join(project, '.supercov/runs', merged, 'run.json'), 'utf8')).startedAt;
     const mergedFirst = q(['runs', merged], 'merged-index-build');
     q(['runs', merged], 'merged-reopen');
     const gaps = q(['runs', merged, 'gaps', '--json'], 'merged-gaps-json');
