@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
+
 ## 4.29.19
 
 **Fixed**
