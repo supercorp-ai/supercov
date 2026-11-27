@@ -307,7 +307,9 @@ PY
     # the build, so the summary says; a build that did not get that far is
     # neither.
     ant_verdict() {
-      if grep -q "Tests FAILED" "$phase"; then
+      # <junit> reports a failing class as "Test <class> FAILED" and goes on;
+      # its counts say so too.
+      if grep -qE "Tests? .*FAILED|(Failures|Errors): [1-9]" "$phase"; then
         echo "FAILED $1"
       elif grep -q "BUILD SUCCESSFUL" "$phase"; then
         echo "PASSED $1"
