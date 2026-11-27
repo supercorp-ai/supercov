@@ -35,6 +35,7 @@ jobs:
           - { variant: reads, ref: origin/perf/merge-reads-side-by-side }
           - { variant: mergeindex, ref: origin/perf/merge-publishes-index }
           - { variant: view, ref: origin/perf/report-view-cache }
+          - { variant: diff, ref: origin/perf/diff-lean }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -157,7 +158,7 @@ jobs:
           BENCH_MODE: measure
           BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
-          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,reads=${{ github.workspace }}/binaries/supercov-reads/supercov,mergeindex=${{ github.workspace }}/binaries/supercov-mergeindex/supercov,view=${{ github.workspace }}/binaries/supercov-view/supercov
+          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,reads=${{ github.workspace }}/binaries/supercov-reads/supercov,mergeindex=${{ github.workspace }}/binaries/supercov-mergeindex/supercov,view=${{ github.workspace }}/binaries/supercov-view/supercov,diff=${{ github.workspace }}/binaries/supercov-diff/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
           BENCH_ROUNDS: 2
         run: node scripts/post-test-bench.mjs
