@@ -78,6 +78,31 @@ function query(args, environment, cwd = project) {
 }
 
 
+// The strong pass on the latest run: no mutant in error, and `killed` killed
+// by `killer`, the runner's own id for the test.
+function assertStrongPass(runner, killed, killer, environment) {
+  const ran = supercov(['runs', 'latest', 'mutants', 'test', '--json'], { ...environment, SUPERCOV_STRONG_JOBS: '2' });
+  // The driver forks the loaded suite, which Windows cannot: there no mutant
+  // runs, each is counted not run under its runner, and the pass exits 2.
+  if (process.platform === 'win32') {
+    assert.equal(ran.status, 2, `${runner} strong pass\n${ran.stdout}\n${ran.stderr}`);
+    assert.ok(JSON.parse(ran.stdout).summary.notRun[runner] > 0, `${runner}: ${ran.stdout}`);
+    return;
+  }
+  assert.equal(ran.status, 0, `${runner} strong pass\n${ran.stdout}\n${ran.stderr}`);
+  const reply = JSON.parse(ran.stdout);
+  assert.equal(reply.summary.error, 0, `${runner}: ${ran.stdout}\n${ran.stderr}`);
+  assert.ok(reply.summary.killed > 0 && reply.summary.survived > 0, `${runner}: ${ran.stdout}`);
+  // Every mutant, written whole: a reply holds only as many as fit.
+  const output = resolve(temporary, `${runner}-mutants.jsonl`);
+  const written = supercov(['runs', 'latest', 'mutants', '--format', 'jsonl', '--output', output], environment);
+  assert.equal(written.status, 0, written.stderr);
+  const listed = readFileSync(output, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const mutant = listed.find((each) => each.id === killed);
+  assert.equal(mutant?.strong?.status, 'killed', `${runner}: ${JSON.stringify(mutant ?? listed.length)}`);
+  assert.equal(mutant.strong.killedBy, killer, `${runner}: ${JSON.stringify(mutant)}`);
+}
+
 function assertStdlibOnlyTotals(summary) {
   // Ruby 3.3 measures through Coverage alone: lines, methods and stdlib
   // branches are exact, probe-driven obligations are declared unmeasured.
@@ -144,9 +169,9 @@ try {
   assert.match(rspec.stderr, /interpreter process\(es\) on Ruby (3\.[3-9]|[4-9])/);
   assertTotals(query(['runs', 'latest'], environment));
   // A run that cannot be moved into the store is said, and none is published.
-  const unpublished = supercov(['--', 'rspec'], { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1211' });
+  const unpublished = supercov(['--', 'rspec'], { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1216' });
   assert.notEqual(unpublished.status, 0, unpublished.stderr);
-  assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1211/u, unpublished.stderr);
+  assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1216/u, unpublished.stderr);
   assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
 
   // A Ruby script with no test runner is the command's choice, not a
@@ -372,6 +397,17 @@ try {
   assert.match(JSON.stringify(negation), /UnitStyleTest#test_negation/, 'test-unit identity reaches the line');
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
+  // test-unit required on the command line loads before Supercov's runtime
+  // (a `-r` there comes before RUBYOPT's), as Rake's test task does with
+  // `-rhelper`: its adapter installs anyway, and its autorun, which Ruby
+  // then calls after Supercov's own `at_exit`, still writes its evidence.
+  const preloaded = supercov(['--', 'ruby', '-rtest/unit', '-Itest', 'test/unit_style_test.rb'], environment);
+  assert.equal(preloaded.status, 0, `${preloaded.stdout}\n${preloaded.stderr}`);
+  assert.doesNotMatch(preloaded.stdout, /IOError/, preloaded.stdout);
+  assert.match(preloaded.stderr, /2 test\(s\) across 1 source file\(s\)/, preloaded.stderr);
+  if (probes) {
+    assertStrongPass('test-unit', 'lib/shapes.rb:38:5-38:11:String:removed', 'UnitStyleTest#test_negation', environment);
+  }
 
   // Thread-parallel Minitest: probes stay per test, stdlib deltas that
   // overlapped go to the run and the limitation says so.
@@ -388,6 +424,9 @@ try {
   assert.match(cucumberRunners.stdout, /cucumber\s+2 test\(s\)/);
   const countdown = query(['runs', 'latest', 'line', 'lib/shapes.rb:99'], environment);
   assert.match(JSON.stringify(countdown), /features\/shapes\.feature:7/, 'Cucumber scenario identity reaches the line');
+  if (probes) {
+    assertStrongPass('cucumber', 'lib/shapes.rb:49:10-49:15:NamedValue:nil', 'features/shapes.feature:2', environment);
+  }
 
   // One failing test per runner, reported as one. Every leg above passes, so
   // a runner whose failure path was broken looked fine: the test-unit

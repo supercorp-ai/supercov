@@ -1,0 +1,539 @@
+# Mutation testing
+
+Coverage says which code the tests ran. It does not say whether they would
+notice that code doing the wrong thing. Mutation testing asks that directly:
+it makes small changes to the source, one at a time (`a < b` becomes
+`a <= b`, a `return` gives `0`, a call is removed), and checks whether a test
+fails. Each change is a **mutant**. A mutant a test fails on is **killed**; one
+every test passes with **survived**, and points at a check no test makes.
+
+Supercov makes the mutants each language's established tool makes, so its
+counts and verdicts can be compared with that tool's:
+
+| Language | Mutants of | Support |
+| --- | --- | --- |
+| JavaScript, TypeScript | StrykerJS 10.1.1 | Full, under nine runners |
+| Python | mutmut 3.8.1 | Preview |
+| Rust | cargo-mutants 27.1.0 | Preview |
+| Go | Gremlins 0.6.0, every mutator | Preview |
+| Ruby | mutant 0.17.1, light operators | Preview |
+
+A preview language works end to end and was validated against its tool on
+public projects (see [Compared with the established tools](#compared-with-the-established-tools)),
+but has been run on fewer projects than JavaScript and may change in a later
+release. Java and Kotlin have no mutants in this release. On Windows,
+Python's and Ruby's mutants are listed and the weak report reads them, but
+the strong pass does not run them: their drivers fork the loaded suite, which
+Windows cannot, so each is counted "not run" under its runner.
+
+```sh supercov-example
+npx supercov mutants -- npm test
+npx supercov mutants --diff origin/main
+```
+
+## Weak and strong mutation
+
+Supercov answers in two steps.
+
+**Weak mutation** reads the run you already measured. Nothing runs again. For
+each mutant it says how far the tests got toward killing it:
+
+| Status | Meaning |
+| --- | --- |
+| `not-reached` | No test ran the mutated code |
+| `not-infected` | A test ran it, and every evaluation gave the mutant the same value as the original: these tests cannot kill it |
+| `infected` | Some evaluation gave the mutant another value: a candidate kill, not a kill |
+| `unknown` | The run cannot tell, such as code whose values it did not record |
+| `equivalent` | No input can make it differ, shown from the code alone |
+
+A `not-infected` mutant is a certain survivor, and its reason says what is
+missing: `a never equal to b` for `a < b` made `a <= b` means no test tries
+the boundary. The weak score is `infected / (infected + not-infected +
+not-reached)`, with unknown and equivalent mutants left out.
+
+**Strong mutation** (`mutants test`) runs the tests again with each mutant
+switched on and records what the established tools record:
+
+| Verdict | Meaning |
+| --- | --- |
+| `killed` | A test failed with the mutant in place |
+| `survived` | Every test that could kill it passed |
+| `timeout` | A test ran past its time limit with the mutant in place |
+| `no-coverage` | No test ran the mutated code |
+| `unviable` | The mutant does not compile (Rust and Go); counted apart and left out of the score |
+| `error` | The pass could not give it a verdict, with the reason; left out of the score |
+
+The mutation score is `(killed + timeout) / (killed + timeout + survived +
+no-coverage)`, as StrykerJS computes it. It appears only after a strong pass
+and is never estimated from weak results. Both scores are shown beside
+coverage and never change a coverage figure.
+
+The strong pass is cheaper than running every test against every mutant
+because the measured run already holds what the established tools learn in a
+first pass of their own:
+
+- a mutant no test reached is `no-coverage`, and one no test infected is
+  `survived`, without running anything;
+- every other mutant runs only against the tests whose own evidence shows they
+  reached or infected it, the likeliest killer first, and stops at the first
+  failure.
+
+Each of these shortcuts is exact. Where the run cannot prove a test is
+irrelevant, the test runs.
+
+### How this differs from coverage
+
+A line can be covered, its branch taken both ways, and still have no test that
+checks its result. Coverage counts that line as done; a `not-infected` or
+`survived` mutant on it says it is not. A mutant on code no test runs is
+`not-reached`, the same gap `runs latest gaps` already lists, so the mutants
+worth reading first are the reached ones that survive.
+
+## Commands
+
+### Test the tests
+
+```sh supercov-example
+npx supercov mutants -- npm test
+```
+
+`supercov mutants` measures the command with the probes that record the values
+its mutants' verdicts read (`SUPERCOV_MUTANTS=1`), lists the mutants, and runs
+the strong pass. Without `--` it uses the latest run's command. The pass's
+summary gives the mutation score, every verdict counted, and ends with the
+mutants the tests let survive.
+
+- **Unchanged checkout.** The next `supercov mutants` reads the same run again
+  and runs nothing it already decided.
+- **After an edit.** It measures the checkout again and keeps an earlier
+  verdict for each mutant whose file is as it was and whose candidate tests,
+  and their test files, nothing changed could reach, as `runs latest tests
+  affected` reads a change: a test file's edit reaches its tests, a source's
+  edit the tests that ran the changed code. The rest run, and the summary says
+  how many verdicts were kept and from which run.
+- **Interrupted.** Each verdict is saved as it is made. A pass stopped by
+  Ctrl-C, a killed job or a test worker that never ended keeps what it
+  decided, Ctrl-C stops every process the pass started, and the next pass runs
+  only the rest.
+- **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
+  finds a mutant; `2`, after the answer, when the measured command failed (a
+  failing test kills nothing, so the verdicts cannot gate) or no mutant could
+  be run. A run that recorded no test is refused with exit `2`.
+
+The steps can also be taken one at a time:
+
+```sh supercov-example
+npx supercov -- npm test                         # a plain run: no cost for mutants
+npx supercov runs latest mutants                 # weak mutation, from the run
+npx supercov runs latest mutants test            # strong mutation, saved into the run
+npx supercov runs latest mutants --status survived
+```
+
+A plain run lists its mutants from its sources the first time they are asked
+for. Without the value probes, a mutant whose verdict needs a recorded value
+is `unknown`, and the strong pass runs it.
+
+### Read the mutants
+
+```sh supercov-example
+npx supercov runs latest mutants                              # a table of files and the scores
+npx supercov runs latest mutants src/billing.ts               # one file's mutants, by line
+npx supercov runs latest mutants src/billing.ts:42            # one line's, with their reasons and ids
+npx supercov runs latest mutants --status not-infected,not-reached
+npx supercov runs latest mutants --mutator EqualityOperator
+npx supercov runs latest mutants --json                       # the coverage.mutants reply, a page at a time
+npx supercov runs latest mutants --format jsonl --output mutants.jsonl
+```
+
+After a strong pass, each mutant shows its verdict beside its weak status, the
+mutation score appears with every verdict counted, and `--status` also takes a
+verdict (`survived`, `killed`, `timeout`, `no-coverage`, `error`,
+`unviable`). The table of files puts first the files with the most mutants a
+test reaches and does not infect. A listed mutant shows its change as
+`original → replacement`, or by the part it changes where the code is long
+(`….slice(0, maxUsers) → …`). `--kind`, `--runner`, `--tag`, `--title` and
+`--test-file` read the verdicts of those tests alone.
+
+### Gate a pull request
+
+`--diff <base>` keeps the mutants on lines the change added or modified since
+it left `<base>`, and lists first the ones its tests leave alive:
+
+```sh supercov-example
+npx supercov runs latest mutants --diff origin/main
+npx supercov runs latest mutants --diff origin/main --format markdown --output mutants.md
+npx supercov runs latest mutants --diff origin/main --fail-on not-infected,not-reached
+npx supercov mutants --diff origin/main --fail-on survived
+npx supercov mutants --diff origin/main --format markdown --output mutants.md
+```
+
+- `--format markdown` writes a table for a pull request's comment: the counts,
+  then up to 25 mutants left alive with where they are, what they change and
+  why, and the command that lists the rest. Once a strong pass gave verdicts,
+  it has the mutation score and lists the survivors. `supercov mutants` takes
+  `--format markdown` and `--output <file>` too, and writes its own answer
+  that way.
+- `--fail-on` exits `1` when a mutant asked about has one of the statuses
+  given. On `runs latest mutants` they are weak statuses, from the run alone;
+  on `supercov mutants` and `mutants test` they are verdicts: `survived`,
+  `timeout`, `no-coverage` and `error`. A second `mutants test` over the same
+  run runs nothing already decided, so it can gate on the first's verdicts.
+- The change is the commit the run measured against its merge base with
+  `<base>`. A run with uncommitted changes is compared as the working tree,
+  and the output says so. A base git does not know, as in a shallow checkout,
+  exits `2`: fetch it (`fetch-depth: 0`).
+
+In GitHub Actions, after the tests:
+
+```yaml
+- uses: actions/checkout@v6
+  with:
+    fetch-depth: 0 # the base and the merge base
+- run: npx supercov -- npm test
+- run: npx supercov runs latest mutants test --diff origin/${{ github.base_ref }}
+- run: npx supercov runs latest mutants --diff origin/${{ github.base_ref }} --format markdown --output mutants.md
+- run: gh pr comment ${{ github.event.number }} --body-file mutants.md --edit-last --create-if-none
+  env:
+    GH_TOKEN: ${{ github.token }}
+- run: npx supercov runs latest mutants test --diff origin/${{ github.base_ref }} --fail-on survived
+```
+
+### Critical code and accepted mutants
+
+```sh supercov-example
+npx supercov runs latest mutants test --critical "src/auth/**" --fail-on survived
+npx supercov runs latest mutants test --shard 1/4
+npx supercov runs latest mutants test --plan --json
+```
+
+- `--critical <glob>` (repeatable): every mutant in those files must be killed
+  or accepted, or the command fails.
+- `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
+- `--plan` prints what would run, and runs nothing.
+
+Some mutants no test can tell apart from the original. Accept them in
+`supercov.accepted.json` at the project root:
+
+```json
+[
+  { "id": "src/quota.ts:12:21-12:26:EqualityOperator:>=", "reason": "n is never 0 here: the caller returns early" }
+]
+```
+
+An accepted mutant still runs, is shown as accepted, and never fails the
+command. An entry whose mutant is killed or no longer exists is listed as
+stale. A mutant's id is its file, its span, its mutator and what it becomes,
+and stays the same while that code does.
+
+### Runners without a driver
+
+A test runner Supercov has no adapter for, such as tape, records no test: a
+strong pass over its run is refused with exit `2`, naming the runner and how
+many mutants its command ran. Tests Supercov records under a runner no strong
+driver runs keep the mutants list and the weak report; in a strong pass their
+mutants are `error`, which the score leaves out, counted in a line per runner
+(`12 mutant(s) not run: no strong driver for pytest`), never survivors.
+
+### Join and export other tools' reports
+
+```sh supercov-example
+npx supercov runs latest mutants --stryker reports/mutation/mutation.json
+npx supercov runs latest mutants --stryker reports/mutation
+```
+
+`--stryker` reads StrykerJS's `mutation.json` reports, or a directory of
+them, and mutant's session results for Ruby (`.mutant/results`). Each mutant
+then shows the other tool's status beside Supercov's, and the reply counts the
+mutants each tool made alone. A mutant Supercov calls not reached, not
+infected or equivalent that the other tool killed is a soundness violation:
+it is listed, and the command exits `1`.
+
+`mutants --format stryker` writes a run's mutants as StrykerJS's
+`mutation.json` (the mutation testing report schema, version 2), which
+mutation-testing-elements' HTML report, the Stryker Dashboard and CI
+integrations read, and `mutants --format pit` as PIT's `mutations.xml`, which
+PIT's report aggregator and Sonar's PIT plugin read. Each carries every
+mutant's strong verdict where a pass gave one. These are file formats only:
+they work for every language above, and are not Java or Kotlin support.
+
+## The HTML reports
+
+`npx supercov report` and `npx supercov runs latest report --format html`
+show a run's mutation testing beside its coverage, for a run that listed
+mutants:
+
+- **The Mutation testing card** holds the weak score and the mutation score
+  side by side, each with how many mutants it is over, every status and
+  verdict counted, why the mutants without a verdict have none, each language
+  where the run has several, and the mutants left alive by file, each opening
+  its line.
+- **The Files list** gets a Mutants column with each file's score, sortable,
+  lowest first.
+- **A file's source** marks each line with a mutant left alive. The line's
+  evidence lists each mutant with what it changes, its weak status and reason,
+  its verdict and why, and the test that killed it.
+
+`--diff <base>` on either report keeps the mutants of a change, as
+`runs latest mutants --diff` does; coverage is not narrowed. A run that listed
+no mutants shows none of this.
+
+## Languages and runners
+
+| Language | Strong pass runs under |
+| --- | --- |
+| JavaScript, TypeScript | Vitest, Vitest Browser Mode, Playwright, Jest, `node:test`, Mocha, AVA, node-tap, `bun:test` |
+| Python (preview) | pytest, `python -m unittest` |
+| Rust (preview) | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
+| Go (preview) | `go test` |
+| Ruby (preview) | RSpec, Minitest, test-unit, Cucumber |
+
+### JavaScript and TypeScript
+
+- **Vitest** runs many mutants at once in one resident Vitest: each test file
+  can carry its own mutant, a mutant is switched on before the file's imports,
+  and a mutant's test files run one after another, the likeliest killer first,
+  stopping at its first failing test.
+- **Playwright** carries each test's mutant with its requests, so one server
+  serves different mutants to different workers. A mutant of a server's
+  start-up runs with the server started again for it. StrykerJS has no
+  Playwright runner, so Playwright's verdicts are checked by hand (see below).
+- **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
+  AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
+  start of the command, with the mutant on from its start.
+- Rust compiled to wasm and loaded by these tests is mutated too (preview):
+  the command builds the wasm with the mutants switched in, and each wasm
+  instance, in Node or in a Playwright page, runs the test's mutant.
+- Limits: wasm loaded in Vitest Browser Mode's pages is not measured, so its
+  mutants are not planned. A function body StrykerJS empties where no switch
+  can be placed is `error`.
+
+### Python (preview)
+
+The tests are collected once; each mutant then runs in a fork of that
+process, its function switched to mutmut's copy, against its candidate tests
+in collection order. A mutant whose code ran while the test modules loaded (a
+decorator applied at import) runs in a fresh interpreter with the mutant on
+from its start. `SUPERCOV_STRONG_WORKERS` sets how many forks run at once.
+
+Limits: Windows, since the pass forks. A suite that runs unittest through its
+own script (`TextTestRunner().run`) rather than `unittest.main` has its
+mutants recorded `error`. mutmut's `do_not_mutate_patterns` and
+`mutate_only_covered_lines` are not read.
+
+### Rust (preview)
+
+Every mutant of a pass is built in one switched copy, and each test runs by
+its exact name in a process of its own; doctests run through `cargo test
+--doc`. Under cargo-nextest each test runs through nextest with the project's
+configuration. A mutant the compiler refuses is `unviable`, as cargo-mutants
+reports it; a mutant in code the compiler evaluates (`const`, `static`,
+`const fn`) is built on its own.
+
+Limits: tests built for wasm run against mutants in Node, under WASI and in
+Chrome; tests run in Firefox, Safari or Edge have their mutants recorded
+`error`. Value probes do not cover `&&`, `||`, struct fields and returns that
+are not numbers or booleans: those mutants stay `unknown` where they ran, and
+the strong pass decides them.
+
+### Go (preview)
+
+Each package's test binary is built once (`go test -c`); each mutant runs the
+packages that hold a candidate, whole, as `go test` runs them, with the
+command's own flags (`-tags`, `-race`, `-short` and the rest, read from the
+`go test` the command runs, even behind `make test` or a script). A mutant the
+type checker or `go vet`'s test-time checks refuse is `unviable`; Gremlins
+counts such a mutant killed. A constant declaration's mutant is built on its
+own.
+
+Limits: floating-point operations have no value probe. On Windows, the
+command's flags are read only from a `go test` the command names itself.
+
+### Ruby (preview)
+
+The pass runs once the suite has loaded: one fork of the loaded process per
+mutant, its candidate tests in the suite's order, through RSpec's own
+`run_specs`, Minitest's run, test-unit's mediator and Cucumber's filters, so
+suite hooks run with the mutant on.
+
+Limits: the test-unit and Cucumber drivers have run under test-unit 3.7 and
+Cucumber 12 only. A method holding syntax the port does not convert yet (a
+heredoc, a constant pattern) is skipped, and named. A switched file loaded
+before Supercov's runtime (a gemspec that requires the library under `bundle
+exec`) has its mutants recorded `error`.
+
+## Compared with the established tools
+
+Measured on public projects pinned to a tag, every mutant of each tool joined
+by its id. A soundness violation is a mutant one tool kills and the other
+calls survived; every disagreement was applied by hand and the suite run as
+written. Each tool's settings and every disagreement are in `docs/design/`.
+Support for PIT's mutants, for Java and Kotlin, is planned.
+
+### JavaScript and TypeScript, against StrykerJS 10.1.1
+
+Vitest, against StrykerJS's full kill matrix, whole wall time on 16-CPU Linux
+machines (AWS c8a and m8a.4xlarge), 2026-11-23: StrykerJS's set-up, dry run
+and mutants against Supercov's measured run and strong pass. tRPC does not fit
+one 10-minute job, so both tools ran in 8 jobs, each repeating its dry run or
+measured run:
+
+| Project | StrykerJS | Supercov (measure + strong) | Without what each job repeats | Disagreements |
+| --- | ---: | ---: | --- | --- |
+| hono (5,111 tests) | 258.5 s | 177.1 s (8.6 + 168.5) | the same, one job | 10 |
+| tRPC (1,032 tests) | 2,782.2 s | 2,018.1 s (181.3 + 1,836.8) | 2,125.3 s against 1,752.8 s | 2 |
+
+On defu, scule, cookie-es, pathe and ufo the verdicts agree, mutant for
+mutant. hono's 10 disagreements are kills of StrykerJS's covering subset (a
+test run without the tests it depends on, a fake clock left running) that the
+suite as written does not make; tRPC's 2 are a flaky test and a mutant
+StrykerJS calls Timeout for passing its hit limit while every test passes.
+
+The other runners, against StrykerJS with `disableBail` (every covering test
+against every mutant), one project per 16-CPU machine (AWS c8a and
+m8a.4xlarge), both tools with 15 workers, 2026-11-22. Times in seconds:
+
+| Project | Runner | Mutants joined | Disagreements | StrykerJS | Supercov (measure + strong) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| bytes.js | Mocha | 146 | 0 | 3.0 | 1.1 + 0.4 |
+| negotiator | Mocha | 544 | 0 | 3.4 | 1.2 + 1.0 |
+| pathval | Mocha (ES modules) | 123 | 13 | 1.6 | 0.9 + 1.3 |
+| deep-eql | Mocha (ES modules) | StrykerJS cannot run it | | | 1.1 + 5.9 |
+| ms | Jest | 227 | 0 | 4.6 | 1.8 + 3.2 |
+| cron-parser | Jest | 460 | 1 (error) | 31.8 | 2.4 + 22.4 |
+| classnames | `node:test` | 161 | 0 | 7.8 | 0.6 + 2.8 |
+| camelcase | `node:test` | 234 | 0 | 10.1 | 1.2 + 3.9 |
+| dot-prop | AVA | 590 | 0 | 46.4 | 2.7 + 26.7 |
+| p-map | AVA | 512 | 1 | 354.6 | 25.9 + 118.4 |
+| ini | node-tap | 413 | 0 (28 StrykerJS errors) | 13.6 | 1.6 + 6.5 |
+| remix-auth | `bun:test` | 625 | 0 | 7.3 | 0.4 + 1.9 |
+| mini-throttle | Vitest Browser Mode | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
+
+Playwright, which StrykerJS does not run, on playwright-test-coverage (a Vite
+app served by `npm run dev`, three tests): its 9 mutants run are 7 `timeout`
+and 2 `survived`, and each applied by hand to the source, with `npx playwright
+test` as written, agrees: the 7 fail, waiting out Playwright's 30 seconds, and
+the 2 pass.
+
+pathval's 13 are kills StrykerJS makes because it runs every mutant in one
+process: once a mutant left a polluted global behind, one test failed for
+every mutant after it; each applied by hand survives `npx mocha`. The two
+`error`s are function bodies where no switch could be placed. p-map's one is a
+kill by a test that fails run alone and passes in the whole suite. Where
+StrykerJS has no runner of its own (`node:test`, AVA, Bun) it runs the whole
+command per mutant, and Supercov is 2.5 to 3.5 times faster.
+
+### Python (preview), against mutmut 3.8.1
+
+Against mutmut's full kill matrix (every test against every mutant), 5,438
+mutants, on 16-CPU Linux machines (AWS c8a and m8a.4xlarge), 2026-11-22:
+every mutant the matrix detects,
+Supercov detects. The five Supercov detects alone each fail the suite as
+written when applied by hand: mutmut does not switch on a mutant in a module
+run with `-m`, or in a decorator applied as the test modules load.
+
+Wall time with mutmut at one child per CPU and Supercov's forks one per CPU,
+each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
+2026-11-22, parse's pytest-cov off for both:
+
+| Project | Mutants | mutmut | Supercov measure + strong |
+| --- | ---: | ---: | ---: |
+| python-slugify 9.2.0 | 1,124 | 23.6 s | 1.2 + 17.9 s |
+| cachetools 8.0.2 | 1,660 | 44.8 s | 1.6 + 43.6 s |
+| parse 1.22.4 | 1,306 | 56.5 s | 1.4 + 12.6 s |
+| humanize 4.17.0 | 1,348 | 152.3 s | 4.6 + 19.8 s |
+
+### Rust (preview), against cargo-mutants 27.1.0
+
+On 16-CPU Linux machines (AWS c8a and m8a.4xlarge), one a job, 2026-11-22,
+cargo-mutants with `-j 8` in shards, Supercov's strong pass with its default 8
+workers:
+
+| Crate | Mutants | Agree | Soundness violations | Viability disagreements | cargo-mutants (shards summed) | Supercov strong pass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| strsim-rs 0.11.1 | 363 | 363 | 0 | 0 | 60.3 s | 15.7 s |
+| rust-hex 0.4.3 | 104 | 102 | 0 | 2 | 74.2 s | 22.5 s |
+| semver 1.0.27 | 365 | 362 | 0 | 3 | 43.0 s | 15.8 s |
+
+Four of the five viability disagreements are mutants cargo-mutants' build
+refuses on a deny-by-default lint, which Supercov caps as a measured run does
+(the mutant then builds and is killed); the fifth is in a `const` no test
+reaches, which cargo-mutants' build refuses and Supercov records as no
+coverage. None is a mutant one tool kills and the other calls survived.
+
+### Go (preview), against Gremlins 0.6.0
+
+Five modules at their tags, Gremlins with every test per mutant
+(`--integration`, `-count=1`), each tool on its own machine of the same type.
+Supercov's time is the whole of `supercov mutants -- go test ./...`, its
+measured run and builds included. 16 CPUs: AWS c8a.4xlarge, 2026-11-22. 4
+CPUs: GitHub's `ubuntu-latest`, 2026-11-22, measured before a change that
+shortened Supercov's retries:
+
+| Module | Mutants | Killed (Gremlins / Supercov) | Unviable | 16 CPUs: Gremlins / Supercov | 4 CPUs: Gremlins / Supercov |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| go-humanize 1.0.1 | 332 | 234 / 211 | 84 | 15.5 / 12.3 s | 61.2 / 24.7 s |
+| btree 1.1.3 | 367 | 140 / 134 | 21 | 11.3 / 11.4 s | 41.1 / 29.0 s |
+| golang-lru 2.0.7 | 165 | 120 / 104 | 11 | 31.7 / 17.9 s | 165.3 / 59.3 s |
+| uuid 1.6.0 | 205 | 130 / 145 | 1 | 15.3 / 13.6 s | 90.0 / 43.7 s |
+| cast 1.7.1 | 190 | 129 / 122 | 7 | 9.4 / 8.8 s | 59.4 / 22.9 s |
+
+Gremlins counts mutants that do not compile as killed; Supercov counts them
+unviable. Supercov kills 16 mutants of go-humanize's and 16 of uuid's constant
+declarations, which Gremlins never runs. Gremlins runs one `go test` per
+mutant; Supercov builds each package's test binary once, and its measured run
+is most of its time on 16 CPUs. The remaining differences are a nested module
+and a `//go:build ignore` file Gremlins mutates and `go test ./...` never
+builds, time-dependent kills of clock arithmetic, and a flaky Example; none is
+a soundness violation.
+
+### Ruby (preview), against mutant 0.17.1
+
+On 16-CPU Linux machines (AWS c8a and m8a.4xlarge, Ruby 3.4.13, 16 jobs for
+both tools), 2026-11-22, mutant with every test a candidate for every subject:
+
+| Project | mutant's mutants | Joined | Disagreements | mutant | Supercov measure + strong |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dry-inflector 1.3.1 (RSpec) | 2,061 | 2,061 | 0 | 30.6 s | 1.6 + 17.8 s |
+| dotenv 3.2.0 (RSpec) | 1,345 | 1,345 | 0 | 21.0 s | 1.0 + 18.2 s |
+| erubi 1.13.1 (Minitest) | 1,571 | 1,571 | 0 | 14.2 s | 0.4 + 1.5 s |
+
+mutant has no test-unit or Cucumber integration; on ostruct 0.6.3 (test-unit,
+824 mutants run) and json_test_data 1.2.0 (Cucumber, 1,313) every mutant the
+pass ran was run again by hand with the whole suite, with no disagreement.
+
+## Cost, and turning it off
+
+Mutation testing costs nothing until it is asked for:
+
+- A plain run (`supercov -- <tests>`) places no probe and lists no mutant.
+- The first `runs <id> mutants` lists the run's mutants from its sources and
+  keeps the list beside the run. A file changed since the run is left out
+  until it is measured again.
+- The HTML reports and the run summary show mutants only for a run that
+  listed them.
+
+What costs time:
+
+- **The value probes** (`SUPERCOV_MUTANTS=1`, which `supercov mutants` sets)
+  record the values that decide a mutant's infection, so more mutants are
+  decided without running. Over a measured run without them:
+  - Python: 0.98 to 1.15 times (16-CPU AWS c8a and m8a.4xlarge, 2026-11-22);
+  - Rust: 4 to 11% more, warm builds (16-CPU AWS c8a and m8a.4xlarge,
+    2026-11-22);
+  - Go: within the noise, with up to 0.11 s for the type checker's facts
+    after an edit (16-CPU AWS c8a.4xlarge, 2026-11-22);
+  - Ruby: 1.02 to 1.16 times the whole run (16-CPU AWS c8a and m8a.4xlarge,
+    2026-11-22);
+  - JavaScript and TypeScript: 1.4 to 1.7% on hono and 2.6% on ufo (Vitest),
+    3.6% on cron-parser (Jest) and 4% on negotiator (Mocha), medians of 5
+    (16-CPU AWS c8a and m8a.4xlarge, 2026-11-22).
+- **The strong pass** reruns tests, so it takes about as long as the
+  established tool on the same project: the tables above. Use `--diff` on a
+  pull request to run only the change's mutants, and `--shard` to split a
+  large pass across jobs.
+
+To turn it off, measure without `SUPERCOV_MUTANTS` and do not run `supercov
+mutants` or `mutants test`; a run's coverage is the same either way.
+`npx supercov runs clean` removes stored runs with their mutants and verdicts.
+
+See [CLI reference](cli.md#mutants) for every option.

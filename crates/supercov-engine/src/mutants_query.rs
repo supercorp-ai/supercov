@@ -139,6 +139,10 @@ pub struct StrykerReportMutant {
     /// The mutated code, from the source the report holds.
     pub original: Option<String>,
     pub status: String,
+    /// Supercov's id for it, where the report was matched to Supercov's
+    /// mutants by what each mutant makes of the program (the mutant gem's
+    /// session results) rather than by span and replacement.
+    pub id: Option<String>,
 }
 
 /// Read a StrykerJS `mutation.json`: every mutant of every file, its path
@@ -181,6 +185,7 @@ pub fn parse_stryker_report(
                 original: source.and_then(|source| utf16_slice(source, start, end)),
                 status: field("status")
                     .ok_or_else(|| format!("a mutant of {path} has no status"))?,
+                id: None,
             });
         }
     }
@@ -258,6 +263,26 @@ impl MutantsSummary {
             strong: None,
             status,
         }
+    }
+
+    /// The strong verdicts a pass saved into the run, by mutant id: their
+    /// counts and StrykerJS's score over them (killed and timed out over
+    /// those and the survivors and uncovered).
+    pub fn with_strong(mut self, strong: &BTreeMap<String, Value>) -> Self {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for status in strong
+            .values()
+            .filter_map(|verdict| verdict["status"].as_str())
+        {
+            *counts.entry(status.to_owned()).or_default() += 1;
+        }
+        let of = |status: &str| counts.get(status).copied().unwrap_or(0);
+        let detected = of("killed") + of("timeout");
+        let total = detected + of("survived") + of("no-coverage");
+        self.mutation_score =
+            (total > 0).then(|| (detected as f64 / total as f64 * 10_000.0).round() / 10_000.0);
+        self.strong = (!counts.is_empty()).then_some(counts);
+        self
     }
 }
 
@@ -564,6 +589,16 @@ fn stryker_by_id(
                 .copied()
         });
         let replacement = mutant.replacement.as_deref().unwrap_or_default();
+        if let Some(id) = &mutant.id {
+            let kept = merged
+                .get(id)
+                .and_then(|(_, status)| stryker_rank(status))
+                .is_some_and(|kept| kept >= rank);
+            if !kept {
+                merged.insert(id.clone(), (mutant.mutator.clone(), mutant.status.clone()));
+            }
+            continue;
+        }
         let descriptor = original
             .and_then(|original| {
                 crate::js_mutants::descriptor_from_stryker(&mutant.mutator, original, replacement)
@@ -962,6 +997,7 @@ mod tests {
             replacement: Some("a <= b".into()),
             original: Some("a < b".into()),
             status: status.into(),
+            id: None,
         };
         let merged = stryker_by_id(
             &[
@@ -1210,6 +1246,31 @@ mod tests {
             0,
         );
         assert_eq!((none.weak_score, none.weak_score_reached), (None, None));
+        // A strong pass's verdicts: counted, and scored over the decided.
+        let verdict = |status: &str| serde_json::json!({ "status": status });
+        let strong = BTreeMap::from([
+            ("a".to_owned(), verdict("killed")),
+            ("b".to_owned(), verdict("timeout")),
+            ("c".to_owned(), verdict("survived")),
+            ("d".to_owned(), verdict("error")),
+            ("e".to_owned(), serde_json::json!({})),
+        ]);
+        let scored = none.clone().with_strong(&strong);
+        assert_eq!(scored.mutation_score, Some(0.6667));
+        assert_eq!(
+            scored.strong,
+            Some(BTreeMap::from([
+                ("error".to_owned(), 1),
+                ("killed".to_owned(), 1),
+                ("survived".to_owned(), 1),
+                ("timeout".to_owned(), 1),
+            ]))
+        );
+        let errors = none
+            .clone()
+            .with_strong(&BTreeMap::from([("d".to_owned(), verdict("error"))]));
+        assert_eq!(errors.mutation_score, None);
+        assert_eq!(none.with_strong(&BTreeMap::new()).strong, None);
     }
 
     #[test]
@@ -1308,6 +1369,7 @@ mod tests {
                 replacement: Some("a <= b".into()),
                 original: None,
                 status: "Killed".into(),
+                id: None,
             }]
         );
     }
@@ -1337,9 +1399,22 @@ mod tests {
             replacement: Some("a <= b".into()),
             original: None,
             status: "Survived".into(),
+            id: None,
         };
         let originals =
             HashMap::from([(("src/a.js", (1, 5), (1, 10), "EqualityOperator"), "a < b")]);
+        // A report matched by what each mutant makes names Supercov's id:
+        // the higher rank of its reports is kept.
+        let by_id = |status: &str| StrykerReportMutant {
+            id: Some("lib/a.rb:1:1-1:2:Send:nil".into()),
+            status: status.into(),
+            ..mutant(1)
+        };
+        let ranked = stryker_by_id(
+            &[by_id("Survived"), by_id("Killed"), by_id("Survived")],
+            &originals,
+        );
+        assert_eq!(ranked["lib/a.rb:1:1-1:2:Send:nil"].1, "Killed");
         let merged = stryker_by_id(&[mutant(1), mutant(2)], &originals);
         assert_eq!(
             merged.keys().collect::<Vec<_>>(),
@@ -1359,6 +1434,7 @@ mod tests {
             replacement: Some("a <= b".into()),
             original: Some("a < b".into()),
             status: status.into(),
+            id: None,
         }
     }
 

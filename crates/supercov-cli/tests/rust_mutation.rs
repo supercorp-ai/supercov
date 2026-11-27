@@ -120,7 +120,13 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
     // The doctest gives `double` 2: `*` to `/` fails it, `*` to `+` not.
     let divided = strong_of(&listed, "src/lib.rs:5:11-5:12:BinaryOperator:/");
     assert_eq!(divided["status"], "killed", "{divided}");
-    assert_eq!(divided["killedBy"], "src/lib.rs - double (line 1)");
+    // rustdoc names a doctest by its file's path as the platform writes it.
+    let doctest = if cfg!(windows) {
+        "src\\lib.rs - double (line 1)"
+    } else {
+        "src/lib.rs - double (line 1)"
+    };
+    assert_eq!(divided["killedBy"], doctest);
     assert_eq!(status("src/lib.rs:5:11-5:12:BinaryOperator:+"), "survived");
     // No test gives `is_big` 10.
     assert_eq!(status("src/lib.rs:9:11-9:12:BinaryOperator:>="), "survived");

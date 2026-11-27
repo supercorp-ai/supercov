@@ -2716,7 +2716,13 @@ mod tests {
         );
         let doctest = &found["src/lib.rs:5:7-5:8:BinaryOperator:-"];
         assert_eq!(doctest["status"], "timeout", "{found:?}");
-        assert_eq!(doctest["killedBy"], "src/lib.rs - a (line 1)");
+        // rustdoc names a doctest by its file's path as the platform writes it.
+        let named = if cfg!(windows) {
+            "src\\lib.rs - a (line 1)"
+        } else {
+            "src/lib.rs - a (line 1)"
+        };
+        assert_eq!(doctest["killedBy"], named);
         let untested = &found["src/lib.rs:5:7-5:8:BinaryOperator:*"];
         assert_eq!(untested["reason"], "no test can kill it", "{found:?}");
         let _ = std::fs::remove_dir_all(root);
@@ -2916,6 +2922,7 @@ mod tests {
     }
 
     /// The bytes a pass left in the project's `.supercov`.
+    #[cfg(unix)]
     fn left_behind(root: &Path) -> u64 {
         fn size(path: &Path) -> u64 {
             std::fs::read_dir(path).map_or(0, |entries| {
@@ -3342,7 +3349,11 @@ mod tests {
         // The doctest kills `*` to `+`: 3 + 2 is not 6.
         assert_eq!(
             found["src/lib.rs:5:7-5:8:BinaryOperator:+"]["killedBy"],
-            "src/lib.rs - double (line 1)"
+            if cfg!(windows) {
+                "src\\lib.rs - double (line 1)"
+            } else {
+                "src/lib.rs - double (line 1)"
+            }
         );
         let said = String::from_utf8(said).unwrap();
         assert!(said.contains("to build on their own"), "{said}");

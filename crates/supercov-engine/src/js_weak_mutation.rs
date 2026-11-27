@@ -206,11 +206,13 @@ fn operands(mutant: &CandidateMutant) -> Option<(&str, String, String)> {
     let operator = mutant.operator.as_ref()?;
     let left = mutant.original.get(..operator.at)?;
     let right = mutant.original.get(operator.at + operator.text.len()..)?;
-    Some((
-        operator.text.as_str(),
-        quoted(left.trim()),
-        quoted(right.trim()),
-    ))
+    // A Python comparison mutant's span starts at its operator
+    // (`python_mutants`): the operand before it is not in its text.
+    let left = match left.trim() {
+        "" => "the operand before it".to_owned(),
+        left => quoted(left),
+    };
+    Some((operator.text.as_str(), left, quoted(right.trim())))
 }
 
 fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
@@ -221,13 +223,14 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
         return unreached;
     }
     match mutant.mutator.as_str() {
+        // Python's (`python_mutants`): a new literal, name or keyword.
         "StringLiteral" | "BooleanLiteral" | "ArrayDeclaration" | "ObjectLiteral"
-        | "UpdateOperator" | "Regex" => verdict_of(
+        | "UpdateOperator" | "Regex" | "NumberLiteral" | "Name" | "DictKeyword" => verdict_of(
             INFECTED,
             "reached",
             "the code ran, and this replacement differs wherever it is evaluated",
         ),
-        BLOCK_STATEMENT | "CallExpression" => {
+        BLOCK_STATEMENT | "CallExpression" | "LoopControl" => {
             if mutant.statement.is_some() {
                 verdict_of(
                     PROXY,
@@ -534,23 +537,30 @@ fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reas
             _ if matches!(operator, "==" | "!=") => Some((relation == "eq") == (operator == "==")),
             _ => relational_value(operator, relation),
         };
-        let mut unknown = false;
-        for relation in relations {
-            match (value(operator, relation), value(replacement, relation)) {
-                (Some(original), Some(mutated)) if original != mutated => {
-                    return verdict_of(
-                        INFECTED,
-                        "comparison-differs",
-                        format!(
-                            "the operands were {relation}, where `{replacement}` gives the other value"
-                        ),
-                    );
-                }
-                (Some(_), Some(_)) => {}
-                _ => unknown = true,
-            }
+        // Each evaluation's two values; `None` where the operands could not
+        // be ordered. (A comparison site that ran has an evaluation.)
+        let values = relations
+            .iter()
+            .map(|relation| {
+                (
+                    relation,
+                    value(operator, relation).zip(value(replacement, relation)),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some((relation, _)) = values
+            .iter()
+            .find(|(_, values)| values.is_some_and(|(original, mutated)| original != mutated))
+        {
+            return verdict_of(
+                INFECTED,
+                "comparison-differs",
+                format!(
+                    "the operands were {relation}, where `{replacement}` gives the other value"
+                ),
+            );
         }
-        if unknown {
+        if values.iter().any(|(_, values)| values.is_none()) {
             return verdict_of(
                 Status::Unknown,
                 "non-primitive-operands",
@@ -563,9 +573,11 @@ fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reas
             format!("`{operator}` and `{replacement}` gave the same value at every evaluation"),
         );
     }
-    let Some(site) = &mutant.probe else {
-        return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
-    };
+    // Sent here with a comparison site, handled above, or a probe.
+    let site = mutant
+        .probe
+        .as_ref()
+        .expect("a Rust mutant read through its values has a probe or a comparison site");
     if mutant.mutator == RUST_FN_VALUE {
         // The body replaced also skips what it does: a return value that
         // matches proves nothing, one that differs infects.
@@ -670,6 +682,40 @@ fn reach(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Status, Rea
 
 const BOUNDARIES: &[(&str, &str)] = &[("<", "<="), ("<=", "<"), (">", ">="), (">=", ">")];
 
+/// A Python probe site: one the runtime stops probing once a test's mutant
+/// infected it, so that a later test records nothing there.
+fn python_site(site: &str) -> bool {
+    let kind = site.rsplit_once('#').map_or("compare", |(_, kind)| kind);
+    let python = site
+        .split(':')
+        .next()
+        .is_some_and(|file| file.ends_with(".py"));
+    python && PYTHON_PROBES.contains(&kind)
+}
+
+/// The kinds of Python's value probes (`python_mutants::ProbeTarget`); a
+/// comparison's site has no kind in its name.
+const PYTHON_PROBES: &[&str] = &[
+    "compare", "arith", "none", "sign", "method", "iffalse", "iftrue",
+];
+
+/// A comparison's probe that recorded nothing: it never ran, or, for
+/// Python, another test's mutant already decided it.
+fn unrecorded_comparison(site: &str) -> (Status, Reason) {
+    if python_site(site) {
+        return verdict_of(
+            Status::Unknown,
+            "value-not-recorded",
+            "no relation recorded: never evaluated, or no longer probed once another test's mutant infected it",
+        );
+    }
+    verdict_of(
+        Status::NotReached,
+        "comparison-not-evaluated",
+        "the comparison never ran",
+    )
+}
+
 fn relational(operator: &str) -> bool {
     matches!(operator, "<" | "<=" | ">" | ">=")
 }
@@ -702,11 +748,7 @@ fn equality_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status
             );
         };
         let Some(relations) = records.comparisons(site) else {
-            return verdict_of(
-                Status::NotReached,
-                "comparison-not-evaluated",
-                "the comparison never ran",
-            );
+            return unrecorded_comparison(site);
         };
         if relations.contains("eq") {
             return verdict_of(INFECTED, "operands-equal", "the operands were equal");
@@ -731,11 +773,7 @@ fn equality_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status
     // one whose operands are not ordered (NaN), which is false either way.
     if let Some(site) = &mutant.compare {
         let Some(outcomes) = records.comparisons(site) else {
-            return verdict_of(
-                Status::NotReached,
-                "comparison-not-evaluated",
-                "the comparison never ran",
-            );
+            return unrecorded_comparison(site);
         };
         if !relational(operator) {
             return verdict_of(INFECTED, "comparison-evaluated", "the comparison ran");
@@ -1186,6 +1224,17 @@ fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
         return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
     };
     let Some(outcomes) = records.comparisons(site) else {
+        // A Python value the mutant replaces with `None` records nothing
+        // where its own evaluation raised, which the mutant skips; and a
+        // Python site some test's mutant infected is not probed again in
+        // its process: its silence is no sign the mutant changes nothing.
+        if python_site(site) {
+            return verdict_of(
+                Status::Unknown,
+                "value-not-recorded",
+                "no value recorded: never evaluated, its evaluation raised (which the mutant skips), or no longer probed once another test's mutant infected it",
+            );
+        }
         // A method probe records nothing for a receiver that is not a
         // built-in, so its silence is no sign the call never ran.
         if mutant.mutator == "MethodExpression" {
@@ -1205,7 +1254,7 @@ fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
         return verdict_of(
             INFECTED,
             "replacement-differs",
-            "StrykerJS's replacement gave another value",
+            "the mutant's replacement gave another value",
         );
     }
     if outcomes.iter().all(|outcome| outcome == "same") {
@@ -2111,6 +2160,179 @@ mod tests {
         expect(&probed, &ran(), NOT_REACHED, "not-evaluated");
     }
 
+    /// cargo-mutants' mutants, read from reach, a guard's outcomes and the
+    /// value probes `rust_value_probes` places.
+    #[test]
+    fn rust_mutants_are_decided_by_their_probes_and_otherwise_by_reach() {
+        let with =
+            |mutant: CandidateMutant, probe: Option<&str>, compare: Option<&str>| CandidateMutant {
+                probe: probe.map(str::to_owned),
+                compare: compare.map(str::to_owned),
+                ..mutant
+            };
+        // Without a probe: a function emptied ran, a value it returns is
+        // unknown, an arm selected, a guard's outcomes, `==` negated.
+        expect(
+            &mutant("FnValue", "()", "{ f() }"),
+            &ran(),
+            PROXY,
+            "function-ran",
+        );
+        expect(
+            &mutant("FnValue", "0", "{ 1 }"),
+            &ran(),
+            UNKNOWN,
+            "no-return-probe",
+        );
+        expect(
+            &mutant("MatchArm", "removed", "A => 1"),
+            &ran(),
+            PROXY,
+            "arm-selected",
+        );
+        let guard = mutant("MatchArmGuard", "true", "x > 1");
+        expect(&guard, &ran(), UNKNOWN, "no-decision");
+        let guard = CandidateMutant {
+            decision: decided("d", None, None),
+            ..guard
+        };
+        expect(&guard, &ran(), NOT_REACHED, "guard-not-evaluated");
+        expect(
+            &guard,
+            &with_vectors(&[(&[Some(false)], false)]),
+            INFECTED,
+            "guard-differs",
+        );
+        expect(
+            &guard,
+            &with_vectors(&[(&[Some(true)], true)]),
+            NOT_INFECTED,
+            "guard-always-same",
+        );
+        let negated = operated("BinaryOperator", "!=", "a == b", "==");
+        expect(&negated, &ran(), INFECTED, "comparison-evaluated");
+        expect(
+            &operated("BinaryOperator", "-", "a + b", "+"),
+            &ran(),
+            UNKNOWN,
+            "no-operand-probe",
+        );
+        expect(
+            &mutant("StructField", "removed", "a: 1"),
+            &ran(),
+            UNKNOWN,
+            "no-field-probe",
+        );
+
+        // A comparison site: each evaluation's relation, the original's
+        // value against the replacement's.
+        let less = with(
+            operated("BinaryOperator", "<=", "a < b", "<"),
+            None,
+            Some("c"),
+        );
+        expect(&less, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        expect(
+            &less,
+            &with_outcomes("c", &["lt", "eq"]),
+            INFECTED,
+            "comparison-differs",
+        );
+        expect(
+            &less,
+            &with_outcomes("c", &["lt", "gt"]),
+            NOT_INFECTED,
+            "comparison-same",
+        );
+        expect(
+            &less,
+            &with_outcomes("c", &["lt", "other"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        // NaN: `==` false, `!=` true.
+        let equal = with(
+            operated("BinaryOperator", "!=", "a == b", "=="),
+            None,
+            Some("c"),
+        );
+        expect(
+            &equal,
+            &with_outcomes("c", &["unordered"]),
+            INFECTED,
+            "comparison-differs",
+        );
+        expect(
+            &equal,
+            &with_outcomes("c", &["eq"]),
+            INFECTED,
+            "comparison-differs",
+        );
+
+        // A negation removed, read through its operand's probe.
+        let negative = with(mutant("UnaryOperator", "removed", "-x"), Some("p"), None);
+        expect(
+            &negative,
+            &with_outcomes("p", &["nonzero"]),
+            INFECTED,
+            "replacement-differs",
+        );
+        expect(
+            &negative,
+            &with_outcomes("p", &["zero"]),
+            NOT_INFECTED,
+            "replacement-same",
+        );
+        expect(
+            &negative,
+            &with_outcomes("p", &["unknown"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        expect(&negative, &ran(), NOT_REACHED, "not-evaluated");
+
+        // A function's value replaced: a return of another class infects;
+        // one of the same, an unknown one, or a replacement no class holds
+        // proves nothing.
+        for (replacement, returned) in [("true", "0"), ("0", "1"), ("-1.0", "1"), ("1.0", "-1")] {
+            let value = with(mutant("FnValue", replacement, "{ g() }"), Some("p"), None);
+            expect(
+                &value,
+                &with_outcomes("p", &[returned]),
+                INFECTED,
+                "returned-other",
+            );
+            expect(
+                &value,
+                &with_outcomes("p", &[replacement_class(replacement), "unknown"]),
+                UNKNOWN,
+                "returned-same",
+            );
+        }
+        let other = with(
+            mutant("FnValue", "Default::default()", "{ g() }"),
+            Some("p"),
+            None,
+        );
+        expect(
+            &other,
+            &with_outcomes("p", &["1"]),
+            UNKNOWN,
+            "returned-same",
+        );
+        let unrecorded = with(mutant("FnValue", "true", "{ g() }"), Some("p"), None);
+        expect(&unrecorded, &ran(), UNKNOWN, "returned-same");
+    }
+
+    /// The class a function's replacement value is recorded under.
+    fn replacement_class(replacement: &str) -> &'static str {
+        match replacement {
+            "true" | "1.0" => "1",
+            "0" => "0",
+            _ => "-1",
+        }
+    }
+
     #[test]
     fn removed_blocks_and_calls_are_infected_by_proxy() {
         let call = mutant("CallExpression", "empty", "f();");
@@ -2163,6 +2385,13 @@ mod tests {
             "non-primitive-operands",
         );
         expect(&boundary, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        // A Python comparison is no longer probed once a test's mutant
+        // infected it: its silence is unknown.
+        let python_boundary = CandidateMutant {
+            compare: Some("m.py:2:12".into()),
+            ..boundary.clone()
+        };
+        expect(&python_boundary, &ran(), UNKNOWN, "value-not-recorded");
         let unprobed = CandidateMutant {
             compare: None,
             ..boundary
@@ -2200,6 +2429,11 @@ mod tests {
             "non-primitive-operands",
         );
         expect(&negated, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        let python_negated = CandidateMutant {
+            compare: Some("m.py:2:12".into()),
+            ..negated.clone()
+        };
+        expect(&python_negated, &ran(), UNKNOWN, "value-not-recorded");
         // An equality's value recorded where it is a value.
         let equality = CandidateMutant {
             compare: Some("c".into()),
@@ -2717,6 +2951,31 @@ mod tests {
             ..mutant("MethodExpression", "every", "xs.some(f)")
         };
         expect(&method, &ran(), UNKNOWN, "no-method-record");
+        // A Python value made `None` records nothing where its evaluation
+        // raised, which the mutant skips.
+        let none = CandidateMutant {
+            probe: Some("m.py:1:5-1:9#none".into()),
+            ..mutant("AssignmentValue", "None", "x = f()")
+        };
+        expect(&none, &ran(), UNKNOWN, "value-not-recorded");
+        // A Python arithmetic site may go unprobed once decided; a
+        // JavaScript one that recorded nothing never ran.
+        let python_arith = CandidateMutant {
+            probe: Some("m.py:1:5-1:10#arith".into()),
+            ..mutant("ArithmeticOperator", "-", "a + b")
+        };
+        expect(&python_arith, &ran(), UNKNOWN, "value-not-recorded");
+        let javascript_arith = CandidateMutant {
+            probe: Some("m.js:1:5-1:10#arith".into()),
+            ..mutant("ArithmeticOperator", "-", "a + b")
+        };
+        expect(&javascript_arith, &ran(), NOT_REACHED, "not-evaluated");
+        expect(
+            &none,
+            &with_outcomes("m.py:1:5-1:9#none", &["same"]),
+            NOT_INFECTED,
+            "replacement-same",
+        );
         let (status, reason) = verdict(&method, &with_outcomes("p", &["same"]));
         assert_eq!(status, NOT_INFECTED);
         assert_eq!(

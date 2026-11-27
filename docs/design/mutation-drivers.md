@@ -171,7 +171,12 @@ project root, and two files.
   into `tests`, cheapest first, each with a reason; `wholeFiles` are test
   files that must run whole for the mutant (its code ran while the file's
   modules loaded). A mutant with `decided` set is not run (the CLI records
-  it), and the CLI hands a driver only undecided mutants of its language.
+  it), and the CLI hands a driver only undecided mutants of its language. A
+  mutant only work outside any test ran (a run with no test, a test file's
+  modules loaded with none of its tests) is decided `no-coverage`
+  (`no-test-ran-it`); one only failing tests ran, `survived`
+  (`no-passing-candidate`). A run that recorded no test is refused before
+  any driver runs.
 
 **What the driver does with each mutant**, as `strong-mutation.md` describes
 for Vitest:
@@ -210,7 +215,13 @@ shows it under `passes`). A mutant with no line when the driver returns is
 run again in a further pass (at most six), and after that recorded `error`.
 
 The driver returns the command's exit code. Progress lines, the gate and the
-saved verdicts are the CLI's, the same for every driver.
+saved verdicts are the CLI's, the same for every driver: the CLI saves each
+verdict into the run within a second of the driver writing it, so a pass a
+signal ends (exit 129, 130 or 143) keeps what it decided and the next pass
+runs the rest. A driver stops every process it started when it gets
+`SIGINT`, `SIGTERM` or `SIGHUP`. When the pass ends, its directory keeps only
+`*.log` files (`SUPERCOV_STRONG_KEEP=1` keeps all of it), and the next pass
+removes the directories of passes whose process has ended.
 
 ## 5. Value probes, for infection
 
@@ -348,3 +359,15 @@ A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
 time limit. Not yet: wasm in Vitest Browser Mode's pages, which no run
 measures yet, so none of its mutants are planned; and a mutant a switch
 cannot hold is not built on its own.
+
+## Python
+
+| Contract | Python |
+| --- | --- |
+| enumerator | `python_mutants.rs` (mutmut 3.8.1's operators), parity goldens in `tests/fixtures/mutmut-parity` |
+| schemata | `python_strong.rs` writes each switched function's mutants' edits; `runtime/python/supercov_strong.py` switches the function to mutmut's copy of it |
+| runtime switch | `supercov_strong.py` (`strong_slot`, `activate`), `SUPERCOV_ACTIVE_MUTANT` from a process's start |
+| driver | `supercov_strong.py`: pytest's `pytest_runtestloop`, unittest's `TestProgram.runTests`; a fork per mutant after collection |
+| value probes | `supercov_instrument.py` (`_MutantProbes`) and `supercov_runtime.py`, from the plan's `mutantProbes` |
+
+See `python-mutants.md`.

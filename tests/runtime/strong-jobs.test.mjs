@@ -3,15 +3,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { delimiter } from "node:path";
-import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
 // A strong pass's driver over a runner whose tests do what `rules` says
 // (fixtures/strong-jobs-runner.mjs), each mutant's verdict by id.
-async function pass({ tests, mutants, listed, rules, files }) {
+async function pass({ tests, mutants, listed, rules, files, workers = 4 }) {
     const root = mkdtempSync(join(tmpdir(), "supercov-strong-jobs-"));
     try {
         mkdirSync(join(root, ".supercov/frontend-evidence"), { recursive: true });
@@ -23,7 +24,7 @@ async function pass({ tests, mutants, listed, rules, files }) {
             plan: { tests, mutants },
             resultsPath,
             root,
-            workers: 4,
+            workers,
             environment: { ...process.env, FAKE_SUITE: join(root, "suite.json") },
             graceMs: 1_500,
             baselineGraceMs: 1_500,
@@ -130,6 +131,74 @@ test("each mutant runs against its candidates, file by file, and the first failu
     assert.ok(summary.confirmations >= 2, JSON.stringify(summary));
     assert.ok(summary.stopped >= 2, JSON.stringify(summary));
 });
+
+// A mutant's next file is the one that killed most for its cost so far: once
+// the costlier file kills the first mutants, the later ones run it first and
+// never need the cheap one that kills nothing.
+test("a mutant runs the file likeliest to kill it first, as the pass learns", async () => {
+    const tests = [test_("a1", "t/a.test.js", 1), test_("b1", "t/b.test.js", 50)];
+    const mutants = Array.from({ length: 20 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }, { test: 1, reason: "infected" }] }));
+    const listed = mutants.map(({ id }) => ({ id }));
+    const rules = Object.fromEntries(listed.map((_, index) => [`src/a.js#${index}`, { b1: "fail" }]));
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/a.test.js": ["a1"], "t/b.test.js": ["b1"] }, workers: 1 });
+    assert.ok(Object.values(verdicts).every((verdict) => verdict.status === "killed"), JSON.stringify(verdicts));
+    // Two baselines; the first eight mutants (under way at once) run both
+    // files, the twelve after them the killing one alone.
+    assert.equal(summary.jobs, 2 + 8 * 2 + 12, JSON.stringify(summary));
+});
+
+// A job of a mutant's later batch waits behind every first file's.
+test("jobs wait their turn by priority, first come first served among equals", async () => {
+    const run = slots(1);
+    const order = [];
+    let release;
+    const first = run(() => new Promise((done) => { release = done; }));
+    const queued = [["b", 2], ["c", 0], ["d", 1], ["e", 0]].map(([name, priority]) => run(async () => order.push(name), priority));
+    release();
+    await Promise.all([first, ...queued]);
+    assert.deepEqual(order, ["c", "e", "d", "b"]);
+});
+
+// Ctrl-C reaches the driver, not its jobs, which run in process groups of
+// their own: they stop with it. And a finished job leaves nothing on disk.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+    test(`every job stops when the pass gets ${signal}`, async (t) => {
+        const root = mkdtempSync(join(tmpdir(), "supercov-strong-jobs-"));
+        t.after(() => rmSync(root, { recursive: true, force: true }));
+        mkdirSync(join(root, ".supercov/frontend-evidence"), { recursive: true });
+        writeFileSync(join(root, ".supercov/frontend-evidence/mutants.json"), JSON.stringify({ files: { "src/a.js": [{ id: "hang" }] } }));
+        writeFileSync(join(root, "suite.json"), JSON.stringify({ files: { "t/a.test.js": ["a1"] }, rules: { "src/a.js#0": { a1: "hang" } } }));
+        writeFileSync(join(root, "plan.json"), JSON.stringify({ tests: [test_("a1", "t/a.test.js")], mutants: [{ id: "hang", file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }] }));
+        const pids = join(root, "pids");
+        const driver = spawn(process.execPath, [resolve(import.meta.dirname, "../../runtime/javascript/strongJobs.mjs"), "--", process.execPath, runner], {
+            cwd: root,
+            env: { ...process.env, FAKE_SUITE: join(root, "suite.json"), FAKE_PIDS: pids, SUPERCOV_STRONG_PLAN: join(root, "plan.json"), SUPERCOV_STRONG_RESULTS: join(root, "results.jsonl") },
+            stdio: "ignore",
+        });
+        const ended = new Promise((done) => driver.once("exit", (code) => done(code)));
+        const started = () => (existsSync(pids) ? readFileSync(pids, "utf8").split("\n").filter(Boolean).map(Number) : []);
+        // The baseline's process, then the mutant's, which never ends.
+        while (started().length < 2)
+            await new Promise((done) => setTimeout(done, 50));
+        await new Promise((done) => setTimeout(done, 200));
+        // The baseline's job is over: its directory is gone.
+        assert.deepEqual(readdirSync(join(root, "results.jsonl.jobs")).filter((name) => /^\d+$/.test(name)), ["2"]);
+        driver.kill(signal);
+        assert.equal(await ended, signal === "SIGINT" ? 130 : 143);
+        const alive = (pid) => {
+            try {
+                process.kill(pid, 0);
+                return true;
+            }
+            catch {
+                return false;
+            }
+        };
+        for (let wait = 0; wait < 40 && started().some(alive); wait += 1)
+            await new Promise((done) => setTimeout(done, 50));
+        assert.deepEqual(started().filter(alive), []);
+    });
+}
 
 test("a test's outcome is its last attempt's that says one", () => {
     const directory = mkdtempSync(join(tmpdir(), "supercov-outcomes-"));

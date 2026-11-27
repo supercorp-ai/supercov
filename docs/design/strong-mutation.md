@@ -107,7 +107,13 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   once a whole copy failed, it made tRPC's pass a third slower (a copy, the
   baseline and the copy again, one after another). Those are the only
   repeats, and none is per copy.
-- **One run.** It lists more worker slots than the pass can use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
+- **Few runs.** A run lists worker slots: each test file's own, then up
+  to 2,000 more (and at most 1 GB of test files: Vitest reads every slot's
+  file as the run starts, and the 50,000 slots of all of hono's mutants in
+  one pass ran its process out of memory within seconds). A pass that needs
+  more runs again with the same slots, for as long as runs make progress;
+  between runs the workers wait for the last copies (with 1,000 slots this
+  cost tRPC's shards 9%). A slot's stand-in answers Vitest's "start" and waits, at Vitest's
   "run", for work that is ready: a baseline a mutant now needs, a
   confirmation, or the next file of a mutant whose copy before ended with
   every test passing. The worker is then told to run that work's test file
@@ -159,9 +165,21 @@ phase: 51 and 755 ms), with the
 same disagreements with StrykerJS's full kill matrix and no extra kill. A
 tRPC mutant ran 10.8 files (killed 6.3, survived 37.2), 2.69 baselines (each
 shard is a pass with its own) and 0.31 confirmations; a hono mutant 2.5, 0.25
-and 0.33. Where the rest of the gap is: tRPC's baselines, repeated in every
-shard (StrykerJS's dry run is outside its figure), and a copy's start in a
-fresh worker, which StrykerJS pays too.
+and 0.33.
+
+Those figures compare Supercov's pass, baselines included, on 6 and 32
+shards with StrykerJS's mutant phase, its dry run left out. Whole wall time
+on the same machines (`benchmarks/mutation/README.md`, "End to end against
+StrykerJS"), with the runs bounded as above:
+
+| project | jobs | StrykerJS: set-up, dry run, mutants | Supercov: measured run, strong pass |
+| --- | --- | --- | --- |
+| hono | 1 each | 258.5 s | 177.1 s (pass: 39 ms a mutant) |
+| tRPC | 8 each | 2,125.3 s without the 7 repeated dry runs (2,782.2 with) | 1,752.8 s without the 7 repeated measured runs and baselines (2,018.1 with; pass: 745 ms a mutant) |
+
+Sharding cost Supercov more than its repeated baselines: hono's pass takes
+168.5 s in one job and 298.7 s over 6 (28 s of it repeated baselines), as
+each job starts and ends with workers idle.
 
 ## Order and early exit
 
@@ -269,6 +287,17 @@ verdicts; the other corpus projects took the same time either way, and four
 spawners sharing the workers were no faster than one. Vitest 1-3 fork
 through tinypool and keep doing so; `SUPERCOV_STRONG_DIRECT_FORK=1` forks
 from Vitest's process. The pass summary counts `spawnedWorkers`.
+
+A tinypool worker that loses its channel (one the pass stops once a failed
+test decided its copy, or one a mutant disconnects or ends) still gets
+tinypool's relayed writes for a moment; tinypool 1.1 (Vitest 3.2) let the
+failed write ("Channel closed", EPIPE) become an unhandled rejection, and
+Vitest ended the run at that. On destr 2.0.5 installed with npm (Vitest 3.2.7)
+most passes ended that way, 80 of its 141 mutants left errors after every
+retry; with the lockfile's Vitest 3.1.1 (tinypool 1.0) none did. The process's
+exit already tells tinypool the worker is gone, as for any worker that dies,
+so the failed write's error is dropped: 40 passes since, each with the same
+111 kills and 30 survivors.
 
 A copy's worker spends its first few hundred milliseconds before it can
 claim anything: Node starting, Vitest's worker loading, and in a DOM
@@ -702,6 +731,14 @@ Candidates under another runner (a Vitest test of the same run) are not run
 by this pass: a mutant no Playwright test kills is then an `error`, never a
 `survived` it has not earned.
 
+Validated on playwright-test-coverage (`910da570`, a Vite app served by
+`npm run dev`, three tests in `e2e/`, whose config names no `testDir`, where
+Supercov's own config from `.supercov/` used to find "No tests"): its 9
+mutants run are 7 `timeout` and 2 `survived`, and each applied by hand to
+the source with `npx playwright test` as written agrees: the 7 fail (their
+tests wait out Playwright's 30 s), the 2 pass. The pass takes 400 s, nearly
+all of it those tests' own waits and their retry with twice the budget.
+
 ## Runners that start a process per test file (jobs)
 
 Jest, node:test, Mocha, AVA, node-tap, bun:test and Vitest's Browser Mode have
@@ -788,7 +825,10 @@ starting the runner for each job:
 - `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
   (`runCLI` with `runTestsByPath`), in the fresh module registry and
   environment Jest gives every test file; the job's mutant is switched on
-  before the file's modules load.
+  before the file's modules load. It reads the project's configuration once
+  and hands it to Jest as JSON, as StrykerJS's runner does (a configuration
+  that holds a function is read from its file each job), with Supercov's
+  reporter alone and the console silent.
 - `strongMochaHost.mjs` keeps Mocha and what `--require` loads, takes the
   project's CommonJS modules out of `require.cache` before each job and
   loads the job's file with `require`, so it and the code it tests load
@@ -811,6 +851,29 @@ another.
 
 The pass's summary line (`driver: "jobs"`) counts its jobs, baselines,
 confirmations, overturned kills, stopped jobs and their time.
+
+A mutant runs its first file alone, as most killed mutants die there, then
+the rest in batches of 4, 16, ... side by side: a survivor needs every file,
+and one after another they were the pass's longest wait (a luxon mutant of
+module-level code has 58 test files). Within a batch a kill decides the
+mutant, then a timeout, then a file that does not finish without it. Each
+pick is the file likeliest to kill it for its cost: each file's kills over
+the mutants it ran so far in the pass, over its tests' time and a job's start
+(300 ms), as the Vitest driver orders its copies. So the pass learns as it
+goes, eight times as many mutants as workers are under way at once (enough to
+keep every worker busy while some wait on a file's baseline), and a mutant
+picks its first file when it starts. A later batch's jobs wait behind every
+first file's job (the job queue is ordered by batch, then by arrival): a
+survivor's 37 files at once held luxon's first kills back for two and a half
+minutes. Jest and Mocha record each test's
+duration for this order and for each job's limit; before, every test cost
+the same second.
+
+The driver is a process of the command's group; each job and resident runner
+is a process group of its own, which a terminal's Ctrl-C does not reach. The
+driver stops them all when it gets `SIGINT`, `SIGTERM` or `SIGHUP`, and when
+it exits. A job's directory (its evidence, 24 MB a job on nanoid) is removed
+as soon as its outcome is read.
 
 ### Validation against StrykerJS
 
@@ -840,6 +903,9 @@ both list, Regex mutants included.
 | mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
 | pathval | Mocha (ES modules) | mocha | 123 | 13 | 1.6 | 0.9 + 1.3 |
 | deep-eql | Mocha (ES modules) | mocha | (StrykerJS cannot run it) | | | 1.1 + 5.9 |
+| uuid 9.0.1 | Jest 28 | jest | 682 | 1 (error) | 12.6 | 1.8 + 30.8 |
+| yup 1.4.0 | Jest 27 | jest | (StrykerJS cannot run it) | | | 2.8 + 124 |
+| luxon 3.4.4, `src/duration.js` | Jest 29 | jest | (StrykerJS cannot run it) | | | 3.8 + 344 |
 
 No mutant StrykerJS detected (killed or timed out) is `survived` or
 `no-coverage` in Supercov, and none it let live is detected by Supercov but
@@ -866,6 +932,14 @@ the ones explained here, each applied by hand:
   hand (`index.js:84` without `^`, `index.js:174` `===` to `!==`), each
   survives `npx mocha`. StrykerJS's Mocha runner cannot run deep-eql at all:
   it needs Mocha's `lib/cli/run-helpers`, which Mocha 12 no longer has.
+- uuid `v35.js:19` and the like, a function body emptied: `no-placeable-ancestor`,
+  as for cron-parser. yup: StrykerJS's Jest runner reads no Jest 27
+  configuration from `package.json`, and given it, still finds a file "must
+  contain at least one test". luxon: StrykerJS 10.1.1's Babel 8 cannot load
+  luxon's Babel 7 configuration ("Requires Babel ^7.0.0-0"). (uuid needs its
+  Babel environment named to StrykerJS's transform, as StrykerJS's Jest runner
+  sets `BABEL_ENV=test`; luxon's seven test files whose locale-week and
+  calendar tests fail on Node 24's ICU are left out of both.)
 - Verdicts StrykerJS and Supercov both detect differ in kind 52 times
   (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
   wrong is whichever the runner sees first.
@@ -876,6 +950,21 @@ assertions at a tap or node:test file's top level belonged to no test (ini:
 calls something was decided `survived` from its value alone (dot-prop
 `index.js:167`, `processSegment` in an `if`); and Mocha's module setup named
 no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
+
+**Jest suites after release QA.** QA's uuid pass read 114 errors and luxon's
+estimated hours. The errors were mutants a capped pass never reached, each
+recorded `error` when the pass ended; an interrupted pass now leaves them
+without a verdict for the next. The time had three causes, each fixed: no Jest
+test recorded its duration, so every file cost the same and a mutant's
+cheapest file was a guess; a mutant's files ran one after another, so a
+survivor of module-level code waited on 58 files in turn; and the resident
+Jest loaded the project's configuration and reporters for every job. uuid's
+pass went from 72 s to 31 s and yup's from 250 s to 124 s on the same
+machines; luxon's `src/duration.js` (615 mutants) takes 344 s, most of it
+module-level survivors' files. uuid is still 2.4 times StrykerJS's 12.6 s: its
+tests take 26 ms in all, and a job (a Jest `runCLI` of one test file) costs
+650 ms against StrykerJS's 290 ms a mutant, which runs a mutant's covering
+tests of every file in one `runCLI`.
 
 **Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
 runs the whole command per mutant, and Supercov's jobs of one file and its
@@ -888,10 +977,54 @@ Jest or Mocha: ms took 21.8 s, cron-parser 37.3 s, negotiator 5.9 s. Under
 tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
 13.6 s against 8.1 s.
 
-## Not yet
+## After an edit: verdicts no change could move
 
-- Reuse of verdicts across commits: kept out until a shadow run shows it
-  never disagrees with a fresh run.
+`supercov mutants` measures the checkout again once it changed, and that
+run has no verdicts. It keeps those of the latest earlier run of the same
+command, dependencies and configuration (and mutant set), mutant by mutant,
+where nothing the verdict depends on changed; the rest run. `tests affected`
+(`source_manifest::affected_tests`) says, from each test's recorded
+execution, which tests a change since that run could have reached: a test
+file's edit reaches its tests, a source edit the tests that ran the changed
+code (a file no parser reads, any test that ran it), a helper the tests load
+the tests whose files load it, and a test that ran with others and recorded
+nothing of its own is undetermined wherever the change is inside what the run
+covered. A mutant keeps its verdict (killed, survived or timeout; an error
+runs again) where
+
+- its file is as it was, byte for byte (a comment appended counts as a
+  change: a mutant's id holds its lines);
+- every candidate test it has now is one the earlier run had, unaffected, and
+  so is every test of their test files (they share the file's state), and so
+  is every test of the files it runs whole.
+
+A new test that could kill it is a candidate the earlier run did not have, so
+it runs. `runs <id> mutants test` keeps nothing of another run: it tests the
+run it names.
+
+A shadow comparison on uuid 9.0.1 (Jest 28, 567 mutants run of 682 listed),
+one edit after another, each measured and passed by `supercov mutants`: a
+comment appended to `src/v4.js` kept 536 verdicts and ran 31 mutants; a
+declaration added to `src/v35.js`, which most tests load, kept 156 and ran
+411; one added to `test/unit/v1.test.js` kept 399 and ran 168. The last run's
+verdicts were then made again from nothing (all 567 run): every one of the
+682 is the same, status for status.
+
+## Saving, interrupting and cleaning up
+
+The CLI saves each verdict a driver writes into the run within a second of it
+(`strong-mutation.json`, written whole and renamed into place), so a pass
+that is interrupted (Ctrl-C, a hang-up, `SIGTERM`: exit 130, 129, 143) or
+killed keeps what it decided, and the next pass runs only the rest. An
+interrupted pass leaves its undecided mutants without a verdict, where it
+used to record each as an `error` ("the command ended before this mutant's
+verdict"): QA's capped uuid pass read 114 such errors. Each pass's directory
+under `.supercov/strong` names the process that works there; when the pass
+ends, success or failure, only its logs stay, and the next pass removes every
+directory whose process has ended. `SUPERCOV_STRONG_KEEP=1` keeps a pass's
+directory whole, every job's evidence included, for whoever studies it.
+
+## Not yet
 - Rust compiled to wasm that Vitest Browser Mode's pages load: not measured,
   so not planned. Under Node and in Playwright's pages its mutants run
   (`mutation-drivers.md`).

@@ -6,6 +6,7 @@
 //! unparseable so the run can say exactly what its denominator covers.
 
 use crate::fault_fs as fs;
+use crate::mutant_list::MutantsFile;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -18,7 +19,6 @@ use crate::{
     integrity::ExplicitIntegrityInputs,
     ruby_instrumenter::{
         RUBY_PROBE_PLAN_VERSION, RUBY_PROBE_RECEIVER, RubyFilePlan, RubyProbePlan,
-        build_ruby_obligations,
     },
     source_discovery::{SourceScope, SourceScopeEntry, SourceScopeMode, SourceScopeStatus},
 };
@@ -70,13 +70,19 @@ pub struct PreparedRubyProject {
     pub manifest: CoverageManifest,
     pub plan: RubyProbePlan,
     pub unparseable: Vec<(String, String)>,
+    /// The measured files' mutants, where the run lists them as it measures
+    /// (`SUPERCOV_MUTANTS=1`), with infection probes placed.
+    pub mutants: Option<MutantListing>,
 }
 
 /// Asked only of a `.rb` file.
 fn is_test_path(relative: &str) -> Option<&'static str> {
     let (directories, file_name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    // A directory under `lib` is the library's own (`lib/rack/test/` is
+    // rack-test's code, loaded as `rack/test/...`), whatever its name.
     if directories
         .split('/')
+        .take_while(|component| *component != "lib")
         .any(|component| TEST_DIRECTORIES.contains(&component))
     {
         return Some("inside a test directory");
@@ -220,11 +226,21 @@ fn prepare(
     let mut next_probe = 0u64;
     let mut limitation_ids = BTreeSet::new();
     let mut unparseable = Vec::new();
+    let listing = std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| value == "1");
+    let mut listed_files = Vec::new();
     for relative in &files.sources {
         let path = root.join(relative);
         let source = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        match build_ruby_obligations(relative, &source, &mut next_probe) {
+        match crate::ruby_instrumenter::build_ruby_obligations_with(
+            relative,
+            &source,
+            &mut next_probe,
+            listing,
+        ) {
             Ok(obligations) => {
+                if listing {
+                    listed_files.push((relative.clone(), source.clone(), obligations.clone()));
+                }
                 manifest.points.extend(obligations.manifest.points);
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.branches.extend(obligations.manifest.branches);
@@ -326,6 +342,7 @@ fn prepare(
         manifest,
         files,
         unparseable,
+        mutants: listing.then(|| MutantListing::start(listed_files)),
     }))
 }
 
@@ -346,6 +363,63 @@ pub fn ruby_integrity_inputs(files: &RubyFiles, command: &[String]) -> ExplicitI
         dependency_files: files.dependency_files.clone(),
         configuration_files: files.configuration_files.clone(),
         execution_configuration,
+    }
+}
+
+/// The measured files' mutants, listed on a thread of their own while the
+/// tests run: enumerating them is the measured run's largest cost before
+/// the tests start (erubi: 80 ms of a 470 ms run).
+#[derive(Debug, Clone)]
+pub struct MutantListing {
+    pending: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<MutantsFile>>>>,
+    listed: std::sync::Arc<std::sync::OnceLock<MutantsFile>>,
+}
+
+impl MutantListing {
+    fn start(
+        files: Vec<(
+            String,
+            Vec<u8>,
+            crate::ruby_instrumenter::RubyFileObligations,
+        )>,
+    ) -> Self {
+        let thread = std::thread::spawn(move || {
+            let mut mutants = BTreeMap::new();
+            for (relative, source, obligations) in files {
+                let listed = crate::ruby_mutants::candidates(&relative, &source, &obligations);
+                if !listed.is_empty() {
+                    mutants.insert(relative, listed);
+                }
+            }
+            MutantsFile::listed(
+                crate::ruby_mutants::RUBY,
+                crate::ruby_mutants::MUTANT_SET,
+                mutants,
+            )
+        });
+        Self {
+            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(thread))),
+            listed: std::sync::Arc::default(),
+        }
+    }
+
+    /// The listing, once its thread has ended.
+    pub fn get(&self) -> &MutantsFile {
+        self.listed.get_or_init(|| {
+            let thread = self
+                .pending
+                .lock()
+                .expect("no listing panics while holding its thread")
+                .take()
+                .expect("a listing is joined once");
+            thread.join().expect("listing mutants does not panic")
+        })
+    }
+}
+
+impl PartialEq for MutantListing {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
     }
 }
 
@@ -590,19 +664,48 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A listing is its files' mutants once its thread ends: none for a
+    /// file without methods, and two listings of the same files are equal.
+    #[test]
+    fn a_mutant_listing_is_its_files_mutants() {
+        let source = b"A = 1\n".to_vec();
+        let mut next = 0;
+        let obligations =
+            crate::ruby_instrumenter::build_ruby_obligations_with("a.rb", &source, &mut next, true)
+                .unwrap();
+        let listing =
+            || MutantListing::start(vec![("a.rb".into(), source.clone(), obligations.clone())]);
+        let (first, second) = (listing(), listing());
+        assert!(first == second);
+        assert!(first.get().files.is_empty());
+        assert!(MutantListing::start(Vec::new()).get().files.is_empty());
+    }
+
     #[test]
     fn tests_helpers_and_gemspecs_are_known_by_their_names() {
         let root = fixture("names");
         write(&root, "lib/a.rb", "A = 1\n");
         write(&root, "lib/a_test.rb", "A = 1\n");
+        // rack-test's layout: its library lives under `lib/rack/test/`.
+        write(&root, "lib/rack/test.rb", "R = 1\n");
+        write(&root, "lib/rack/test/utils.rb", "U = 1\n");
+        write(&root, "test/lib/helper.rb", "H = 1\n");
         write(&root, "test_b.rb", "B = 1\n");
         write(&root, "spec_helper.rb", "require 'rspec'\n");
         write(&root, "thing.gemspec", "Gem::Specification.new\n");
         let files = discover_ruby_files(&root).unwrap();
-        assert_eq!(files.sources, ["lib/a.rb"]);
+        assert_eq!(
+            files.sources,
+            ["lib/a.rb", "lib/rack/test.rb", "lib/rack/test/utils.rb"]
+        );
         assert_eq!(
             files.tests,
-            ["lib/a_test.rb", "spec_helper.rb", "test_b.rb"]
+            [
+                "lib/a_test.rb",
+                "spec_helper.rb",
+                "test/lib/helper.rb",
+                "test_b.rb"
+            ]
         );
         assert_eq!(files.dependency_files, [PathBuf::from("thing.gemspec")]);
         fs::remove_dir_all(&root).unwrap();

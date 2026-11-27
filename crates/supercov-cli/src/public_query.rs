@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each JavaScript mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
@@ -84,12 +84,14 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     Some(format!("Usage: {usage}\n"))
 }
 
-const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
+const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown|stryker|pit [--output <file>]]
 
-Weak mutation: for each mutant StrykerJS would make, whether a test ran the
-mutated code (reach) and whether its value differed there (infection), read
-from the run without running anything. A JavaScript or TypeScript run lists
-its mutants from its sources the first time they are asked for.
+Weak mutation: for each mutant the language's established tool would make
+(StrykerJS for JavaScript and TypeScript; in preview, mutmut for Python,
+cargo-mutants for Rust, Gremlins for Go and mutant for Ruby), whether a test
+ran the mutated code (reach) and whether its value differed there
+(infection), read from the run without running anything. A run lists its
+mutants from its sources the first time they are asked for.
 
 Without a file, a table of files by how many mutants no test infects, then
 by how many no test reaches; with a file, its mutants by line; with
@@ -97,7 +99,7 @@ file:line, that line's mutants and why.
 
 Options:
   --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent, or strong verdicts: survived, killed, timeout, no-coverage, error, unviable
-  --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
+  --mutator <name>          only this mutator's mutants, by its tool's name (EqualityOperator, ConditionalExpression, ...)
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
   --stryker-root <dir>      the directory the reports' file paths are relative to (default: the project root)
@@ -113,7 +115,11 @@ Options:
   --json                    the coverage.mutants reply, a page at a time
   --format jsonl            every mutant asked about, one JSON object per line, as --json lists each
   --format markdown         the not-infected and not-reached mutants (or --status's) as a table for a pull
-                            request's comment, the first 25 and the command for the rest
+                            request's comment, the first 25 and the command for the rest; once
+                            mutants test ran, the survivors with their verdicts and the mutation score
+  --format stryker          StrykerJS's mutation.json (the mutation testing report schema), for
+                            mutation-testing-elements, the Stryker Dashboard and CI integrations
+  --format pit              PIT's mutations.xml, for PIT's report aggregator and Sonar's PIT plugin
   --output <file>           with --format, write them there instead of to standard output
 
 Exit codes:
@@ -920,10 +926,24 @@ fn read_stryker_reports(
         if reports.reports.contains(&path) {
             return Ok(());
         }
-        let text = supercov_engine::fault_fs::read_to_string(&path)
+        let bytes = supercov_engine::fault_fs::read(&path)
             .map_err(|error| format!("Could not read {path}: {error}"))?;
-        let mutants = supercov_engine::mutants_query::parse_stryker_report(&text, path_of)
-            .map_err(|reason| format!("Could not read {path} as a StrykerJS report: {reason}"))?;
+        let mutants = if supercov_engine::ruby_mutants::is_mutant_session(&bytes) {
+            // The mutant gem's session results, matched by the methods its
+            // mutations make.
+            supercov_engine::ruby_mutants::parse_mutant_session(&bytes, path_of, |file| {
+                std::fs::read(project.join(file)).ok()
+            })
+            .map_err(|reason| {
+                format!("Could not read {path} as mutant's session results: {reason}")
+            })?
+        } else {
+            let text = String::from_utf8(bytes)
+                .map_err(|error| format!("Could not read {path}: {error}"))?;
+            supercov_engine::mutants_query::parse_stryker_report(&text, path_of).map_err(
+                |reason| format!("Could not read {path} as a StrykerJS report: {reason}"),
+            )?
+        };
         reports.reports.push(path);
         reports.mutants.extend(mutants);
         Ok::<(), String>(())
@@ -946,6 +966,7 @@ fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
             } else if path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                || path.to_string_lossy().ends_with(".json.gz")
             {
                 found.push(path.to_string_lossy().replace('\\', "/"));
             }
@@ -1078,6 +1099,44 @@ pub fn parse_public_query(
 
 #[cfg(test)]
 mod tests {
+    /// `--stryker` reads the mutant gem's session results beside StrykerJS
+    /// reports, and says which session it could not read.
+    #[test]
+    fn mutant_sessions_are_read_beside_stryker_reports() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-mutant-sessions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = serde_json::json!({
+            "subject_results": [{
+                "source_path": "lib/none.rb",
+                "identification": "A#b:lib/none.rb:1",
+                "coverage_results": [{
+                    "mutation_result": {
+                        "mutation_type": "evil",
+                        "mutation_source": "def b\n  nil\nend",
+                        "mutation_identification": "evil:A#b:x",
+                    },
+                    "criteria_result": { "test_result": true },
+                }],
+            }],
+        });
+        let good = directory.join("session.json");
+        std::fs::write(&good, session.to_string()).unwrap();
+        let read = read_stryker_reports(&[good.display().to_string()], None).unwrap();
+        assert_eq!(read.reports, [good.display().to_string()]);
+        let bad = directory.join("broken.json.gz");
+        std::fs::write(&bad, [0x1f, 0x8b, 0, 0]).unwrap();
+        let refused = read_stryker_reports(&[bad.display().to_string()], None).unwrap_err();
+        assert!(refused.contains("as mutant's session results"), "{refused}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     /// Each query's help names its own usage; an unknown one, the list.
     #[test]
     fn each_query_s_help_is_its_own_usage() {

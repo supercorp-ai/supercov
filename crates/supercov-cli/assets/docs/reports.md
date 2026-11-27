@@ -131,6 +131,66 @@ source information, and opens from any assertion that credits a file.
 The address bar follows the reader: tab, timeline entry, file and line each
 get a history entry, so the browser's back button retraces the path.
 
+## Mutation testing
+
+For a run whose mutants are listed (JavaScript and TypeScript, and in
+preview Python, Rust, Go and Ruby; see [Mutation testing](mutation.md)), the
+Overview's first card gains a **Mutants** figure: the mutation score once
+`mutants test` gave verdicts, the weak mutation score before, and how many
+mutants the tests leave alive. Below it, a **Mutation testing** card holds the
+rest:
+
+- **Weak mutation**: its score, the share of mutants a test infects, with how
+  many mutants it is over and how many unknown or equivalent ones it leaves
+  out, and the
+  mutants by weak status (infected, not infected with any at a clock or random
+  boundary, not reached, unknown, equivalent), with the score over the
+  mutants a test reaches.
+- **Strong mutation**: the mutation score, killed and timed-out over those and
+  the survivors and uncovered, with how many mutants it is over (`of 12 of 40
+  mutants`): a score of a few mutants is not the run's. Where no mutant got a
+  verdict the score counts, the card says so and what they got instead (`No
+  mutation score: none of the 28 mutants was killed, timed out, survived or
+  left uncovered (28 errors)`). Every verdict is counted: killed, timed out,
+  survived, no coverage, equivalent, unviable (does not compile), error, and
+  not run for a language no driver runs yet (`not run: no driver for cobol`).
+  Mutants with no verdict, after a pass narrowed by `--diff`, `--file` or
+  `--shard` or one that stopped early, are counted too, and each reason a
+  mutant has none is said once in plain words with how many share it. Before
+  any pass the card says so and names the command that runs one.
+- **By language**, when the run's mutants are of several: each language's
+  mutants, weak score, mutation score and survivors.
+- **Left alive**: the mutants a strong pass saw survive or no test cover, and,
+  without a verdict, those weak mutation shows no test can kill (not infected
+  or not reached), as the pass itself decides them. They are grouped by file,
+  the files with the most first, five files of three mutants each, with
+  **and N more** opening a searchable list of all of them. Each opens its line.
+
+The **Files** list's **Mutants** column shows each file's score (the
+mutation score where verdicts exist, the weak score otherwise) beside a mark
+that warns when mutants are left alive; it sorts lowest score first, more
+survivors first on a tie. In a file's source, a line with a mutant left alive
+is marked with an orange ✱ and a line whose mutants are all killed or
+settled with a green one. Its evidence lists each of the line's mutants: what
+it changes, its weak status and reason, its strong verdict and why, the test
+that killed it (a button to that test where the run recorded it), how many
+tests ran against it and for how long, and its id. A survivor is set apart
+with an orange rule. Below the source, **Mutants left alive** lists the file's
+survivors and its counts and scores.
+
+```sh
+npx supercov report --diff origin/main
+```
+
+`--diff <base>` narrows the mutation testing to a change, as `runs <id>
+mutants --diff` does: only the mutants on lines it added or changed since its
+merge base with `<base>`, and the card says so, naming the base, the merge
+base and how many changed lines hold a mutant. Coverage is not narrowed. A
+change with no mutant on its lines says that.
+
+A run that listed no mutants shows nothing of them. A plain run lists its
+mutants the first time `mutants`, `mutants test` or `supercov mutants` asks.
+
 ## Choose runs and output
 
 Up to ten recent runs are included by default. The selected run is compared with
@@ -165,6 +225,31 @@ beside older coverage.
 Individual source files over 1 MB and total source beyond 16 MB are omitted.
 The report names its source mode and any omitted paths rather than silently
 substituting content.
+
+## Other formats
+
+The HTML report and `runs report --format html` are the files that show coverage and
+mutants together. For other tools:
+
+- `runs <id> mutants --format stryker` writes StrykerJS's `mutation.json`,
+  which mutation-testing-elements, the Stryker Dashboard and CI integrations
+  read, and `--format pit` PIT's `mutations.xml`, for PIT's report aggregator
+  and Sonar's PIT plugin.
+- `runs <id> mutants --format markdown` writes a pull request's comment: the
+  scores, the verdicts, and the survivors with `file:line:column`, the change
+  and why.
+- `runs report --format lcov|cobertura|istanbul|istanbul-summary|clover|jacoco|sonar`
+  write coverage only: those formats have no place for a mutant.
+- `runs report --format html` writes a static page, without the interactive
+  report's application, that shows the run's mutation testing as this report
+  does: the Mutation testing card with both levels, the reasons for no
+  verdict, each language and the survivors by file (each linking to its
+  line, the rest folded under "and N more"); a Mutants column with each
+  file's score and survivors, sortable; and each line's mutants in the source
+  view with both levels and the test that killed one. `--diff <base>` narrows
+  its mutants to a change and the card says so.
+
+See the [CLI reference](cli.md#mutation-reports-other-tools-read) for each.
 
 ## Privacy and sharing
 

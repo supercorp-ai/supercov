@@ -9,6 +9,7 @@ const mappings = [
   ["docs/getting-started.md", "crates/supercov-cli/assets/docs/getting-started.md"],
   ["docs/agent-loop.md", "crates/supercov-cli/assets/docs/agent-loop.md"],
   ["docs/assertions.md", "crates/supercov-cli/assets/docs/assertions.md"],
+  ["docs/mutation.md", "crates/supercov-cli/assets/docs/mutation.md"],
   ["docs/quality.md", "crates/supercov-cli/assets/docs/quality.md"],
   ["docs/security.md", "crates/supercov-cli/assets/docs/security.md"],
   ["docs/troubleshooting.md", "crates/supercov-cli/assets/docs/troubleshooting.md"],
@@ -99,6 +100,8 @@ const mappings = [
     "supercov_unittest.py",
     "supercov_probes.py",
     "supercov_instrument.py",
+    "supercov_strong.py",
+    "supercov_strong_pytest.py",
   ]),
   // Nested rather than flat: a Go package is a directory and a JVM class is
   // its package path, so the layout is part of what makes these compile.
@@ -129,6 +132,7 @@ const mappings = [
     "supercov_minitest.rb",
     "supercov_rspec.rb",
     "supercov_runtime.rb",
+    "supercov_strong.rb",
     "supercov_testunit.rb",
   ]),
 ];

@@ -194,10 +194,10 @@ try {
     const unpublished = spawnSync(
       binary,
       ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests', '--ignore=tests/test_patterns.py'],
-      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1211' }, encoding: 'utf8' },
+      { cwd: project, env: { ...environment, SUPERCOV_TEST_FAULT: 'fs.rename#lifecycle.rs:1216' }, encoding: 'utf8' },
     );
     assert.notEqual(unpublished.status, 0, unpublished.stderr);
-    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1211/u, unpublished.stderr);
+    assert.match(unpublished.stderr, /test fault at fs \(lifecycle\.rs:1216/u, unpublished.stderr);
     assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
   }
   // A command that fails before any test runs keeps its own status:
@@ -763,8 +763,66 @@ try {
     }
   }
 
+  // Strong mutation under pytest (`docs/design/python-mutants.md`): the run
+  // records the mutants' values, and the pass forks each mutant's tests
+  // after collection, even where the command asks pytest-xdist for workers.
+  if (process.platform !== 'win32') {
+    const strong = resolve(temporary, 'strong');
+    mkdirSync(resolve(strong, 'shop'), { recursive: true });
+    mkdirSync(resolve(strong, 'tests'), { recursive: true });
+    writeFileSync(resolve(strong, 'shop/__init__.py'), '');
+    writeFileSync(
+      resolve(strong, 'shop/cart.py'),
+      'def shipping(total, express=False):\n    if total >= 50:\n        return 0\n    fee = 5\n    if express:\n        fee += 10\n    return fee\n\n\ndef label(name):\n    return name.upper() + "!"\n\n\ndef countdown(n):\n    while n > 0:\n        n -= 1\n    return n\n',
+    );
+    writeFileSync(
+      resolve(strong, 'tests/test_cart.py'),
+      'import pytest\nfrom shop.cart import shipping, label, countdown\n\n\n@pytest.fixture\ndef big():\n    return 80\n\n\ndef test_free(big):\n    assert shipping(big) == 0\n\n\n@pytest.mark.parametrize("total, fee", [(10, 5), (20, 5)])\ndef test_paid(total, fee):\n    assert shipping(total) == fee\n\n\ndef test_label():\n    assert label("a").startswith("A")\n\n\ndef test_countdown():\n    assert countdown(3) == 0\n',
+    );
+    writeFileSync(resolve(strong, 'pytest.ini'), '[pytest]\npythonpath = .\n');
+    run('git', ['init', '-q', '.'], { cwd: strong });
+    const strongEnvironment = environmentFor(strong, venv);
+    successfulSupercov(
+      strong,
+      ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-n', '2'],
+      { ...strongEnvironment, SUPERCOV_MUTANTS: '1' },
+    );
+    // `mutants test --json` answers with its reply alone, no envelope.
+    const pass = successfulSupercov(strong, ['runs', 'latest', 'mutants', 'test', '--json'], strongEnvironment);
+    const tested = JSON.parse(pass.stdout);
+    // pytest's report of each fork's tests stays out of what Supercov says.
+    assert.doesNotMatch(pass.stderr, /\[\s*\d+%\]|passed in|failed in/u, pass.stderr);
+    assert.equal(tested.summary.error, 0, JSON.stringify(tested));
+    assert.equal(tested.passes[0].runner, 'pytest', JSON.stringify(tested));
+    const listed = query(strong, ['runs', 'latest', 'mutants', '--limit', '0'], strongEnvironment);
+    const verdicts = Object.fromEntries(listed.mutants.map((mutant) => [mutant.id, mutant.strong?.status]));
+    for (const [id, status] of [
+      ['shop/cart.py:1:29-1:34:BooleanLiteral:True', 'killed'],
+      ['shop/cart.py:2:14-2:19:EqualityOperator:>', 'survived'],
+      ['shop/cart.py:6:9-6:18:AugmentedAssignment:=', 'no-coverage'],
+      ['shop/cart.py:11:12-11:24:MethodExpression:lower', 'killed'],
+      ['shop/cart.py:11:12-11:30:ArithmeticOperator:-', 'killed'],
+      ['shop/cart.py:11:27-11:30:StringLiteral:XX', 'survived'],
+      ['shop/cart.py:16:9-16:15:AssignmentOperator:+=', 'timeout'],
+    ]) {
+      assert.equal(verdicts[id], status, `${id}: ${JSON.stringify(verdicts)}`);
+    }
+    // `countdown`'s `n - 1` (`n -= 1`'s value, made `None`) and `fee`'s
+    // `None` site differ at their first evaluation in a test, and the
+    // guarded code skips them afterwards: the mutants read as infected.
+    const weak = Object.fromEntries(listed.mutants.map((mutant) => [mutant.id, mutant.status]));
+    for (const id of ['shop/cart.py:4:5-4:12:AssignmentValue:None', 'shop/cart.py:11:12-11:30:ArithmeticOperator:-']) {
+      assert.equal(weak[id], 'infected', `${id}: ${JSON.stringify(weak)}`);
+    }
+    // A plain run's modules bind none of the mutant probes' names.
+    rmSync(resolve(strong, '.supercov/cache'), { recursive: true, force: true });
+    successfulSupercov(strong, ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider'], strongEnvironment);
+    const probedNames = run(venvPython, ['-c', 'import sys, marshal, glob\nnames = set()\npaths = glob.glob(".supercov/cache/python/*.pyc")\nassert paths\nfor path in paths:\n    code = marshal.loads(open(path, "rb").read())[2]\n    names.update(n for n in code.co_names if n.startswith("_scv_m") or n.startswith("_scv_dn"))\nprint(sorted(names))'], { cwd: strong });
+    assert.equal(probedNames.stdout.trim(), '[]', probedNames.stdout);
+  }
+
   console.log(
-    `[python] ${basename(python)} (3.${version.minor}) passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children, oracle differentials, cache safety, renumbered rewrites and declared limitations`,
+    `[python] ${basename(python)} (3.${version.minor}) passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children, oracle differentials, cache safety, renumbered rewrites, declared limitations and strong mutation`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

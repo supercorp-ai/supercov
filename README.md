@@ -157,6 +157,28 @@ Answers are reused across runs whenever the question is the same, so after a
 commit only what changed is asked again. Every language Supercov measures. See
 [assertion coverage](docs/assertions.md).
 
+## Check that the tests catch bugs
+
+Mutation testing makes small changes to the code, such as `<` to `<=` or a
+call removed, and checks that a test fails on each. A change every test passes
+with is a check no test makes, even on a covered line:
+
+```sh
+npx supercov mutants -- npm test                   # every mutant, run against the tests that reach it
+npx supercov mutants --diff origin/main            # only the change's mutants, for a pull request
+npx supercov runs latest mutants --diff origin/main --fail-on not-infected,not-reached
+```
+
+Each language uses its established tool's mutants, and its verdicts were
+compared with that tool's on public projects: StrykerJS for JavaScript and
+TypeScript, under Vitest, Playwright, Jest, `node:test`, Mocha, AVA,
+node-tap, `bun:test` and Vitest Browser Mode; and in preview, mutmut for
+Python, cargo-mutants for Rust, Gremlins for Go and mutant for Ruby. The run already knows which tests reach
+each mutant and which never change its value, so a mutant no test reaches or
+infects is decided without running anything, and the rest run only against
+the tests that can kill them. A plain run costs nothing more. See
+[Mutation testing](docs/mutation.md).
+
 ## Give Supercov a job
 
 Paste one of these prompts into Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, or any coding agent that can run terminal commands.
@@ -183,11 +205,12 @@ gemini extensions install https://github.com/supercorp-ai/supercov
 
 For Cursor, GitHub Copilot and other agents that read skills: `npx skills add supercorp-ai/supercov`.
 
-The Claude Code plugin and the Gemini CLI extension also add four commands you can type:
+The Claude Code plugin and the Gemini CLI extension also add five commands you can type:
 
 | Command | What it does |
 | --- | --- |
 | `/supercov:coverage [test command]` | Writes one test for code no test reaches, and reports coverage before and after |
+| `/supercov:mutants [--diff base]` | Runs the tests against mutants and writes a test for one that survives |
 | `/supercov:security [patch]` | Scans the repository, or a change, for security vulnerabilities |
 | `/supercov:quality [patch]` | Ranks files by code smells, or checks what a change introduced |
 | `/supercov:review [--base ref]` | Checks a branch or uncommitted change for security and quality problems |
@@ -300,21 +323,24 @@ JavaScript, TypeScript, Python, Ruby, Rust, Go, Java and Kotlin suites are verif
 
 Supercov uses exact per-test attribution where an adapter is available. For other supported runners, it reports aggregate structural coverage instead of guessing which test covered a path.
 
-| Runner | Coverage attribution |
-| --- | --- |
-| Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
-| Vitest | Exact per test, with setup execution kept separate |
-| Jest | Exact per test, including parameterized tests |
-| `node:test` | Exact per test |
-| Mocha | Exact per test and retry, `--parallel` included |
-| AVA | Exact per test, concurrent tests included |
-| node-tap 15 and newer | Exact per subtest |
-| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity |
-| rustdoc doctests | Exact per doctest |
-| cargo-nextest | Exact test, attempt, retry, and binary identity |
-| RSpec | Exact example and before/example/after phase identity |
-| Minitest and test-unit | Exact test and setup/test/teardown identity |
-| Cucumber | Exact scenario and hook-phase identity |
+| Runner | Coverage attribution | Mutation testing |
+| --- | --- | --- |
+| Playwright | Exact per test, worker, retry, outcome, action, and assertion phase | StrykerJS's mutants |
+| Vitest | Exact per test, with setup execution kept separate | StrykerJS's mutants |
+| Jest | Exact per test, including parameterized tests | StrykerJS's mutants |
+| `node:test` | Exact per test | StrykerJS's mutants |
+| Mocha | Exact per test and retry, `--parallel` included | StrykerJS's mutants |
+| AVA | Exact per test, concurrent tests included | StrykerJS's mutants |
+| node-tap 15 and newer | Exact per subtest | StrykerJS's mutants |
+| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Preview: cargo-mutants' mutants |
+| rustdoc doctests | Exact per doctest | Preview: cargo-mutants' mutants |
+| cargo-nextest | Exact test, attempt, retry, and binary identity | Preview: cargo-mutants' mutants |
+| pytest and `python -m unittest` | Exact test and setup/call/teardown phase identity | Preview: mutmut's mutants |
+| `go test` | Exact per test | Preview: Gremlins' mutants |
+| JUnit 5, JUnit 4, Kotest, Spock and TestNG | Exact per test | Not yet |
+| RSpec | Exact example and before/example/after phase identity | Preview: mutant's mutants |
+| Minitest and test-unit | Exact test and setup/test/teardown identity | Preview: mutant's mutants |
+| Cucumber | Exact scenario and hook-phase identity | Preview: mutant's mutants |
 
 Supercov works with Vite, Next, Turbopack, Webpack, esbuild, SWC, and projects with no build step. One command can collect evidence from several supported runners into a single run.
 
@@ -387,6 +413,7 @@ npx supercov runs clean             # remove all runs and the build cache
 - [Understanding quality](https://supercov.com/docs/quality)
 - [Agent workflow](https://supercov.com/docs/agent-loop)
 - [Understanding assertions](docs/assertions.md)
+- [Mutation testing](docs/mutation.md)
 - [Troubleshooting](https://supercov.com/docs/troubleshooting)
 - [CLI reference](https://supercov.com/docs/cli)
 - [Supported languages and test suites](https://supercov.com/docs/supported-suites)

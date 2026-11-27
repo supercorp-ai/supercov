@@ -8,7 +8,7 @@
 // Supercov's mutants (jsonl) and every log. A disagreement is a mutant one tool
 // detects (killed or timeout) and the other does not.
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, resolve } from "node:path";
 import { joinMutants, originalCode, readSupercovMutants } from "../supercov-join.mjs";
@@ -91,15 +91,9 @@ try {
 catch {
     // The log has it.
 }
-const strongDirectory = join(directory, ".supercov/strong");
-const driverSummaries = existsSync(strongDirectory) ? readdirSync(strongDirectory).flatMap((name) => {
-    try {
-        return readFileSync(join(strongDirectory, name, "results.jsonl"), "utf8").split("\n").filter((line) => line.includes('"summary":true')).map((line) => JSON.parse(line));
-    }
-    catch {
-        return [];
-    }
-}) : [];
+// What each driver said of itself: the pass's answer carries it (its
+// directory keeps only logs once the pass ends).
+const driverSummaries = pass.passes ?? [];
 
 // The join.
 const summary = {
