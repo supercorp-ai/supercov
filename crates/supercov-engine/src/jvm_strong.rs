@@ -119,31 +119,27 @@ pub fn probe_edits(
             if other.range != probe.span {
                 continue;
             }
-            let linked = match probe.kind {
+            match probe.kind {
                 ProbeKind::Compare => {
-                    matches!(
+                    if matches!(
                         other.mutator,
                         crate::jvm_mutants::Mutator::ConditionalsBoundary
                             | crate::jvm_mutants::Mutator::NegateConditionals
-                    ) && {
+                    ) {
                         link.compare = Some(site.clone());
-                        true
                     }
                 }
                 ProbeKind::Operation => {
-                    std::ptr::eq(other, mutant) && {
+                    if std::ptr::eq(other, mutant) {
                         link.probe = Some(site.clone());
-                        true
                     }
                 }
                 ProbeKind::Return => {
-                    is_return(other.mutator) && {
+                    if is_return(other.mutator) {
                         link.probe = Some(site.clone());
-                        true
                     }
                 }
-            };
-            let _ = linked;
+            }
         }
         sites.insert(
             slot,
@@ -185,9 +181,9 @@ pub fn index_of(root: &Path, files: &[String]) -> ProjectIndex {
 /// One file's mutants, linked to its statement and function points.
 pub fn file_mutants(file: &str, source: &str, index: &ProjectIndex) -> Result<FileMutants, String> {
     let language = language_of(file).ok_or_else(|| format!("{file} is not Java or Kotlin"))?;
-    let tree = crate::jvm_instrumenter::parse(source, language).map_err(|e| e.to_string())?;
     let mut next_probe = 0;
     let mut next_decision = 0;
+    // Its obligations fail only where the source does not parse.
     let obligations = crate::jvm_instrumenter::build_jvm_obligations(
         file,
         source,
@@ -196,6 +192,8 @@ pub fn file_mutants(file: &str, source: &str, index: &ProjectIndex) -> Result<Fi
         &mut next_decision,
     )
     .map_err(|e| e.to_string())?;
+    let tree = crate::jvm_instrumenter::parse(source, language)
+        .expect("a source whose obligations were built parses");
     let mutants = crate::jvm_mutants::enumerate(source, &tree, language, index);
     let points = obligations
         .manifest
@@ -214,17 +212,16 @@ pub fn file_mutants(file: &str, source: &str, index: &ProjectIndex) -> Result<Fi
     })
 }
 
-/// The innermost point of `kind` whose span holds `range`.
+/// The innermost point of `kind` whose span holds `range`, with its span.
 fn innermost(
     spans: &[(String, PointKind, usize, usize)],
     kind: PointKind,
     range: (usize, usize),
-) -> Option<String> {
+) -> Option<&(String, PointKind, usize, usize)> {
     spans
         .iter()
         .filter(|(_, point, start, end)| *point == kind && *start <= range.0 && range.1 <= *end)
         .min_by_key(|(_, _, start, end)| end - start)
-        .map(|(id, ..)| id.clone())
 }
 
 pub(crate) fn candidate(
@@ -235,11 +232,10 @@ pub(crate) fn candidate(
     // lambda was made, not when it ran: such a mutant's reach is unknown,
     // and every test is its candidate, unless its probe says otherwise.
     let own = |kind: PointKind| {
-        let point = innermost(spans, kind, mutant.range)?;
-        let span = spans.iter().find(|(id, ..)| *id == point)?;
+        let (point, _, start, end) = innermost(spans, kind, mutant.range)?;
         match mutant.deferred {
-            Some(lambda) if span.2 <= lambda.0 && lambda.1 <= span.3 => None,
-            _ => Some(point),
+            Some(lambda) if *start <= lambda.0 && lambda.1 <= *end => None,
+            _ => Some(point.clone()),
         }
     };
     CandidateMutant {
@@ -489,12 +485,13 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
             .find(|file| *file == &mutant.file || file.ends_with(&format!("/{}", mutant.file)))
             .cloned()
             .unwrap_or_else(|| mutant.file.clone());
-        for key in pit_keys(mutant) {
+        // Its own key and the names it holds: one at least.
+        pit_keys(mutant).into_iter().for_each(|key| {
             by_group
                 .entry((file.clone(), mutant.mutator.clone(), key))
                 .or_default()
                 .push(at);
-        }
+        });
     }
     // A group's mutants in code order, ours in source order, so that where
     // several share the line PIT reports (kotlinc puts a condition's jumps
@@ -544,22 +541,21 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
     let mut crowded = vec![false; pit.len()];
     let mut crowded_lines = std::collections::BTreeSet::<(String, String, String, u32)>::new();
     for ((file, mutator, key), group) in &by_group {
+        // A group holds one mutant at least, and so a line.
         let mut theirs_on_line = BTreeMap::<u32, Vec<usize>>::new();
-        for at in group {
+        group.iter().for_each(|at| {
             theirs_on_line.entry(pit[*at].line).or_default().push(*at);
-        }
-        for (line, theirs) in theirs_on_line {
+        });
+        theirs_on_line.into_iter().for_each(|(line, theirs)| {
             let ours = ours_on_line
                 .get(&(file.clone(), mutator.as_str(), key.clone(), line))
                 .copied()
                 .unwrap_or(0);
             if ours > 0 && theirs.len() > ours {
                 crowded_lines.insert((file.clone(), mutator.clone(), key.clone(), line));
-                for at in theirs {
-                    crowded[at] = true;
-                }
+                theirs.iter().for_each(|at| crowded[*at] = true);
             }
-        }
+        });
     }
     // Three passes, each taking what the one before left: the exact line,
     // then any line of the mutant's statement, then (for a return) any line
@@ -712,8 +708,7 @@ fn inlines_a_lambda(line: &str) -> bool {
             let after = line[at + name.len()..].trim_start();
             !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
                 && (after.starts_with('{')
-                    || after.starts_with('(') && after.contains("::")
-                    || after.starts_with('(') && line.contains('{'))
+                    || after.starts_with('(') && (after.contains("::") || line.contains('{')))
         })
     })
 }
@@ -762,10 +757,10 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
     let code = line.trim_start();
     let conditional = mutant.mutator.contains("Conditionals");
     if kotlin
-        && ((line.contains("->") && !line.contains('{'))
+        && ((conditional && (code.contains("when (") || code.ends_with("-> {")))
             || code.starts_with("is ")
             || code.starts_with("!is ")
-            || (conditional && (code.contains("when (") || code.ends_with("-> {"))))
+            || (line.contains("->") && !line.contains('{')))
     {
         return "a `when` branch's comparison with its subject";
     }
@@ -1427,5 +1422,273 @@ mod tests {
         // `?.`, `?:` and `!!`'s null checks, and a standard library function
         // inlined at a line past the file's end.
         assert_eq!(only_pit.len(), 23, "{only_pit:#?}");
+    }
+
+    // Coverage of PIT's report, the join with it and its own categories.
+
+    const TWICE: &str = "class A {\n  int f(int n) {\n    return n * 2;\n  }\n}\n";
+
+    fn twice_mutants() -> Vec<JvmMutant> {
+        let index = ProjectIndex::of([("src/A.java", TWICE)]);
+        file_mutants("src/A.java", TWICE, &index).unwrap().mutants
+    }
+
+    fn pit_mutant(file: &str, line: u32, mutator: &str) -> PitMutant {
+        PitMutant {
+            file: file.into(),
+            line,
+            mutator: mutator.into(),
+            key: String::new(),
+            class: String::new(),
+            method: "f".into(),
+            description: String::new(),
+            status: "KILLED".into(),
+            killing_tests: Vec::new(),
+            index: 0,
+        }
+    }
+
+    /// A file with no mutants places no probe; a probe with no edits takes
+    /// its slot and places nothing, and links no listed mutant where there
+    /// is none.
+    #[test]
+    fn a_probe_with_nothing_to_place_takes_its_slot_alone() {
+        let mut next_probe = 4;
+        let (edits, sites) = probe_edits("src/A.java", TWICE, &[], &mut [], &mut next_probe);
+        assert!(edits.is_empty() && sites.is_empty());
+        assert_eq!(next_probe, 4);
+        let mut probed = twice_mutants()
+            .into_iter()
+            .find(|mutant| mutant.probe.is_some())
+            .expect("a probed mutant");
+        let kind = probed.probe.as_ref().unwrap().kind;
+        probed.probe.as_mut().unwrap().edits.clear();
+        let (edits, sites) = probe_edits("src/A.java", TWICE, &[probed], &mut [], &mut next_probe);
+        assert!(edits.is_empty());
+        assert_eq!(next_probe, 5);
+        assert_eq!(
+            sites
+                .into_iter()
+                .map(|(slot, site)| (slot, site.kind))
+                .collect::<Vec<_>>(),
+            [(5, kind)]
+        );
+    }
+
+    /// A mutant deferred in a lambda its statement holds has no statement
+    /// of its own; a lambda the statement does not wholly hold leaves it
+    /// the statement's.
+    #[test]
+    fn a_deferred_mutant_s_point_is_its_own_unless_it_holds_the_lambda() {
+        let mut mutant = twice_mutants().remove(0);
+        mutant.range = (12, 14);
+        let spans = [("p".to_owned(), PointKind::Statement, 10, 20)];
+        for (lambda, statement) in [
+            ((11, 15), None),
+            ((5, 15), Some("p")),
+            ((12, 30), Some("p")),
+        ] {
+            mutant.deferred = Some(lambda);
+            assert_eq!(
+                candidate(&mutant, &spans).statement.as_deref(),
+                statement,
+                "{lambda:?}"
+            );
+        }
+    }
+
+    /// Only a Java or Kotlin file that parses has mutants; a run's file
+    /// that no longer parses is named as changed, and a run with no Java or
+    /// Kotlin file lists nothing.
+    #[test]
+    fn a_file_that_does_not_parse_has_no_mutants() {
+        let index = ProjectIndex::of([("src/A.java", TWICE)]);
+        assert_eq!(
+            file_mutants("notes.txt", "", &index).err().as_deref(),
+            Some("notes.txt is not Java or Kotlin")
+        );
+        let broken = file_mutants("src/B.java", "class B {", &index)
+            .err()
+            .unwrap();
+        assert!(broken.starts_with("JVM parse error"), "{broken}");
+        let root = std::env::temp_dir().join(format!("supercov-jvm-broken-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/B.java"), "class B {").unwrap();
+        let none = list_mutants(
+            &root,
+            &BTreeMap::from([("notes.txt".to_owned(), BTreeSet::new())]),
+        );
+        let changed = list_mutants(
+            &root,
+            &BTreeMap::from([("src/B.java".to_owned(), BTreeSet::new())]),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(none.0.is_empty() && none.1.is_empty());
+        assert!(changed.0.is_empty());
+        assert_eq!(changed.1, ["src/B.java"]);
+    }
+
+    /// An empty report has no mutants; a tag left open reads as empty.
+    #[test]
+    fn an_empty_report_or_an_open_tag_reads_as_nothing() {
+        assert!(parse_pit_report("").is_empty());
+        let open = parse_pit_report("<mutation status='KILLED'><mutator>Math");
+        assert_eq!(open.len(), 1);
+        assert_eq!((open[0].mutator.as_str(), open[0].key.as_str()), ("", ""));
+        assert_eq!(open[0].status, "KILLED");
+    }
+
+    /// The key of each of PIT's descriptions: every operation its math
+    /// mutator names, an increment's step and a return's method; a
+    /// description without a replacement has none.
+    #[test]
+    fn each_of_pit_s_descriptions_gives_its_key() {
+        for (description, key) in [
+            ("Replaced integer division with multiplication", "/>*"),
+            ("Replaced integer modulus with multiplication", "%>*"),
+            ("Replaced bitwise AND with OR", "&>|"),
+            ("Replaced bitwise OR with AND", "|>&"),
+            ("Replaced XOR with AND", "^>&"),
+            ("Replaced Shift Left with Shift Right", "<<>>>"),
+            ("Replaced Shift Right with Shift Left", ">>><<"),
+            ("Replaced Unsigned Shift Right with Shift Left", ">>>><<"),
+            ("Replaced long negation with nothing", "negation>nothing"),
+            ("Replaced integer addition", ""),
+        ] {
+            assert_eq!(pit_key("Math", description), key, "{description}");
+        }
+        assert_eq!(pit_key("Increments", "Changed increment from 1 to -1"), "1");
+        assert_eq!(
+            pit_key(
+                "PrimitiveReturns",
+                "replaced int return with 0 for a/B::size"
+            ),
+            "size"
+        );
+    }
+
+    /// A return PIT reports on a line outside its statement is paired by
+    /// its method in the last pass; an operation there is not, and both
+    /// sides keep theirs. A file with no mutants joins nothing, and a
+    /// mutant of a file the run does not have is PIT's alone.
+    #[test]
+    fn a_return_far_from_its_statement_is_paired_by_its_method() {
+        let mutants = twice_mutants();
+        let mut pit = mutants
+            .iter()
+            .map(|mutant| PitMutant {
+                key: mutant.key.clone(),
+                ..pit_mutant("A.java", 40, mutant.mutator.name())
+            })
+            .collect::<Vec<_>>();
+        pit.push(pit_mutant("Elsewhere.java", 3, "Math"));
+        let ours = BTreeMap::from([
+            ("src/A.java".to_owned(), mutants.clone()),
+            ("src/B.java".to_owned(), Vec::new()),
+        ]);
+        let join = join_pit(&ours, &pit);
+        let returns = |want: bool| {
+            mutants
+                .iter()
+                .enumerate()
+                .filter(|(_, mutant)| is_return(mutant.mutator) == want)
+                .map(|(at, mutant)| (mutant_id("src/A.java", mutant), at))
+                .collect::<Vec<_>>()
+        };
+        assert!(!returns(true).is_empty() && !returns(false).is_empty());
+        assert_eq!(join.pairs, returns(true));
+        assert_eq!(
+            join.only_supercov,
+            returns(false)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        );
+        let mut only_pit = returns(false)
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect::<Vec<_>>();
+        only_pit.push(mutants.len());
+        assert_eq!(join.only_pit, only_pit);
+    }
+
+    /// What decides each of PIT's own Kotlin categories, beside what does
+    /// not: a getter is a returning one of Kotlin's `val` or `var`; `?:` and
+    /// `!!` are null-safe operators like `?.`; an array constructor loops
+    /// only with its lambda; a `when` branch is an arrow without a brace or
+    /// an `is` test; an indexed `set` is an assignment, an increment or a
+    /// decrement; `putAll` and `add` are `+=` and `-=`; and `in` checks a
+    /// range only where one is written.
+    #[test]
+    fn pit_s_own_kotlin_categories_turn_on_what_the_line_writes() {
+        let category = |file: &str, method: &str, mutator: &str, called: &str, line: &str| {
+            let mutant = PitMutant {
+                method: method.into(),
+                description: format!("removed call to a/B::{called}"),
+                ..pit_mutant(file, 1, mutator)
+            };
+            pit_only_category(&mutant, Some(line))
+        };
+        let kotlin = |mutator: &str, line: &str| category("a/B.kt", "f", mutator, "", line);
+        let getter = "a Kotlin property's generated getter";
+        assert_eq!(
+            category(
+                "a/B.kt",
+                "getSize",
+                "PrimitiveReturns",
+                "",
+                "    var size = 1"
+            ),
+            getter
+        );
+        assert_eq!(
+            category(
+                "a/B.kt",
+                "getSize",
+                "VoidMethodCall",
+                "",
+                "    val size = 1"
+            ),
+            "other"
+        );
+        assert_eq!(
+            category(
+                "a/B.java",
+                "getSize",
+                "PrimitiveReturns",
+                "",
+                "    var size = 1"
+            ),
+            "other"
+        );
+        let null_safe = "a Kotlin null-safe operator";
+        assert_eq!(
+            kotlin("NegateConditionals", "    val n = x ?: 0"),
+            null_safe
+        );
+        assert_eq!(
+            kotlin("NegateConditionals", "    val n = x!!.length"),
+            null_safe
+        );
+        assert_eq!(kotlin("Math", "    val a = IntArray(n)"), "other");
+        let when = "a `when` branch's comparison with its subject";
+        assert_eq!(kotlin("Math", "        1 -> 2"), when);
+        assert_eq!(kotlin("Math", "        1 -> {"), "other");
+        assert_eq!(kotlin("Math", "        is Int"), when);
+        assert_eq!(kotlin("Math", "        !is Int"), when);
+        assert_eq!(kotlin("NegateConditionals", "        x > 1 -> {"), when);
+        let assigned = "a Kotlin property assignment's setter or operator call";
+        let call =
+            |called: &str, line: &str| category("a/B.kt", "f", "VoidMethodCall", called, line);
+        assert_eq!(call("set", "    counts[i] = n"), assigned);
+        assert_eq!(call("set", "    counts[i]++"), assigned);
+        assert_eq!(call("add", "    xs += y"), assigned);
+        assert_eq!(call("putAll", "    m -= k"), assigned);
+        assert_eq!(call("putAll", "    m.putAll(o)"), "other");
+        assert_eq!(
+            kotlin("NegateConditionals", "    if (x in names) {}"),
+            "other"
+        );
+        assert!(!inlines_a_lambda("my_forEach { }"));
     }
 }

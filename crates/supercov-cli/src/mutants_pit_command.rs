@@ -91,11 +91,13 @@ fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, S
     let root = std::env::current_dir().map_err(|e| e.to_string())?;
     let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
     let run = select_run(&inventory, Some(run_id)).map_err(|e| e.to_string())?;
+    // `command` refuses an empty list: there is one report at least.
     let mut pit = Vec::new();
-    for report in reports {
+    reports.iter().try_for_each(|report| {
         let text = std::fs::read_to_string(report).map_err(|e| format!("{report}: {e}"))?;
         pit.extend(supercov_engine::jvm_strong::parse_pit_report(&text));
-    }
+        Ok::<(), String>(())
+    })?;
     if !only.is_empty() {
         pit.retain(|mutant| only.iter().any(|file| file.ends_with(&mutant.file)));
     }
@@ -117,7 +119,8 @@ fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, S
     let mut ours = BTreeMap::new();
     let mut texts = BTreeMap::new();
     for file in &files {
-        let Ok(source) = std::fs::read_to_string(root.join(file)) else {
+        // fault-site: mutants-pit.read-source
+        let Ok(source) = supercov_engine::fault_fs::read_to_string(root.join(file)) else {
             continue;
         };
         if let Ok(listed) = supercov_engine::jvm_strong::file_mutants(file, &source, &index) {
@@ -127,16 +130,8 @@ fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, S
     }
     let join = supercov_engine::jvm_strong::join_pit(&ours, &pit);
     let status_of = |id: &str| -> String {
-        if let Some(verdict) = saved.get(id) {
-            return verdict.status.clone();
-        }
         let planned = plan.mutants.iter().find(|mutant| mutant.id == id);
-        match planned.and_then(|mutant| mutant.decided) {
-            Some(supercov_engine::strong_plan::Decided::NoCoverage) => "no-coverage".into(),
-            Some(supercov_engine::strong_plan::Decided::Survived) => "survived".into(),
-            Some(supercov_engine::strong_plan::Decided::Equivalent) => "equivalent".into(),
-            None => "not-run".into(),
-        }
+        status(saved.get(id), planned.and_then(|mutant| mutant.decided))
     };
     let mut violations = Vec::new();
     let mut agree = 0usize;
@@ -144,11 +139,7 @@ fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, S
     for (id, at) in &join.pairs {
         let pit_mutant = &pit[*at];
         let ours = status_of(id);
-        let detected = match ours.as_str() {
-            "killed" | "timeout" => Some(true),
-            "survived" | "no-coverage" | "equivalent" => Some(false),
-            _ => None,
-        };
+        let detected = detected(&ours);
         let pit_decided = match pit_mutant.status.as_str() {
             "NON_VIABLE" | "NOT_STARTED" | "STARTED" => None,
             _ => Some(pit_mutant.detected()),
@@ -218,6 +209,33 @@ fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, S
     }))
 }
 
+/// A mutant's status: the strong pass's verdict where it has one, else what
+/// the run decided without running it (`decided`), else `not-run`.
+fn status(
+    saved: Option<&supercov_engine::strong_plan::Verdict>,
+    decided: Option<supercov_engine::strong_plan::Decided>,
+) -> String {
+    if let Some(verdict) = saved {
+        return verdict.status.clone();
+    }
+    match decided {
+        Some(supercov_engine::strong_plan::Decided::NoCoverage) => "no-coverage".into(),
+        Some(supercov_engine::strong_plan::Decided::Survived) => "survived".into(),
+        Some(supercov_engine::strong_plan::Decided::Equivalent) => "equivalent".into(),
+        None => "not-run".into(),
+    }
+}
+
+/// Whether a status says the mutant was detected; `None` for one that says
+/// neither (`not-run`, `unviable`).
+fn detected(status: &str) -> Option<bool> {
+    match status {
+        "killed" | "timeout" => Some(true),
+        "survived" | "no-coverage" | "equivalent" => Some(false),
+        _ => None,
+    }
+}
+
 fn text(data: &Value) -> String {
     let mut out = format!(
         "PIT's {} mutants beside the run's {}: {} matched, {} agree, {} soundness violation(s)\n",
@@ -228,22 +246,22 @@ fn text(data: &Value) -> String {
         data["soundnessViolations"]["total"]
     );
     out.push_str(&format!("  only PIT        {}\n", data["onlyPit"]["total"]));
-    if let Some(categories) = data["onlyPit"]["byCategory"].as_object() {
-        for (category, mutators) in categories {
-            let total = mutators
-                .as_object()
-                .map_or(0, |m| m.values().filter_map(Value::as_u64).sum::<u64>());
-            out.push_str(&format!("    {total:>5}  {category}\n"));
-        }
+    for (category, mutators) in data["onlyPit"]["byCategory"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        let total = mutators
+            .as_object()
+            .map_or(0, |m| m.values().filter_map(Value::as_u64).sum::<u64>());
+        out.push_str(&format!("    {total:>5}  {category}\n"));
     }
     out.push_str(&format!(
         "  only Supercov   {}\n",
         data["onlySupercov"]["total"]
     ));
-    if let Some(compared) = data["notCompared"].as_object() {
-        for (pair, count) in compared {
-            out.push_str(&format!("  not compared    {count} ({pair})\n"));
-        }
+    for (pair, count) in data["notCompared"].as_object().into_iter().flatten() {
+        out.push_str(&format!("  not compared    {count} ({pair})\n"));
     }
     for violation in data["soundnessViolations"]["mutants"]
         .as_array()
@@ -258,4 +276,50 @@ fn text(data: &Value) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use supercov_engine::strong_plan::{Decided, Verdict};
+
+    /// A mutant's status is the strong pass's verdict where it has one, and
+    /// otherwise what the run decided without running it.
+    #[test]
+    fn a_status_is_the_saved_verdict_or_the_run_s_decision() {
+        let killed = Verdict {
+            status: "killed".into(),
+            killed_by: None,
+            tests: 1,
+            duration_ms: 0,
+            reason: None,
+        };
+        assert_eq!(status(Some(&killed), Some(Decided::Survived)), "killed");
+        for (decided, said) in [
+            (Some(Decided::NoCoverage), "no-coverage"),
+            (Some(Decided::Survived), "survived"),
+            (Some(Decided::Equivalent), "equivalent"),
+            (None, "not-run"),
+        ] {
+            assert_eq!(status(None, decided), said);
+        }
+    }
+
+    /// Killed and timed-out mutants were detected; survived, uncovered and
+    /// equivalent ones were not; a status that says neither is compared
+    /// with nothing.
+    #[test]
+    fn a_status_says_whether_the_mutant_was_detected() {
+        for (said, detected_as) in [
+            ("killed", Some(true)),
+            ("timeout", Some(true)),
+            ("survived", Some(false)),
+            ("no-coverage", Some(false)),
+            ("equivalent", Some(false)),
+            ("not-run", None),
+            ("unviable", None),
+        ] {
+            assert_eq!(detected(said), detected_as, "{said}");
+        }
+    }
 }
