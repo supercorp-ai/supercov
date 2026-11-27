@@ -510,6 +510,30 @@ fn pass(
     // The switched build, with every mutant it can hold.
     let places = Places::under(&root);
     let mut unviable = BTreeMap::<usize, String>::new();
+    // A Rust Worker a test starts with `wrangler dev`: its wasm must build
+    // with the switches, and each test's `wrangler dev` serves it built once
+    // from the switched copy, with the test's mutant switched on.
+    let worker_packages = crate::rust_worker::worker_packages(&root);
+    let mut switched_environment = runner_environment.clone();
+    if !worker_packages.is_empty()
+        && let Some(workers) = crate::rust_worker::CargoTestWorkers::prepare(
+            &root,
+            &places.switched_target.join("supercov-wrangler"),
+        )?
+    {
+        switched_environment.extend(
+            workers
+                .environment()
+                .map(|(name, value)| (name.to_owned(), value.to_string_lossy().into_owned())),
+        );
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        switched_environment.push((
+            crate::rust_worker::STRONG_WORKER_ENV.to_owned(),
+            format!("{}-{nonce}", std::process::id()),
+        ));
+    }
     let built = build_switched(
         &root,
         &places,
@@ -518,7 +542,8 @@ fn pass(
         &mut alone,
         &mut unviable,
         &build_invocation,
-        &runner_environment,
+        &switched_environment,
+        &worker_packages,
         diagnostics,
         stop,
     )?;
@@ -1166,10 +1191,13 @@ fn build_switched(
     unviable: &mut BTreeMap<usize, String>,
     invocation: &CargoTestInvocation,
     runner_environment: &[(String, String)],
+    wasm_packages: &BTreeSet<String>,
     diagnostics: &mut dyn Write,
     stop: &Stop,
 ) -> Result<Built, String> {
     let mut builds = 0usize;
+    let mut runner_environment = runner_environment.to_vec();
+    let mut wasm_packages = wasm_packages.clone();
     loop {
         builds += 1;
         let _ = writeln!(
@@ -1193,6 +1221,68 @@ fn build_switched(
             });
             continue;
         }
+        // The Workers' wasm, built from the same switched copy: a mutant that
+        // does not compile for wasm leaves the switched build, and is built on
+        // its own, where the Worker's own build of it fails as it would.
+        if built.is_ok() && !wasm_packages.is_empty() {
+            let cargo = WasmCargo {
+                program: "cargo".into(),
+                rustflags: std::env::var("RUSTFLAGS").unwrap_or_default(),
+            };
+            let errors = wasm_check(
+                &cargo,
+                &prepared.project.workspace_root,
+                &places.switched_target.join("wasm"),
+                &wasm_packages,
+            )?;
+            if !errors.is_empty() {
+                let ordinal_of = switchable
+                    .iter()
+                    .map(|at| (key(&jobs[*at]), *at))
+                    .collect::<HashMap<_, _>>();
+                let mut out = BTreeSet::new();
+                let mut unexplained = Vec::new();
+                for error in &errors {
+                    let (own, at_switch) = attribute(error, &prepared.switched);
+                    let theirs = own.iter().chain(&at_switch).collect::<Vec<_>>();
+                    if theirs.is_empty() {
+                        unexplained.push(first_line(&error.rendered));
+                    }
+                    for ordinal in theirs {
+                        let at = ordinal_of[ordinal];
+                        // A decided mutant was there only to find whether
+                        // it compiles: it keeps the plan's verdict.
+                        if out.insert(at) && !jobs[at].check_only {
+                            alone.push((at, "wasm-error"));
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    // Not the mutants' doing: the Workers are served as the
+                    // tests build them, and a mutant none of them runs
+                    // switched on is said not reached, not survived.
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the Workers ({}) do not build for wasm here ({}): their tests run the Workers wrangler builds, without the mutants",
+                        wasm_packages.iter().cloned().collect::<Vec<_>>().join(", "),
+                        unexplained.join("; ")
+                    );
+                    runner_environment.retain(|(name, _)| {
+                        ![
+                            "PATH",
+                            crate::rust_worker::REAL_WRANGLER,
+                            crate::rust_worker::HOOK_ENV,
+                            crate::rust_worker::STRONG_WORKER_ENV,
+                        ]
+                        .contains(&name.as_str())
+                    });
+                    wasm_packages.clear();
+                } else {
+                    switchable.retain(|at| !out.contains(at));
+                    continue;
+                }
+            }
+        }
         let errors = match built {
             Ok(artifacts) => {
                 let launcher = crate::rust_test_runner::ArtifactLauncher::for_invocation(
@@ -1201,7 +1291,7 @@ fn build_switched(
                     &places.switched_target.join("supercov-hooks"),
                 )
                 .map_err(|error| error.to_string())?
-                .with_environment(runner_environment);
+                .with_environment(&runner_environment);
                 let target_libdir =
                     crate::rust_test_runner::rustc_target_libdir(&prepared.project, invocation)
                         .map_err(|error| error.to_string())?;

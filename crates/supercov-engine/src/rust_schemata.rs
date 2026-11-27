@@ -342,6 +342,10 @@ pub(crate) fn runtime(module: &str, key: &str) -> String {
             "__SUPERCOV_ACTIVATE_EXPORT__",
             &format!("__supercov_strong_activate_{key}"),
         )
+        .replace(
+            "__SUPERCOV_HITS_EXPORT__",
+            &format!("__supercov_strong_hits_{key}"),
+        )
 }
 
 const STRONG_RUNTIME: &str = include_str!("../runtime-assets/rust-strong-runtime.rs");

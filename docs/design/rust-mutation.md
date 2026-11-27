@@ -242,6 +242,33 @@ so: a mutant built on its own (no switch), a `wasm-pack test` pass (wasm has
 no file to append to), and a mutant resumed from candidates an earlier pass
 ran (that pass's reach is not kept).
 
+**Rust Workers.** A Worker a `cargo test` suite starts with `wrangler dev`
+is built by wrangler, from the `[build] command` of its configuration
+(`worker-build`, or a script that runs it, read one level deep), not by the
+pass's `cargo` build. The pass serves it as the measured run does, through
+Supercov's `wrangler` on the tests' PATH, and switches it as the switched
+build does:
+
+- after the native switched build, the Worker packages are built for
+  `wasm32-unknown-unknown` from the same switched copy; a mutant that does
+  not compile there leaves the switched build and is built on its own,
+  where the test's real `wrangler dev` builds it, and fails, as it would;
+- the first test's `wrangler dev` runs the `[build] command` once for the
+  switched build (the others wait for it), and every `wrangler dev` then
+  gets a copy of its configuration with no `[build]`, whose entry first
+  loads a module that switches the test's mutant on in each wasm instance as
+  it is made (the runtime's `__supercov_strong_activate_*` exports, as the
+  Node hook does for wasm-pack), so a mutant costs no Worker build;
+- after each call into the module, that module reads the runtime's
+  `__supercov_strong_hits_*` export and, the first time the mutant ran,
+  logs it; a poller on wrangler's inspector, which the stand-in starts
+  beside it, appends the mutant to `<results>.reached`, as a native process
+  does. A test that starts a Worker some other way runs it unswitched, and
+  its mutant, never reached in mutated form, is `no-coverage`.
+
+A mutant built on its own is served by the real `wrangler`, which builds the
+plain copy's mutated source itself.
+
 A mutant in a `const fn` is linked to no statement: the instrumenter
 declares a `const fn`'s body (`unmeasured`) and cannot probe it, so its
 points are in the run's record and never hit. Linked to one, the mutant read
