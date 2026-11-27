@@ -525,6 +525,7 @@ fn pass(
         &std::env::var_os("PATH").unwrap_or_default(),
         &worker_build,
     )?);
+    let phase = Instant::now();
     let built = build_switched(
         &root,
         &places,
@@ -541,6 +542,7 @@ fn pass(
         diagnostics,
         stop,
     )?;
+    let switched_build = phase.elapsed();
     for (at, error) in &unviable {
         results.verdict(
             &jobs[*at].id,
@@ -601,7 +603,9 @@ fn pass(
         .chain(alone.iter().map(|(at, _)| at))
         .flat_map(|at| jobs[*at].candidates.iter().copied())
         .collect::<BTreeSet<_>>();
+    let phase = Instant::now();
     let baselines = baselines(&runner, &tests, &needed, request.workers);
+    let baselines_took = phase.elapsed();
     // Baselines a stop cut short tell no mutant's candidates.
     if stop.now() {
         return Ok(0);
@@ -632,6 +636,7 @@ fn pass(
         Ended::Slow(slow) => Some(slow),
     };
     let slow = Mutex::new(Vec::<(usize, Slow)>::new());
+    let phase = Instant::now();
     pool(request.workers.min(switchable.len()), || {
         // Each worker takes the next mutant until none is left (a worker
         // started after the others took them all takes none).
@@ -678,12 +683,16 @@ fn pass(
         count(ended);
     }
 
+    let switched_tests = phase.elapsed();
     // The mutants built on their own, one at a time.
+    let phase = Instant::now();
+    let mut alone_builds = Duration::ZERO;
     for (at, why) in &alone {
         let job = &jobs[*at];
         let mutant_started = Instant::now();
         let (source, _) = sources[&job.file].as_ref().expect("a job's file was read");
-        match build_alone(
+        let building = Instant::now();
+        let alone_built = build_alone(
             &root,
             &places,
             &build_invocation,
@@ -691,7 +700,9 @@ fn pass(
             job,
             source,
             stop,
-        ) {
+        );
+        alone_builds += building.elapsed();
+        match alone_built {
             // The stop cut its build short: it is left for the next pass.
             Err(_) if stop.now() => break,
             Err(error) => {
@@ -774,6 +785,20 @@ fn pass(
             }
         }
     }
+    let alone_took = phase.elapsed();
+    let seconds = |took: Duration| format!("{:.1} s", took.as_secs_f64());
+    let _ = writeln!(
+        diagnostics,
+        "[supercov] Rust pass times: switched build {}, each test without a mutant {} ({} tests), {} switched mutant(s) tested {}, {} built on their own {} (building {})",
+        seconds(switched_build),
+        seconds(baselines_took),
+        baselines.len(),
+        switchable.len(),
+        seconds(switched_tests),
+        alone.len(),
+        seconds(alone_took),
+        seconds(alone_builds),
+    );
     // Leave the plain copy as written.
     // fault-site: rust-strong.pass.sync-project
     let _ = sync_project(&root, &places.plain);
@@ -789,6 +814,13 @@ fn pass(
         "failedBaselines": baselines.values().filter(|ran| ran.outcome != Outcome::Passed).count(),
         "statuses": counts,
         "durationMs": started.elapsed().as_millis() as u64,
+        "timesMs": {
+            "switchedBuild": switched_build.as_millis() as u64,
+            "baselines": baselines_took.as_millis() as u64,
+            "switchedTests": switched_tests.as_millis() as u64,
+            "alone": alone_took.as_millis() as u64,
+            "aloneBuilds": alone_builds.as_millis() as u64,
+        },
     }));
     Ok(0)
 }
