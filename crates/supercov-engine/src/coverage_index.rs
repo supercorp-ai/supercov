@@ -2110,6 +2110,29 @@ fn copy_as_passed(records: &mut Vec<u8>, (start, end): (usize, usize), size: usi
         .for_each(|record| record[0] = CoverageViewId::Passed as u8);
 }
 
+/// Byte 1 of a whole-view record of a test's lines or hits when they are the
+/// passed view's records of that test too: a test that passed has the same
+/// lines and hits in both views, and its records were written twice, most of
+/// a large run's index.
+const ALSO_PASSED: u8 = 1;
+
+/// The whole view's records in `range` taken as the passed view's too.
+fn mark_also_passed(records: &mut [u8], (start, end): (usize, usize), size: usize) {
+    records[start..end]
+        .chunks_exact_mut(size)
+        .for_each(|record| record[1] = ALSO_PASSED);
+}
+
+/// Whether the records from `at` to the end are those in `range`, record for
+/// record, but for their view.
+fn same_records(records: &[u8], (start, end): (usize, usize), at: usize, size: usize) -> bool {
+    records.len() - at == end - start
+        && records[start..end]
+            .chunks_exact(size)
+            .zip(records[at..].chunks_exact(size))
+            .all(|(whole, passed)| whole[1..] == passed[1..])
+}
+
 fn sections_from<V, E>(
     views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
     passed_is_whole: bool,
@@ -2170,8 +2193,6 @@ where
                 anchors: ANCHOR_RECORD_SIZE,
                 test_retries: TEST_RETRY_RECORD_SIZE,
                 test_attempts: TEST_ATTEMPT_RECORD_SIZE,
-                test_lines: TEST_LINE_RECORD_SIZE,
-                test_hits: TEST_HIT_RECORD_SIZE,
                 test_decisions: TEST_DECISION_RECORD_SIZE,
                 hit_metadata: HIT_METADATA_RECORD_SIZE,
                 decision_metadata: DECISION_METADATA_RECORD_SIZE,
@@ -2203,6 +2224,9 @@ where
     // (skipped ones, most often) has those records copied rather than built
     // again (`copies_whole`).
     let mut blocks: Option<WholeBlocks> = None;
+    // Where each test's lines and hits lie among the whole view's records,
+    // for the passed view's records of the test to be found alike.
+    let mut whole_tests = HashMap::<String, [(usize, usize); 2]>::new();
     for item in views {
         let (id, owned) = item?;
         // Written with the whole view's, below.
@@ -2210,6 +2234,8 @@ where
             continue;
         }
         let starts = (id == CoverageViewId::All).then_some(per_view!(lengths));
+        let test_starts =
+            (id == CoverageViewId::All).then_some([test_lines.len(), test_hits.len()]);
         let view = owned.borrow();
         let copied = blocks.as_ref().filter(|_| {
             id == CoverageViewId::Passed
@@ -2284,8 +2310,8 @@ where
                 copy_as_passed(&mut test_summaries, ranges[0], TEST_SUMMARY_RECORD_SIZE);
                 copy_as_passed(&mut test_retries, ranges[1], TEST_RETRY_RECORD_SIZE);
                 copy_as_passed(&mut test_attempts, ranges[2], TEST_ATTEMPT_RECORD_SIZE);
-                copy_as_passed(&mut test_lines, ranges[3], TEST_LINE_RECORD_SIZE);
-                copy_as_passed(&mut test_hits, ranges[4], TEST_HIT_RECORD_SIZE);
+                mark_also_passed(&mut test_lines, ranges[3], TEST_LINE_RECORD_SIZE);
+                mark_also_passed(&mut test_hits, ranges[4], TEST_HIT_RECORD_SIZE);
                 copy_as_passed(&mut test_decisions, ranges[5], TEST_DECISION_RECORD_SIZE);
             }
         } else {
@@ -2333,6 +2359,23 @@ where
                         hit,
                         &mut strings,
                     ));
+                }
+                // A passed test's lines and hits, as the whole view holds
+                // them, are the whole view's records, marked as the passed
+                // view's too, not written again.
+                let lines = (at[3], test_lines.len());
+                let hits = (at[4], test_hits.len());
+                if id == CoverageViewId::All {
+                    whole_tests.insert(test.id.clone(), [lines, hits]);
+                } else if id == CoverageViewId::Passed
+                    && let Some(&[whole_lines, whole_hits]) = whole_tests.get(test.id.as_str())
+                    && same_records(&test_lines, whole_lines, at[3], TEST_LINE_RECORD_SIZE)
+                    && same_records(&test_hits, whole_hits, at[4], TEST_HIT_RECORD_SIZE)
+                {
+                    test_lines.truncate(at[3]);
+                    test_hits.truncate(at[4]);
+                    mark_also_passed(&mut test_lines, whole_lines, TEST_LINE_RECORD_SIZE);
+                    mark_also_passed(&mut test_hits, whole_hits, TEST_HIT_RECORD_SIZE);
                 }
                 for decision in &test.decisions {
                     let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
@@ -2692,6 +2735,11 @@ where
                 .zip(per_view!(lengths))
                 .collect::<Vec<_>>();
             per_view!(copy_whole_as_passed, whole);
+            let [lines, hits] = test_starts.expect("the whole view's starts are known");
+            let lines = (lines, test_lines.len());
+            let hits = (hits, test_hits.len());
+            mark_also_passed(&mut test_lines, lines, TEST_LINE_RECORD_SIZE);
+            mark_also_passed(&mut test_hits, hits, TEST_HIT_RECORD_SIZE);
         }
     }
     let (variant, model) =
@@ -3859,15 +3907,34 @@ impl<'a> CoverageIndex<'a> {
                     });
             }
         }
+        // A whole view's record of a test's lines or hits may be the passed
+        // view's too (`ALSO_PASSED`).
+        let shared_position = |record: &[u8]| -> Result<Option<usize>, CoverageIndexError> {
+            let owner = CoverageViewId::try_from(record[0])?;
+            let also_passed = match record[1] {
+                0 => false,
+                ALSO_PASSED if owner == CoverageViewId::All => true,
+                _ => return Err(CoverageIndexError::InvalidRecord("shared test record")),
+            };
+            if owner != view && !(also_passed && view == CoverageViewId::Passed) {
+                return Ok(None);
+            }
+            let id = self.string(get_u32(record, 4))?;
+            positions
+                .get(&id)
+                .copied()
+                .map(Some)
+                .ok_or(CoverageIndexError::InvalidRecord("unknown test relation"))
+        };
         let descriptor = self.section(SECTION_TEST_LINES);
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_LINES, index)?;
-            if record[1..4].iter().any(|byte| *byte != 0)
+            if record[2..4].iter().any(|byte| *byte != 0)
                 || record[12..16].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("test line record"));
             }
-            if let Some(position) = position(record)? {
+            if let Some(position) = shared_position(record)? {
                 details[position]
                     .lines
                     .push(crate::coverage_report::SourceLine {
@@ -3879,12 +3946,12 @@ impl<'a> CoverageIndex<'a> {
         let descriptor = self.section(SECTION_TEST_HITS);
         for index in 0..descriptor.count {
             let record = self.index.record(SECTION_TEST_HITS, index)?;
-            if record[1..4].iter().any(|byte| *byte != 0)
+            if record[2..4].iter().any(|byte| *byte != 0)
                 || record[12..].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("test hit record"));
             }
-            if let Some(position) = position(record)? {
+            if let Some(position) = shared_position(record)? {
                 details[position]
                     .hits
                     .push(self.string(get_u32(record, 8))?);
@@ -6793,6 +6860,78 @@ mod tests {
             run.filters.passed.tests[0].hits.clear();
             run.filters.passed.tests[0].hits.push("elsewhere".into());
             assert!(!copies_whole(&run.view, &run.filters.passed));
+        }
+    }
+
+    /// A test whose lines and hits are the same in the whole view and the
+    /// passed view has them written once, for both: each view reads every
+    /// test's lines and hits as its own, built view by view or copied.
+    #[test]
+    fn a_passed_tests_lines_and_hits_are_written_once_for_both_views() {
+        for mut run in [report(), scoped_report(), phased_report()] {
+            // A failed test in the whole view, which the passed view lacks.
+            let mut failed = run.view.tests[0].clone();
+            failed.id = "failed-test".into();
+            failed.name = "a failed test".into();
+            failed.outcome = "failed".into();
+            run.filters.passed = run.view.clone();
+            run.view.tests.push(failed);
+            run.passed_is_whole = false;
+            let sections = sections_from::<_, CoverageIndexError>(
+                [
+                    (CoverageViewId::All, &run.view),
+                    (CoverageViewId::Passed, &run.filters.passed),
+                    (CoverageViewId::Failed, &run.filters.failed),
+                ]
+                .map(Ok),
+                false,
+                None,
+            )
+            .unwrap();
+            let lines = sections
+                .iter()
+                .find(|section| section.kind == SECTION_TEST_LINES)
+                .unwrap();
+            let written = run
+                .view
+                .tests
+                .iter()
+                .chain(&run.filters.failed.tests)
+                .map(|test| test.lines.len())
+                .sum::<usize>();
+            assert_eq!(lines.count, written as u64);
+            let root = root();
+            let path = root.join("query-index.v1.bin");
+            write_query_index(&sections, &identity(), &path).unwrap();
+            let container = QueryIndex::open(&path, &identity()).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            for (view, expected) in [
+                (CoverageViewId::All, &run.view),
+                (CoverageViewId::Passed, &run.filters.passed),
+                (CoverageViewId::Failed, &run.filters.failed),
+            ] {
+                let read = index
+                    .test_details(view)
+                    .unwrap()
+                    .into_iter()
+                    .map(|detail| (detail.summary.id.clone(), detail.lines, detail.hits))
+                    .collect::<Vec<_>>();
+                let tests = expected
+                    .tests
+                    .iter()
+                    .map(|test| {
+                        (
+                            test.id.as_str().to_owned(),
+                            test.lines.clone(),
+                            test.hits
+                                .iter()
+                                .map(|hit| hit.as_str().to_owned())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(read, tests, "{view:?}");
+            }
         }
     }
 

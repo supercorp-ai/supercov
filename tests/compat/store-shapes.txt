@@ -75,7 +75,7 @@ file strong-mutation.json
   written and read: StrongVerdicts
 
 file query-index.v1.bin: the identity in its header
-  version: QUERY_INDEX_SCHEMA_VERSION = 6
+  version: QUERY_INDEX_SCHEMA_VERSION = 7
   written and read: QueryIndexIdentity
 
 type ArrowLink, written and read = closed {
