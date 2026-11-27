@@ -120,7 +120,7 @@ jobs:
           # The budget ends the pass in time; what it leaves would show as
           # mutants without a verdict.
           SUPERCOV_STRONG_JOBS="$JOBS" /usr/bin/time -v -o ../out/time.txt \
-            ../bin/supercov mutants --shard ${{ matrix.shard }}/${{ matrix.shards }} --budget 520 --json \
+            ../bin/supercov mutants --shard ${{ matrix.shard }}/${{ matrix.shards }} --budget 470 --json \
             -- ${{ matrix.test }} > ../out/strong.json 2> ../out/strong.log || echo "exit $?"
           head -12 ../out/time.txt; tail -15 ../out/strong.log
           ../bin/supercov runs latest mutants --format jsonl --output ../out/weak.jsonl || true
