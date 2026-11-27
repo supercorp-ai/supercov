@@ -1328,11 +1328,87 @@ pub(crate) fn snapshot(
     // test may build and run a program instrumented on its own -- a fixture
     // prepared inside the instrumented workspace -- and that program
     // inherits the evidence directory; its obligations are not this run's.
+    let known = manifest_alternatives(manifest);
+    let gated = gated_obligations(probes);
     let regions = read_rust_region_directory(directory, &probes.token, probes)
         .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
         .into_iter()
-        .map(|(_, observations)| observations);
+        .map(|(_, mut observations)| {
+            observations.retain(|entry| keeps(entry, &known, &gated));
+            observations
+        });
     snapshot_regions(manifest, regions, attempt)
+}
+
+/// Every branch alternative of `manifest`, by id.
+fn manifest_alternatives(manifest: &CoverageManifest) -> BTreeSet<&str> {
+    manifest
+        .branches
+        .iter()
+        .flat_map(|branch| {
+            branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.id.as_str())
+        })
+        .collect()
+}
+
+/// Every obligation behind a `#[cfg]` the target alone does not settle.
+fn gated_obligations(probes: &crate::rust_instrumenter::RustProbeLayout) -> BTreeSet<&str> {
+    probes
+        .cfgs
+        .iter()
+        .flat_map(|gate| gate.obligations.iter().map(String::as_str))
+        .collect()
+}
+
+/// A match arm behind a `#[cfg]` no build compiled is still in the match's
+/// table, so a later arm's selection passes over it and hits its `missed`.
+/// The arm is not in that build: there was nothing to pass over. Once the
+/// gate is settled its branch leaves the manifest, and its `missed` with it:
+/// whether `entry` is anything but such a `missed`.
+fn keeps(
+    entry: &crate::rust_runtime::RustProbeEntry,
+    known: &BTreeSet<&str>,
+    gated: &BTreeSet<&str>,
+) -> bool {
+    let crate::rust_runtime::RustProbeObservation::Hit { id } = &entry.observation else {
+        return true;
+    };
+    known.contains(id.as_str())
+        || !id
+            .strip_suffix(":missed")
+            .is_some_and(|branch| gated.contains(branch))
+}
+
+/// What the tests recorded of the alternatives `settled` left out of
+/// `measured`: a match arm no build compiled, passed over (see `keeps`).
+/// A run that read its evidence against the unsettled manifest keeps the
+/// same records as one that read it against the settled one, which a reused
+/// build does.
+fn drop_settled_alternatives(
+    results: &mut [RawTestResult],
+    measured: &CoverageManifest,
+    settled: &CoverageManifest,
+) {
+    let kept = manifest_alternatives(settled);
+    let dropped = manifest_alternatives(measured)
+        .into_iter()
+        .filter(|id| !kept.contains(id))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if dropped.is_empty() {
+        return;
+    }
+    for result in results {
+        for snapshot in &mut result.runtime {
+            snapshot.hits.retain(|id| !dropped.contains(id));
+            snapshot
+                .events
+                .retain(|event| event.event_type != "hit" || !dropped.contains(&event.id));
+        }
+    }
 }
 
 /// `snapshot` of regions already read: each one's records in the order its
@@ -2311,10 +2387,13 @@ pub fn run_prepared_rust_tests(
         );
         let project = &project;
         let artifact_count = outcome.artifact_files.len();
+        let measured = &project.manifest;
         let project = &PreparedRustProject {
             manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
             ..project.clone()
         };
+        let mut outcome = outcome;
+        drop_settled_alternatives(&mut outcome.results, measured, &project.manifest);
         report_unmeasured_workers(&unmeasured_workers, diagnostics);
         return Ok(RustFrontendRun {
             declaration: FrontendRunDeclaration {
@@ -2685,6 +2764,7 @@ pub fn run_prepared_rust_tests(
     };
     // Only observed runners may be declared. A run with no tests at all keeps
     // the libtest declaration, as it always has.
+    let measured = &project.manifest;
     let project = &PreparedRustProject {
         manifest: settle_cfg_gates(project, &evidence_root, diagnostics)?,
         ..project.clone()
@@ -2692,6 +2772,7 @@ pub fn run_prepared_rust_tests(
     let ran_libtests = !results.is_empty();
     let ran_doctests = !doctest_results.is_empty();
     results.extend(doctest_results);
+    drop_settled_alternatives(&mut results, measured, &project.manifest);
     let mut runners = Vec::new();
     if ran_libtests || !ran_doctests {
         runners.push(rust_runner_declaration("rust-libtest"));
