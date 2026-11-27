@@ -6158,28 +6158,34 @@ e: /w/copy/src/A.kt: (x, 2): no line
             let failed = crate::fault::during(fault, || run_strong_jvm(&request, &mut Vec::new()));
             assert!(failed.is_err(), "{fault}: {failed:?}");
         }
+        // Each build that starts has a log of its own: a pass of its own.
+        let unstarted = root.with_extension("unstarted");
         let unstartable = StrongJvmRequest {
             command: vec![out.join("no-such-program").display().to_string()],
-            ..request.clone()
+            ..strong_request(&root, &unstarted, &[], &plan)
         };
         assert!(
             run_strong_jvm(&unstartable, &mut Vec::new())
                 .is_err_and(|error| error.contains("no-such-program")),
         );
-        let interrupted = StrongJvmRequest {
-            command: vec![
-                "sh".into(),
-                "-c".into(),
-                format!("kill -TERM {}; sleep 10", std::process::id()),
+        let stopped = root.with_extension("stopped");
+        let interrupted = strong_request(
+            &root,
+            &stopped,
+            &[
+                "sh",
+                "-c",
+                &format!("kill -TERM {}; sleep 10", std::process::id()),
             ],
-            ..request.clone()
-        };
+            &plan,
+        );
         assert_eq!(
             run_strong_jvm(&interrupted, &mut Vec::new()),
             Err("the strong pass was interrupted by SIGTERM".to_owned())
         );
-        fs::remove_dir_all(&root).ok();
-        fs::remove_dir_all(&out).ok();
+        for directory in [root, out, unstarted, stopped] {
+            fs::remove_dir_all(directory).ok();
+        }
     }
 }
 
