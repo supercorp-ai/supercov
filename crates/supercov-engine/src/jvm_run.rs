@@ -6213,6 +6213,15 @@ e: /w/copy/src/A.kt: (x, 2): no line
             run_strong_jvm(&unstartable, &mut Vec::new())
                 .is_err_and(|error| error.contains("no-such-program")),
         );
+        // Supervision settings that are not a time.
+        let unsupervised = root.with_extension("unsupervised");
+        let request = strong_request(&root, &unsupervised, &["true"], &plan);
+        let timeout =
+            |name: &str| (name == "SUPERCOV_COMMAND_TIMEOUT_MS").then(|| "soon".to_owned());
+        assert!(
+            run_strong_jvm_with(&request, &mut Vec::new(), &timeout)
+                .is_err_and(|error| error.contains("SUPERCOV_COMMAND_TIMEOUT_MS")),
+        );
         let stopped = root.with_extension("stopped");
         let interrupted = strong_request(
             &root,
@@ -6228,7 +6237,7 @@ e: /w/copy/src/A.kt: (x, 2): no line
             run_strong_jvm(&interrupted, &mut Vec::new()),
             Err("the strong pass was interrupted by SIGTERM".to_owned())
         );
-        for directory in [root, out, unstarted, stopped] {
+        for directory in [root, out, unstarted, unsupervised, stopped] {
             fs::remove_dir_all(directory).ok();
         }
     }
@@ -6278,6 +6287,16 @@ struct StrongMutant {
 pub fn run_strong_jvm(
     request: &StrongJvmRequest,
     diagnostics: &mut dyn Write,
+) -> Result<i32, String> {
+    run_strong_jvm_with(request, diagnostics, &|name| std::env::var(name).ok())
+}
+
+/// [`run_strong_jvm`], with the supervision settings read through
+/// `variable`.
+fn run_strong_jvm_with(
+    request: &StrongJvmRequest,
+    diagnostics: &mut dyn Write,
+    variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<i32, String> {
     let root = canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
@@ -6487,7 +6506,8 @@ pub fn run_strong_jvm(
         let _ = fs::remove_file(&slow);
         let supervisor = crate::process_supervision::ProcessSupervisor::new()
             .map_err(|error| error.to_string())?;
-        let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+        let options =
+            SupervisionOptions::from_variables(variable).map_err(|error| error.to_string())?;
         let mut exit_code = 0;
         let mut remaining = mutants.clone();
         for start in 0..STRONG_STARTS {
@@ -6561,59 +6581,57 @@ pub fn run_strong_jvm(
             let output = fs::read_to_string(&log).unwrap_or_default();
             // Switches the compiler refused: those mutants are unviable,
             // and the build runs again without them.
-            let errors = compile_errors(&output, &workspace);
-            if !errors.is_empty() {
-                let mut refused = Vec::new();
-                let mut unexplained = Vec::new();
-                for (file, line, column, message) in &errors {
-                    let Some(switched_file) = switched.get(file) else {
-                        unexplained.push(format!("{file}:{line}:{column}: {message}"));
-                        continue;
-                    };
-                    let mutant =
-                        crate::jvm_schemata::offset_of(&switched_file.source, *line, *column)
-                            .and_then(|offset| {
-                                crate::jvm_schemata::mutant_at(switched_file, offset)
-                            });
-                    match mutant {
-                        // A refused switch often has several errors: its
-                        // mutant is unviable once.
-                        Some(index)
-                            if refused.iter().any(|(f, i, _): &(String, usize, String)| {
-                                f == file && *i == index
-                            }) => {}
-                        Some(index) => refused.push((file.clone(), index, message.clone())),
-                        None => unexplained.push(format!("{file}:{line}:{column}: {message}")),
-                    }
+            let mut refused = Vec::new();
+            let mut unexplained = Vec::new();
+            for (file, line, column, message) in compile_errors(&output, &workspace) {
+                let Some(switched_file) = switched.get(&file) else {
+                    unexplained.push(format!("{file}:{line}:{column}: {message}"));
+                    continue;
+                };
+                let mutant = crate::jvm_schemata::offset_of(&switched_file.source, line, column)
+                    .and_then(|offset| crate::jvm_schemata::mutant_at(switched_file, offset));
+                match mutant {
+                    // A refused switch often has several errors: its
+                    // mutant is unviable once.
+                    Some(index)
+                        if refused.iter().any(|(f, i, _): &(String, usize, String)| {
+                            *f == file && *i == index
+                        }) => {}
+                    Some(index) => refused.push((file, index, message)),
+                    None => unexplained.push(format!("{file}:{line}:{column}: {message}")),
                 }
-                if refused.is_empty() {
-                    let _ = writeln!(
-                        diagnostics,
-                        "[supercov] the strong copy did not compile, at code that holds no switch:\n  {}\n(build output: {})",
-                        unexplained.join("\n  "),
-                        log.display()
-                    );
-                    break;
-                }
-                for (file, index, message) in refused {
-                    // A refused switch is one placed in a switched file, and
-                    // so one of its listed mutants.
-                    placed
-                        .get_mut(&file)
-                        .expect("a switched file is placed")
-                        .retain(|placed| *placed != index);
-                    let mutant = &enumerated[&file].1[index];
-                    results.verdict(
-                        &crate::jvm_strong::mutant_id(&file, mutant),
-                        "unviable",
-                        &format!("the compiler refused it: {}", message.trim()),
-                    );
-                }
+            }
+            // Every error at code that holds no switch: nothing to drop.
+            if refused.is_empty() && !unexplained.is_empty() {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] the strong copy did not compile, at code that holds no switch:\n  {}\n(build output: {})",
+                    unexplained.join("\n  "),
+                    log.display()
+                );
+                break;
+            }
+            let any_refused = !refused.is_empty();
+            for (file, index, message) in refused {
+                // A refused switch is one placed in a switched file, and
+                // so one of its listed mutants.
+                placed
+                    .get_mut(&file)
+                    .expect("a switched file is placed")
+                    .retain(|placed| *placed != index);
+                let mutant = &enumerated[&file].1[index];
+                results.verdict(
+                    &crate::jvm_strong::mutant_id(&file, mutant),
+                    "unviable",
+                    &format!("the compiler refused it: {}", message.trim()),
+                );
+            }
+            if any_refused {
                 switched = switch(&placed);
-                for (file, switched) in &switched {
+                switched.iter().try_for_each(|(file, switched)| {
                     // fault-site: jvm-run.run-strong-jvm.switched
-                    write(&workspace.join(file), &switched.source)?;
-                }
+                    write(&workspace.join(file), &switched.source)
+                })?;
                 continue;
             }
             results.merge_partials(&remaining, &tests);
