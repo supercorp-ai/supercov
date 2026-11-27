@@ -243,7 +243,7 @@ if (process.env.BENCH_PERF === '1') {
   cpSync(join(fixtures, 'runs'), join(project, '.supercov/runs'), { recursive: true });
   const profiled = (args, step) => {
     const data = join(output, `perf-${step}.data`);
-    const result = run(project, 'perf', ['record', '-F', '499', '-g', '--call-graph', 'dwarf,16384', '-o', data, '--', path, ...args], `perf-${name}-${step}`, {}, true);
+    const result = run(project, 'perf', ['record', '-F', '499', '-g', '--call-graph', 'fp', '-o', data, '--', path, ...args], `perf-${name}-${step}`, {}, true);
     for (const [suffix, extra] of [['self', ['--no-children']], ['children', ['--children']]]) {
       const report = spawnSync('perf', ['report', '-i', data, '--stdio', '-g', 'none', '--percent-limit', '0.7', ...extra], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
       writeFileSync(join(output, `perf-${step}-${suffix}.txt`), report.stdout.replace(/_ZN[0-9A-Za-z_$.]+/g, (m) => m) + report.stderr.slice(-2000));
