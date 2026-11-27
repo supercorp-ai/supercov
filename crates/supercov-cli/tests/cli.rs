@@ -19816,7 +19816,7 @@ fn mutants_pit_refuses_runs_it_cannot_join() {
     );
     project.write(
         "test/math.test.js",
-        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { add } from \"../src/math.js\";\ntest(\"adds\", () => assert.equal(add(1, 1), 2));\n",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\ntest(\"adds\", () => assert.equal(1 + 1, 2));\n",
     );
     project.write("src/math.js", "// Nothing here yet.\n");
     project.write(".gitignore", ".supercov\n");
@@ -19847,6 +19847,10 @@ fn mutants_pit_refuses_runs_it_cannot_join() {
     project.write(
         "src/math.js",
         "export function add(a, b) {\n  return a + b;\n}\n",
+    );
+    project.write(
+        "test/math.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { add } from \"../src/math.js\";\ntest(\"adds\", () => assert.equal(add(1, 1), 2));\n",
     );
     project.commit("code");
     project.measure(&[]);

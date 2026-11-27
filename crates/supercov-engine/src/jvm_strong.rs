@@ -1551,8 +1551,8 @@ mod tests {
             ("Replaced bitwise OR with AND", "|>&"),
             ("Replaced XOR with AND", "^>&"),
             ("Replaced Shift Left with Shift Right", "<<>>>"),
-            ("Replaced Shift Right with Shift Left", ">><<"),
-            ("Replaced Unsigned Shift Right with Shift Left", ">>><<"),
+            ("Replaced Shift Right with Shift Left", ">>><<"),
+            ("Replaced Unsigned Shift Right with Shift Left", ">>>><<"),
             ("Replaced long negation with nothing", "negation>nothing"),
             ("Replaced integer addition", ""),
         ] {
