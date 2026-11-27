@@ -19617,6 +19617,11 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
         "src/test/java/w/WTest.java",
         "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n\n    @Test\n    void small() {\n        assertTrue(W.small(3));\n    }\n\n    @Test\n    void named() {\n        assertEquals(\"nullnull\", W.named(\"\"));\n    }\n}\n",
     );
+    // A source with nothing to mutate lists no mutants.
+    project.write(
+        "src/main/java/w/Marker.java",
+        "package w;\n\npublic interface Marker {\n}\n",
+    );
     project.git(&["init", "-q"]);
     project.commit("fixture");
     let tested = project
@@ -19794,6 +19799,114 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
     assert!(
         help.stdout()
             .contains("Usage: supercov runs <run-id> mutants pit")
+    );
+}
+
+/// `mutants pit` against runs it cannot join: a run that listed no
+/// mutants is refused, as are an unknown run and a store or project it
+/// cannot read; a run of JavaScript alone has none of PIT's mutants to
+/// join, and an empty report leaves nothing to compare, nothing PIT's
+/// alone and no violation. A source it cannot read again is left out.
+#[test]
+fn mutants_pit_refuses_runs_it_cannot_join() {
+    let project = Project::empty("mutants-pit-unjoined");
+    project.write(
+        "package.json",
+        r#"{ "name": "unjoined", "private": true, "type": "module", "scripts": { "test": "node --test" } }"#,
+    );
+    project.write(
+        "test/math.test.js",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { add } from \"../src/math.js\";\ntest(\"adds\", () => assert.equal(add(1, 1), 2));\n",
+    );
+    project.write("src/math.js", "// Nothing here yet.\n");
+    project.write(".gitignore", ".supercov\n");
+    project.write(
+        "mutations.xml",
+        "<?xml version=\"1.0\"?>\n<mutations>\n</mutations>\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("tests alone");
+    let empty_run = project.measure(&[]);
+    let pit = |extra: &[&str], fault: &str| -> common::Ran {
+        let mut args = vec!["runs", "latest", "mutants", "pit", "mutations.xml"];
+        args.extend_from_slice(extra);
+        let env = if fault.is_empty() {
+            vec![]
+        } else {
+            vec![("SUPERCOV_TEST_FAULT", fault)]
+        };
+        project.supercov_with(&args, &env)
+    };
+    let none = pit(&[], "").exits(2);
+    assert!(
+        none.contains(&format!(
+            "run {empty_run} listed no mutants and measured no source to list them from"
+        )),
+        "{none}"
+    );
+    project.write(
+        "src/math.js",
+        "export function add(a, b) {\n  return a + b;\n}\n",
+    );
+    project.commit("code");
+    project.measure(&[]);
+    let joined = pit(&["--json"], "").json();
+    assert_eq!(joined["pit"], 0, "{joined}");
+    assert_eq!(joined["supercov"], 0, "{joined}");
+    assert_eq!(joined["matched"], 0, "{joined}");
+    let said = pit(&[], "").succeeds();
+    assert_eq!(
+        said,
+        "PIT's 0 mutants beside the run's 0: 0 matched, 0 agree, 0 soundness violation(s)\n  only PIT        0\n  only Supercov   0\n"
+    );
+    // The source read again fails: it is left out, and the rest goes on.
+    let unread = pit(&[], "fs.read_to_string#mutants-pit.read-source");
+    assert_eq!(unread.code(), 0, "{}", unread.stderr());
+    assert!(
+        fired_at(&unread.stderr(), "mutants-pit.read-source"),
+        "{}",
+        unread.stderr()
+    );
+    assert_eq!(unread.stdout(), said);
+    // A store or a project it cannot read: refused, naming the place.
+    for place in ["run-store.discover-runs", "jvm-project.walk"] {
+        let refused = pit(&[], &format!("fs.read_dir#{place}"));
+        assert_eq!(refused.code(), 2, "{place}: {}", refused.stderr());
+        assert!(fired_at(&refused.stderr(), place), "{}", refused.stderr());
+    }
+    let unknown = project
+        .supercov(&["runs", "nosuch", "mutants", "pit", "mutations.xml"])
+        .exits(2);
+    assert!(
+        unknown.contains("coverage run not found: nosuch"),
+        "{unknown}"
+    );
+}
+
+/// `mutants pit` started in a directory deleted under the shell has no
+/// project to join and refuses. Linux's `getcwd` refuses a removed
+/// directory; macOS may still name it.
+#[cfg(target_os = "linux")]
+#[test]
+fn mutants_pit_whose_directory_is_gone_refuses() {
+    let parent = std::env::temp_dir().join(format!("supercov-pit-gone-{}", std::process::id()));
+    let gone = parent.join("gone");
+    std::fs::create_dir_all(&gone).unwrap();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"cd "$1" && rmdir "$1" && shift && exec "$@""#)
+        .arg("sh")
+        .arg(&gone)
+        .arg(env!("CARGO_BIN_EXE_supercov"))
+        .args(["runs", "latest", "mutants", "pit", "mutations.xml"])
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&parent).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("Usage: supercov runs <run-id> mutants pit"),
+        "{stderr}"
     );
 }
 

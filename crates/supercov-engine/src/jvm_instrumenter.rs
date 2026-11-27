@@ -1972,4 +1972,25 @@ class Outer {
             .collect::<Vec<_>>();
         assert!(statements.contains(&"return 2;"), "{statements:?}");
     }
+
+    // Coverage of the plain rewrite.
+
+    /// The plain rewrite leaves a source with no edits as it is, and puts
+    /// edits at one offset in rank order with no position comments.
+    #[test]
+    fn a_plain_rewrite_inserts_only_its_edits() {
+        assert_eq!(rewrite_plain("a + b", &[]), "a + b");
+        let edit = |at: usize, rank: i32, text: &str| GoEdit {
+            at,
+            rank,
+            text: text.into(),
+        };
+        assert_eq!(
+            rewrite_plain(
+                "a + b",
+                &[edit(0, 2, "("), edit(5, 1, ")"), edit(0, 1, "f")]
+            ),
+            "f(a + b)"
+        );
+    }
 }

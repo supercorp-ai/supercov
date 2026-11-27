@@ -68,8 +68,10 @@ pub fn switch_source(
     for (position, index) in sites.iter().enumerate() {
         let span = mutants[*index].placement.span;
         while let Some(top) = stack.last() {
+            // Sites are sorted by start, so an open site starts at or
+            // before this one: it holds this one when it ends after it.
             let outer = mutants[sites[*top]].placement.span;
-            if outer.0 <= span.0 && span.1 <= outer.1 {
+            if span.1 <= outer.1 {
                 break;
             }
             stack.pop();
@@ -566,5 +568,280 @@ mod tests {
         assert_eq!(offset_of(text, 2, 9), Some(7));
         assert_eq!(offset_of(text, 3, 1), Some(8));
         assert_eq!(offset_of(text, 5, 1), None);
+    }
+
+    // Coverage of the schemata's forms, their nesting and their helpers.
+
+    /// A mutant of `source` whose switch takes `span`, keeps `holes` and has
+    /// `form`: the enumeration's own mutant with its placement replaced.
+    fn crafted(span: Range, holes: Vec<Range>, form: Form) -> JvmMutant {
+        let source = "class A {\n  int f(int a) { return a; }\n}\n";
+        let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Java).unwrap();
+        let index = ProjectIndex::of([("A.java", source)]);
+        let mut mutant = enumerate(source, &tree, JvmLanguage::Java, &index)
+            .into_iter()
+            .next()
+            .unwrap();
+        mutant.placement = crate::jvm_mutants::Placement {
+            span,
+            holes,
+            form,
+            layer: 0,
+        };
+        mutant.operator = None;
+        mutant
+    }
+
+    /// `source` with the one mutant's switch, in slot 3.
+    fn one(source: &str, language: JvmLanguage, mutant: JvmMutant) -> String {
+        switch_source(source, language, 3, &[mutant], &[0]).source
+    }
+
+    /// A file with no mutant placed is written unchanged.
+    #[test]
+    fn nothing_placed_leaves_the_source_as_it_is() {
+        let source = "class A {}\n";
+        let out = switch_source(source, JvmLanguage::Java, 3, &[], &[]);
+        assert_eq!(out.source, source);
+        assert!(out.regions.is_empty());
+    }
+
+    /// Java's `i += n` step written both ways, its `-x` inverted, and a
+    /// lambda body's removed call: each switch as the runtime calls it.
+    #[test]
+    fn java_step_by_invert_and_lambda_call_switches() {
+        let s = RUNTIME;
+        let on = format!("{s}.on(3, 0)");
+        let plus = crafted(
+            (0, 6),
+            vec![(0, 1), (5, 6)],
+            Form::StepBy { operator: "+=" },
+        );
+        assert_eq!(
+            one("i += 2", JvmLanguage::Java, plus),
+            format!("{s}.v({on} ? (i -= 2) : (i += 2))")
+        );
+        let minus = crafted(
+            (0, 6),
+            vec![(0, 1), (5, 6)],
+            Form::StepBy { operator: "-=" },
+        );
+        assert_eq!(
+            one("i -= 2", JvmLanguage::Java, minus),
+            format!("{s}.v({on} ? (i += 2) : (i -= 2))")
+        );
+        let invert = crafted((0, 2), vec![(1, 2)], Form::Invert);
+        assert_eq!(
+            one("-a", JvmLanguage::Java, invert),
+            format!("{s}.inv(3, 0, a)")
+        );
+        let lambda = crafted((0, 5), vec![(0, 5)], Form::RemoveCall { lambda: true });
+        assert_eq!(
+            one("log()", JvmLanguage::Java, lambda),
+            format!("{{ if (!{on}) log(); }}")
+        );
+    }
+
+    /// Kotlin's compound assignment, its `-=` step and a removed call: an
+    /// `if` on the switch, with `Unit` where the call is gone.
+    #[test]
+    fn kotlin_compound_step_by_and_removed_call_switches() {
+        let on = format!("{RUNTIME}.on(3, 0)");
+        let compound = crafted(
+            (0, 6),
+            vec![(0, 1), (5, 6)],
+            Form::Compound {
+                from: "*=",
+                to: "/=",
+                statement: true,
+            },
+        );
+        assert_eq!(
+            one("c *= 2", JvmLanguage::Kotlin, compound),
+            format!("if ({on}) c /= 2 else c *= 2")
+        );
+        let minus = crafted(
+            (0, 6),
+            vec![(0, 1), (5, 6)],
+            Form::StepBy { operator: "-=" },
+        );
+        assert_eq!(
+            one("i -= 2", JvmLanguage::Kotlin, minus),
+            format!("if ({on}) i += 2 else i -= 2")
+        );
+        let removed = crafted((0, 5), vec![(0, 5)], Form::RemoveCall { lambda: false });
+        assert_eq!(
+            one("log()", JvmLanguage::Kotlin, removed),
+            format!("if (!{on}) log() else Unit")
+        );
+    }
+
+    /// A Kotlin `%` binds its operands and multiplies them when on, as
+    /// PIT's math mutator does.
+    #[test]
+    fn a_kotlin_remainder_switches_to_a_product() {
+        let rem = crafted((0, 5), vec![(0, 1), (4, 5)], Form::Arith("rem"));
+        assert_eq!(
+            one("a % b", JvmLanguage::Kotlin, rem),
+            format!(
+                "(a).let {{ supercovL3_0 -> (b).let {{ supercovR3_0 -> if ({RUNTIME}.on(3, 0)) supercovL3_0 * supercovR3_0 else supercovL3_0 % supercovR3_0 }} }}"
+            )
+        );
+    }
+
+    /// Every helper's Kotlin operator and the one PIT puts in its place;
+    /// a name with no operator writes none.
+    #[test]
+    fn kotlin_operators_follow_pits_replacements() {
+        let mutant = crafted((0, 1), vec![], Form::Negate);
+        for (helper, from, to) in [
+            ("lt", "<", "<="),
+            ("le", "<=", "<"),
+            ("gt", ">", ">="),
+            ("ge", ">=", ">"),
+            ("add", "+", "-"),
+            ("sub", "-", "+"),
+            ("mul", "*", "/"),
+            ("div", "/", "*"),
+            ("rem", "%", "*"),
+            ("and", "and", "or"),
+            ("or", "or", "and"),
+            ("xor", "xor", "and"),
+            ("shl", "shl", "shr"),
+            ("shr", "shr", "shl"),
+            ("ushr", "ushr", "shl"),
+            ("eq", "", ""),
+        ] {
+            assert_eq!(
+                kotlin_operators(helper, &mutant),
+                (from.to_owned(), to.to_owned()),
+                "{helper}"
+            );
+        }
+    }
+
+    /// Each Java return replacement's helper: a generic one takes the
+    /// declared return type as its type argument, a primitive zero of a
+    /// narrow type is cast back, and a boxed zero has its type's helper.
+    #[test]
+    fn java_returns_call_each_value_s_helper() {
+        let s = RUNTIME;
+        for (value, plain, witnessed) in [
+            (ReturnValue::True, "rT(3, 0, v)", "rT(3, 0, v)"),
+            (ReturnValue::False, "rF(3, 0, v)", "rF(3, 0, v)"),
+            (ReturnValue::BoxedTrue, "rBT(3, 0, v)", "<T>rBT(3, 0, v)"),
+            (ReturnValue::BoxedFalse, "rBF(3, 0, v)", "<T>rBF(3, 0, v)"),
+            (ReturnValue::Null, "rN(3, 0, v)", "<T>rN(3, 0, v)"),
+            (ReturnValue::Zero(Prim::Int), "rZ(3, 0, v)", "rZ(3, 0, v)"),
+            (ReturnValue::EmptyString, "rS(3, 0, v)", "rS(3, 0, v)"),
+            (
+                ReturnValue::EmptyList,
+                "rList(3, 0, v)",
+                "<T>rList(3, 0, v)",
+            ),
+            (ReturnValue::EmptySet, "rSet(3, 0, v)", "<T>rSet(3, 0, v)"),
+            (ReturnValue::EmptyMap, "rMap(3, 0, v)", "<T>rMap(3, 0, v)"),
+            (
+                ReturnValue::EmptyOptional,
+                "rOpt(3, 0, v)",
+                "<T>rOpt(3, 0, v)",
+            ),
+            (
+                ReturnValue::EmptyStream,
+                "rStream(3, 0, v)",
+                "<T>rStream(3, 0, v)",
+            ),
+            (
+                ReturnValue::BoxedZero(Prim::Int),
+                "rBI(3, 0, v)",
+                "<T>rBI(3, 0, v)",
+            ),
+            (
+                ReturnValue::BoxedZero(Prim::Long),
+                "rBL(3, 0, v)",
+                "<T>rBL(3, 0, v)",
+            ),
+            (
+                ReturnValue::BoxedZero(Prim::Float),
+                "rBF0(3, 0, v)",
+                "<T>rBF0(3, 0, v)",
+            ),
+            (
+                ReturnValue::BoxedZero(Prim::Double),
+                "rBD(3, 0, v)",
+                "<T>rBD(3, 0, v)",
+            ),
+            (
+                ReturnValue::BoxedZero(Prim::Short),
+                "rBS(3, 0, v)",
+                "<T>rBS(3, 0, v)",
+            ),
+            (
+                ReturnValue::BoxedZero(Prim::Char),
+                "rBC(3, 0, v)",
+                "<T>rBC(3, 0, v)",
+            ),
+        ] {
+            assert_eq!(java_return(value, 3, 0, "v", None), format!("{s}.{plain}"));
+            assert_eq!(
+                java_return(value, 3, 0, "v", Some("T")),
+                format!("{s}.{witnessed}"),
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            java_return(ReturnValue::Zero(Prim::Short), 3, 0, "v", None),
+            format!("((short) {s}.rZ(3, 0, v))")
+        );
+    }
+
+    /// Kotlin calls the same helpers with the type argument after the
+    /// name; values with no type argument ignore the declared type.
+    #[test]
+    fn kotlin_returns_put_the_type_argument_after_the_name() {
+        let s = RUNTIME;
+        assert_eq!(
+            kotlin_return(ReturnValue::EmptyList, 3, 0, "v", Some("List<Int>")),
+            format!("{s}.rList<List<Int>>(3, 0, v)")
+        );
+        assert_eq!(
+            kotlin_return(ReturnValue::Zero(Prim::Int), 3, 0, "v", Some("Int")),
+            format!("{s}.rZ(3, 0, v)")
+        );
+        assert_eq!(
+            kotlin_return(ReturnValue::Null, 3, 0, "v", None),
+            format!("{s}.rN(3, 0, v)")
+        );
+    }
+
+    /// Of two sites that overlap without one holding the other, the later
+    /// is left out: its text is already inside the first switch.
+    #[test]
+    fn an_overlapping_site_is_left_out() {
+        let first = crafted((0, 3), vec![(0, 3)], Form::Negate);
+        let second = crafted((2, 5), vec![(2, 5)], Form::Negate);
+        let out = switch_source("abcde", JvmLanguage::Java, 3, &[first, second], &[0, 1]);
+        assert_eq!(out.source, format!("{RUNTIME}.n(3, 0, abc)de"));
+        assert_eq!(out.regions, vec![(0, (0, out.source.len() - 2))]);
+    }
+
+    /// A site running past the end of the text is left out, and the text is
+    /// written unchanged.
+    #[test]
+    fn a_site_past_the_end_is_left_out() {
+        let past = crafted((1, 10), vec![(1, 10)], Form::Negate);
+        let out = switch_source("abc", JvmLanguage::Java, 3, &[past], &[0]);
+        assert_eq!(out.source, "abc");
+        assert!(out.regions.is_empty());
+    }
+
+    /// A template's hole the placement does not have is written empty.
+    #[test]
+    fn a_missing_hole_is_written_empty() {
+        let lt = crafted((0, 5), vec![(0, 1)], Form::Compare("lt"));
+        assert_eq!(
+            one("a < b", JvmLanguage::Java, lt),
+            format!("{RUNTIME}.lt(3, 0, a, )")
+        );
     }
 }

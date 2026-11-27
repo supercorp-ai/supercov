@@ -466,9 +466,9 @@ pub fn prepare_jvm_project(
                 widths.extend(obligations.decision_widths);
                 let mut edits = obligations.edits;
                 let mut plain = false;
-                if let (Some(index), Some(mutants)) = (&index, &mut mutants)
-                    && let Ok(tree) = crate::jvm_instrumenter::parse(&source, *language)
-                {
+                if let (Some(index), Some(mutants)) = (&index, &mut mutants) {
+                    let tree = crate::jvm_instrumenter::parse(&source, *language)
+                        .expect("a source whose obligations were built parses");
                     let found = crate::jvm_mutants::enumerate(&source, &tree, *language, index);
                     let mut listed = found
                         .iter()

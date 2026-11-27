@@ -3369,4 +3369,110 @@ mod tests {
         assert_eq!(differing("x.a", "y.a"), Some(("x", "y", false, true)));
         assert_eq!(differing("a+b", "a+cb"), Some(("b", "cb", true, false)));
     }
+
+    // Coverage of PIT's mutators' weak verdicts (`pit_mutator`).
+
+    /// A PIT boundary mutant is decided by its comparison's operands: equal
+    /// once infects it; never equal leaves it uninfected, said of the
+    /// operands where it knows them; an outcome the probe does not name
+    /// decides nothing. A probe that recorded nothing says the code never
+    /// ran.
+    #[test]
+    fn a_pit_boundary_mutant_is_decided_by_its_operands() {
+        let boundary = CandidateMutant {
+            compare: Some("site".into()),
+            ..mutant("ConditionalsBoundary", "<=", "a < b")
+        };
+        expect(
+            &boundary,
+            &with_outcomes("site", &["lt", "eq"]),
+            INFECTED,
+            "operands-equal",
+        );
+        let (status, reason) = verdict(&boundary, &with_outcomes("site", &["lt", "gt"]));
+        assert_eq!(
+            (status, reason.code, reason.sentence.as_str()),
+            (
+                Status::NotInfected,
+                "operands-never-equal",
+                "the operands were never equal"
+            )
+        );
+        expect(
+            &boundary,
+            &with_outcomes("site", &["lt", "same"]),
+            Status::Unknown,
+            "unrecorded-outcome",
+        );
+        expect(&boundary, &ran(), Status::NotReached, "not-evaluated");
+    }
+
+    /// A PIT return mutant whose probe saw only the value it returns
+    /// instead is not infected, for each kind of value; a value no outcome
+    /// names (an empty stream) is another value.
+    #[test]
+    fn a_pit_return_mutant_returning_what_was_returned_is_not_infected() {
+        for (mutator, replacement, outcome) in [
+            ("BooleanFalseReturnVals", "false", "boolean-false"),
+            ("NullReturnVals", "null", "null"),
+            ("EmptyObjectReturnVals", "\"\"", "empty-string"),
+            ("EmptyObjectReturnVals", "emptyList", "empty-list"),
+            ("EmptyObjectReturnVals", "emptySet", "empty-set"),
+            ("EmptyObjectReturnVals", "emptyMap", "empty-map"),
+            ("EmptyObjectReturnVals", "Optional.empty", "empty-optional"),
+            ("EmptyObjectReturnVals", "0", "boxed-zero"),
+        ] {
+            let returned = CandidateMutant {
+                probe: Some("site".into()),
+                ..mutant(mutator, replacement, "x")
+            };
+            expect(
+                &returned,
+                &with_outcomes("site", &[outcome]),
+                Status::NotInfected,
+                "returned-replacement",
+            );
+            expect(
+                &returned,
+                &with_outcomes("site", &[outcome, "other"]),
+                INFECTED,
+                "returned-other",
+            );
+        }
+        let stream = CandidateMutant {
+            probe: Some("site".into()),
+            ..mutant("EmptyObjectReturnVals", "Stream.empty", "s")
+        };
+        expect(
+            &stream,
+            &with_outcomes("site", &["other"]),
+            INFECTED,
+            "returned-other",
+        );
+    }
+
+    /// A PIT operation mutant's probe that names neither `same` nor
+    /// `differs` decides nothing; without a probe, a call PIT removes is
+    /// infected where it ran (a proxy) and not reached where it did not.
+    #[test]
+    fn pit_operation_and_call_mutants_without_a_deciding_record() {
+        let math = CandidateMutant {
+            probe: Some("site".into()),
+            ..mutant("Math", "-", "a + b")
+        };
+        expect(
+            &math,
+            &with_outcomes("site", &["same", "eq"]),
+            Status::Unknown,
+            "unrecorded-outcome",
+        );
+        let call = mutant("VoidMethodCall", "log", "log()");
+        expect(&call, &ran(), PROXY, "statement-ran");
+        expect(
+            &call,
+            &Observations::default(),
+            Status::NotReached,
+            "statement-not-run",
+        );
+    }
 }
