@@ -19,6 +19,7 @@ const projects = {
   'rust-ripgrep': {
     repo: 'https://github.com/BurntSushi/ripgrep', ref: '14.1.1',
     test: 'cargo test --workspace',
+    rounds: 1,
   },
   'python-click': {
     repo: 'https://github.com/pallets/click', ref: '8.1.7',
@@ -74,7 +75,7 @@ const binaries = (process.env.SUPERCOV_BINARIES ?? '').split(',').filter(Boolean
   const [label, path] = entry.split('=');
   return { label, path: resolve(path) };
 });
-const rounds = Number(process.env.SPEED_ROUNDS ?? 2);
+const rounds = projects[process.env.SPEED_PROJECT]?.rounds ?? Number(process.env.SPEED_ROUNDS ?? 2);
 const output = resolve(process.env.SPEED_OUTPUT ?? 'speed-languages');
 mkdirSync(join(output, 'logs'), { recursive: true });
 mkdirSync(join(output, 'answers'), { recursive: true });
