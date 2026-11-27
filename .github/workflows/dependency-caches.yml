@@ -15,6 +15,17 @@ name: Dependency caches
 #
 # The tests are run here for what they fetch, not for their verdicts: a test
 # failing does not fail this workflow, and CI and Compatibility judge them.
+#
+# Each job is kept to about ten minutes. A platform's JVM tests ran in one job
+# with the build of every workspace test and the CLI's whole suite: 40 to 50
+# minutes on Windows, where the CLI's tests alone took 20. Now the Rust cache,
+# the build and the JVM tests are jobs of their own: the Rust cache is built
+# only when its key is new (an exact hit is never saved again), the build hands
+# the JVM tests to the next job as a nextest archive, and the CLI's tests are
+# no longer run here: from an empty cache on 2026-11-27 (run 46036067075), the
+# JVM tests fetched all 1,614 files, and the scripts and the CLI's 802 tests
+# after them fetched none. Should a new CLI test fetch something, its pull
+# request's runs still save what they fetched for themselves.
 
 on:
   push:
@@ -94,10 +105,14 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
-  jvm:
-    name: JVM dependencies (${{ matrix.os }})
+  # Compatibility's Rust cache (shared key `compatibility`), one per platform.
+  # rust-cache never saves over an exact hit, so the workspace is built only
+  # when the key is new: a new lockfile, manifest or toolchain, or the cache
+  # evicted.
+  compatibility-rust:
+    name: Compatibility's Rust cache (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,12 +120,83 @@ jobs:
         os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON('["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # What Compatibility's jobs build: the workspace's tests, the JVM tests,
+      # the CLI.
+      - if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo nextest run --workspace --no-run && cargo test --no-run -p supercov-engine --test jvm_frontend --test jvm_run && cargo build -p supercov
+
+  # The JVM tests and the CLI, built once per platform for the job that runs
+  # them, from Compatibility's Rust cache (only read here). Also npm's cache
+  # for the platform, which Compatibility's jobs restore.
+  jvm-build:
+    name: JVM tests' build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON('["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: node
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           # npm's cache for main only: a run on another branch would keep a
           # copy no pull request can read.
           cache: ${{ github.ref == 'refs/heads/main' && 'npm' || '' }}
+      # What fills npm's cache, when there is one to save.
+      - if: github.ref == 'refs/heads/main' && steps.node.outputs.cache-hit != 'true'
+        run: npm ci --ignore-scripts
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compatibility
+          save-if: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - name: Build the JVM tests and the CLI
+        shell: bash
+        run: |
+          cargo nextest archive -p supercov-engine --test jvm_frontend --test jvm_run --archive-file "$RUNNER_TEMP/jvm-tests.tar.zst"
+          cargo build -p supercov
+          mkdir -p "$RUNNER_TEMP/built"
+          mv "$RUNNER_TEMP/jvm-tests.tar.zst" "$RUNNER_TEMP/built/"
+          cp target/debug/supercov* "$RUNNER_TEMP/built/" 2> /dev/null || true
+          rm -f "$RUNNER_TEMP"/built/*.d
+          ls -la "$RUNNER_TEMP/built"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jvm-tests-${{ matrix.os }}
+          path: ${{ runner.temp }}/built
+          retention-days: 1
+          compression-level: 0
+
+  jvm:
+    name: JVM dependencies (${{ matrix.os }})
+    needs: jvm-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON('["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -138,32 +224,35 @@ jobs:
           [ "$RUNNER_OS" = Windows ] && jar=$(cygpath -w "$jar")
           echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
       - uses: ./.github/actions/apache-ant
-      - uses: dtolnay/rust-toolchain@stable
-      # Compatibility's Rust cache: the workspace's tests, built here.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: compatibility
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
-      - run: npm ci
-      - run: cargo nextest run --workspace --no-run && cargo test --no-run -p supercov-engine --test jvm_frontend --test jvm_run && cargo build -p supercov
-        timeout-minutes: 30
-      # What Compatibility's JDK jobs run, with the limit they give it.
-      - run: npm run test:jvm
+      - uses: actions/download-artifact@v5
+        with:
+          name: jvm-tests-${{ matrix.os }}
+          path: ${{ runner.temp }}/built
+      - name: Put the CLI where the scripts look for it
+        shell: bash
+        run: |
+          mkdir -p target/debug
+          cp "$RUNNER_TEMP"/built/supercov* target/debug/
+          chmod +x target/debug/supercov* || true
+      # What Compatibility's JDK jobs run (`npm run test:jvm`): the JVM tests,
+      # ignored ones included, one at a time, then the side-by-side run.
+      - name: Run the JVM tests
+        shell: bash
         continue-on-error: true
-        timeout-minutes: 28
+        timeout-minutes: 20
         env:
           SUPERCOV_REQUIRE_JVM: "1"
-      # The CLI's tests, which build Maven and Gradle projects of their own,
-      # as CI's check and Compatibility's filesystem jobs run them.
-      - run: cargo nextest run -p supercov --no-fail-fast
+        run: cargo-nextest nextest run --archive-file "$RUNNER_TEMP/built/jvm-tests.tar.zst" --workspace-remap . --run-ignored all --test-threads 1 --no-fail-fast
+      - run: node scripts/side-by-side.mjs jvm
         continue-on-error: true
-        timeout-minutes: 30
+        timeout-minutes: 5
       # The scripts engine-integrations runs that build with Maven.
       - if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
+          npm ci
           node scripts/java-syntax-zoo.mjs || true
           node scripts/mutation-report-formats.mjs || true
           node scripts/assertions-integration.mjs || true
