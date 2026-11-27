@@ -45,17 +45,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 7/16, offset: 3, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 9/16, offset: 4, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 11/16, offset: 5, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,record-b,record-s,hook,activate,prelude' }
-          # Node CPU profiles of every process, and the pages' renderer
-          # profile, plain against measured.
-          - { app: large, shard: 2/16, offset: 0, rounds: 0, diagnose: 1, variants: 'new' }
+          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 7/16, offset: 3, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 9/16, offset: 4, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 11/16, offset: 5, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
+          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,maps-none,maps-nocontent,noinstr' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -73,7 +70,8 @@ jobs:
           for variant in $(echo "${{ matrix.variants }}" | tr ',' ' '); do
             case "$variant" in
               new) extra="SPEED_NOTHING=1" ;;
-              noinstr) extra="SUPERCOV_SOURCE_ROOTS=src/proxy.ts" ;;
+              noinstr) extra="SUPERCOV_SOURCE_ROOTS=lib/db.ts" ;;
+              maps-*) extra="SUPERCOV_DIAG_MAPS=${variant#maps-}" ;;
               *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
             esac
             printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "$extra" "$GITHUB_WORKSPACE/binaries/supercov-new/supercov" > "$RUNNER_TEMP/wrap/$variant"

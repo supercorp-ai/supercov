@@ -835,6 +835,21 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Option<String> {
 /// prefixing one semicolon per banner line rather than re-encoding tokens. A
 /// shebang keeps the first line and maps to itself, so the banner below it
 /// shifts everything after by the same amount.
+/// DIAGNOSTIC ONLY: the inline map's `sourcesContent` left out.
+fn diag_strip_sources_content(code: &str) -> String {
+    use base64::Engine as _;
+    let marker = "//# sourceMappingURL=data:application/json;base64,";
+    let Some(at) = code.rfind(marker) else { return code.to_owned() };
+    let encoded = code[at + marker.len()..].trim_end();
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else { return code.to_owned() };
+    let Ok(mut map) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return code.to_owned() };
+    if let Some(object) = map.as_object_mut() {
+        object.remove("sourcesContent");
+    }
+    let payload = serde_json::to_string(&map).expect("a JSON value serializes");
+    format!("{}{marker}{}\n", &code[..at], base64::engine::general_purpose::STANDARD.encode(payload))
+}
+
 fn inline_instrumentation_map(
     code: &str,
     map: Option<&serde_json::Value>,
@@ -2012,13 +2027,25 @@ fn instrument_source(
     // stack traces show the user's real path and line numbers instead
     // of instrumented workspace positions -- Supercov stays invisible
     // in errors. Without this the map was generated and then dropped.
-    let code = inline_instrumentation_map(
-        &output.code,
-        output.map.as_ref(),
-        &project.root.join(file),
-        &source,
-    )
-    .expect("the instrumenter gives every file a whole source map");
+    // DIAGNOSTIC ONLY (never merged): SUPERCOV_DIAG_MAPS=none writes no map,
+    // nocontent a map without the author's text.
+    let diag_maps = std::env::var("SUPERCOV_DIAG_MAPS").unwrap_or_default();
+    let code = if diag_maps == "none" {
+        output.code.clone()
+    } else {
+        let code = inline_instrumentation_map(
+            &output.code,
+            output.map.as_ref(),
+            &project.root.join(file),
+            &source,
+        )
+        .expect("the instrumenter gives every file a whole source map");
+        if diag_maps == "nocontent" {
+            diag_strip_sources_content(&code)
+        } else {
+            code
+        }
+    };
     write_authored(workspace, file, &source)?;
     atomic_write(&path, code.as_bytes())?;
     Ok(InstrumentedSource::Measured(Box::new(output)))
