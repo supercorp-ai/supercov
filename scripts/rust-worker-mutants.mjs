@@ -154,8 +154,9 @@ fn serve_with(wrangler: &str) -> Dev {
         .spawn()
         .expect("wrangler");
     let dev = Dev { child, port };
-    // Two minutes: a Worker that never answers fails its test, not the job.
-    for _ in 0..240 {
+    // Four minutes, for a real wrangler that builds the Worker first: one
+    // that never answers fails its test, not the job.
+    for _ in 0..480 {
         if get(port, "/ready").as_deref() == Some("ready") {
             return dev;
         }
