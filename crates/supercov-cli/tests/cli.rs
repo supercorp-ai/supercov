@@ -20007,6 +20007,223 @@ fn small_maven_project(project: &Project) {
     project.write(".gitignore", "target/\n");
 }
 
+/// A product class of two methods for a strong pass: `twice` a test checks,
+/// `thrice` a test runs and does not check. Its `n * 2` is on line 5 and
+/// its `n * 3` on line 9.
+const STRONG_CALC: &str = "package app;\n\npublic class Calc {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static int thrice(int n) {\n        return n * 3;\n    }\n}\n";
+
+/// The verdicts the last strong pass of `project` saved.
+fn saved_strong_verdicts(project: &Project) -> Option<serde_json::Value> {
+    std::fs::read_dir(project.root.join(".supercov/runs"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+}
+
+/// Runs `command` under `supercov mutants` and asserts what the strong pass
+/// decided for `STRONG_CALC` at `file`: `n * 2`'s division killed by the
+/// test that checks it (a test named with `killer`), and `n * 3`'s, which
+/// a test runs and nothing checks, survived. A driver that ran nothing, or
+/// failed every mutant, decides neither so.
+fn assert_strong_pass_decides_calc(project: &Project, command: &[&str], file: &str, killer: &str) {
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let mut arguments = vec!["mutants", "--json", "--"];
+    arguments.extend_from_slice(command);
+    let ran = project.supercov(&arguments);
+    let tested = format!("{}\n{}", ran.stdout(), ran.stderr());
+    let verdicts =
+        saved_strong_verdicts(project).unwrap_or_else(|| panic!("no verdicts saved:\n{tested}"));
+    let division = |line: u32| {
+        let found = verdicts["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id.starts_with(&format!("{file}:{line}:")) && id.ends_with(":Math:/"))
+            .map(|(_, verdict)| verdict.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "line {line}: {verdicts}\n{tested}");
+        found[0].clone()
+    };
+    let checked = division(5);
+    assert_eq!(checked["status"], "killed", "{verdicts}\n{tested}");
+    assert!(
+        checked["killedBy"]
+            .as_str()
+            .is_some_and(|test| test.contains(killer)),
+        "{verdicts}\n{tested}"
+    );
+    assert_eq!(division(9)["status"], "survived", "{verdicts}\n{tested}");
+}
+
+/// Apache Ant's launcher, from `ANT_HOME`.
+fn ant_launcher() -> Option<std::path::PathBuf> {
+    let launcher = std::path::PathBuf::from(std::env::var_os("ANT_HOME")?).join("bin/ant");
+    launcher.is_file().then_some(launcher)
+}
+
+/// Jars from the local Maven repository, every one of them or none.
+fn local_jars(relative: &[&str]) -> Option<String> {
+    let repository = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".m2/repository");
+    relative
+        .iter()
+        .map(|jar| {
+            let path = repository.join(jar);
+            path.is_file()
+                .then(|| format!("<pathelement location=\"{}\"/>", path.display()))
+        })
+        .collect()
+}
+
+/// A Spock specification on the JUnit Platform, through Gradle: the strong
+/// pass runs Calc's mutants against the feature that reaches each, killed
+/// by the one that checks and survived where the one that runs it checks
+/// nothing.
+#[test]
+fn a_spock_specification_s_strong_pass_runs_each_mutant_against_its_features() {
+    if !std::process::Command::new("gradle")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("[jvm] skipped: no Gradle found");
+        return;
+    }
+    let project = Project::empty("jvm-spock-strong");
+    project.write(
+        "settings.gradle",
+        "plugins {\n    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'\n}\nrootProject.name = 'demo'\n",
+    );
+    // Groovy cannot read the newest JDKs' class files: the build asks for
+    // one it can.
+    project.write(
+        "build.gradle",
+        "plugins {\n    id 'groovy'\n    id 'java'\n}\n\nrepositories { mavenCentral() }\n\njava {\n    toolchain { languageVersion = JavaLanguageVersion.of(21) }\n}\n\ndependencies {\n    testImplementation 'org.spockframework:spock-core:2.3-groovy-4.0'\n    testImplementation 'org.apache.groovy:groovy:4.0.22'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\ntest { useJUnitPlatform() }\n",
+    );
+    project.write("src/main/java/app/Calc.java", STRONG_CALC);
+    project.write(
+        "src/test/groovy/app/CalcSpec.groovy",
+        "package app\n\nimport spock.lang.Specification\n\nclass CalcSpec extends Specification {\n    def \"doubles a number\"() {\n        expect:\n        Calc.twice(2) == 4\n    }\n\n    def \"triples a number unchecked\"() {\n        setup:\n        Calc.thrice(2)\n\n        expect:\n        true\n    }\n}\n",
+    );
+    project.write(".gitignore", "build/\n.gradle/\n");
+    assert_strong_pass_decides_calc(
+        &project,
+        &["gradle", "--console=plain", "test"],
+        "src/main/java/app/Calc.java",
+        "doubles a number",
+    );
+}
+
+/// An Ant build whose `<junitlauncher>` runs JUnit 5 on the platform: the
+/// strong pass runs Calc's mutants in the JVM the task forks, killed by
+/// the test that checks and survived where the one that runs it checks
+/// nothing.
+#[test]
+fn an_ant_junitlauncher_build_s_strong_pass_runs_each_mutant_against_its_tests() {
+    let Some(ant) = ant_launcher() else {
+        eprintln!("[jvm] skipped: no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some(classpath) = local_jars(&[
+        "org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar",
+        "org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar",
+        "org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar",
+        "org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar",
+        "org/junit/platform/junit-platform-launcher/1.10.2/junit-platform-launcher-1.10.2.jar",
+        "org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar",
+        "org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar",
+    ]) else {
+        eprintln!("[jvm] skipped: no JUnit 5.10.2 jars in ~/.m2");
+        return;
+    };
+    let project = Project::empty("jvm-ant-launcher-strong");
+    project.write(
+        "build.xml",
+        &format!(
+            r#"<project name="app" default="test">
+    <path id="platform">{classpath}</path>
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <javac srcdir="src/main" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="src/test" destdir="out/test-classes" includeantruntime="false">
+            <classpath><path refid="platform"/><pathelement location="out/classes"/></classpath>
+        </javac>
+        <junitlauncher haltOnFailure="true" printSummary="true">
+            <classpath>
+                <path refid="platform"/>
+                <pathelement location="out/classes"/>
+                <pathelement location="out/test-classes"/>
+            </classpath>
+            <testclasses><fileset dir="out/test-classes" includes="**/*Test.class"/><fork/></testclasses>
+        </junitlauncher>
+    </target>
+</project>
+"#
+        ),
+    );
+    project.write("src/main/app/Calc.java", STRONG_CALC);
+    project.write(
+        "src/test/app/CalcTest.java",
+        "package app;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void twice() {\n        assertEquals(4, Calc.twice(2));\n    }\n\n    @Test\n    void thriceUnchecked() {\n        Calc.thrice(2);\n    }\n}\n",
+    );
+    project.write(".gitignore", "out/\n");
+    let ant = ant.display().to_string();
+    assert_strong_pass_decides_calc(&project, &[&ant, "test"], "src/main/app/Calc.java", "twice");
+}
+
+/// An Ant build whose `<testng>` task runs TestNG: the strong pass runs
+/// Calc's mutants in the JVM the task forks, killed by the test that
+/// checks and survived where the one that runs it checks nothing.
+#[test]
+fn an_ant_testng_build_s_strong_pass_runs_each_mutant_against_its_tests() {
+    let Some(ant) = ant_launcher() else {
+        eprintln!("[jvm] skipped: no Apache Ant in ANT_HOME");
+        return;
+    };
+    let Some(classpath) = local_jars(&[
+        "org/testng/testng/6.14.3/testng-6.14.3.jar",
+        "com/beust/jcommander/1.72/jcommander-1.72.jar",
+    ]) else {
+        eprintln!("[jvm] skipped: no TestNG 6.14.3 and JCommander 1.72 jars in ~/.m2");
+        return;
+    };
+    let project = Project::empty("jvm-ant-testng-strong");
+    project.write(
+        "build.xml",
+        &format!(
+            r#"<project name="app" default="test">
+    <path id="testng.path">{classpath}</path>
+    <taskdef resource="testngtasks" classpathref="testng.path"/>
+    <path id="test.path"><path refid="testng.path"/><pathelement location="out/classes"/><pathelement location="out/test-classes"/></path>
+    <target name="test">
+        <mkdir dir="out/classes"/>
+        <mkdir dir="out/test-classes"/>
+        <javac srcdir="src" destdir="out/classes" includeantruntime="false"/>
+        <javac srcdir="test" destdir="out/test-classes" includeantruntime="false" classpathref="test.path"/>
+        <testng classpathref="test.path" outputdir="out/testng" haltonfailure="true">
+            <classfileset dir="out/test-classes" includes="**/*Test.class"/>
+        </testng>
+    </target>
+</project>
+"#
+        ),
+    );
+    project.write("src/app/Calc.java", STRONG_CALC);
+    project.write(
+        "test/app/CalcTest.java",
+        "package app;\n\nimport static org.testng.Assert.assertEquals;\n\nimport org.testng.annotations.Test;\n\npublic class CalcTest {\n    @Test\n    public void twice() {\n        assertEquals(Calc.twice(2), 4);\n    }\n\n    @Test\n    public void thriceUnchecked() {\n        Calc.thrice(2);\n    }\n}\n",
+    );
+    project.write(".gitignore", "out/\n");
+    let ant = ant.display().to_string();
+    assert_strong_pass_decides_calc(&project, &[&ant, "test"], "src/app/Calc.java", "twice");
+}
+
 /// A Python run beside a test file that does not parse measures the rest:
 /// the file holds no assertion line to arm. Roots that name nothing are
 /// refused before anything runs. A later query that cannot recompute the
