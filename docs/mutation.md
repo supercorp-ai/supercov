@@ -91,6 +91,12 @@ first pass of their own:
   not have failed. A switched build's processes say when they first evaluate
   their mutant; a mutant built on its own, a `wasm-pack test` pass, and one
   resumed from candidates an earlier pass ran are judged as before.
+- a Rust Worker that a `cargo test` suite starts with `wrangler dev` runs
+  its mutants switched on, as the measured run serves it: built once per
+  pass from the `[build] command` (`worker-build`, or a script that runs
+  it), each test's mutant switched on in the Worker's wasm, so its verdicts
+  are those of a Worker built with the mutant. A mutant that does not
+  compile for wasm is built on its own.
 
 Each of these shortcuts is exact. Where the run cannot prove a test is
 irrelevant, the test runs.
