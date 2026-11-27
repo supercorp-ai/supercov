@@ -247,6 +247,13 @@ export function mochaArguments(command) {
     return at < 0 ? undefined : command.slice(at + 1);
 }
 
+// The arguments a command gives AVA, where it starts AVA itself (`ava`,
+// `npx ava`, `node_modules/.bin/ava`, AVA's `entrypoints/cli.mjs`).
+export function avaArguments(command) {
+    const at = command.findIndex((word) => /(?:^|[\\/])ava$/.test(word) || /ava[\\/]entrypoints[\\/]cli\.mjs$/.test(word));
+    return at < 0 ? undefined : command.slice(at + 1);
+}
+
 // The arguments a command gives Vitest, where it starts Vitest itself
 // (`vitest run`, `npx vitest`, `node_modules/.bin/vitest`).
 export function vitestArguments(command) {
@@ -464,6 +471,11 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     const vitestArgs = residentAllowed ? vitestArguments(withoutNpx(command, root)) : undefined;
     const vitestHosts = residentHosts({ script: "strongVitestHost.mjs", args: vitestArgs, root, environment: { ...environment, SUPERCOV_STRONG_PLAN: "" }, log: join(work, "vitest-hosts.log"), asCommand: true });
     const commandOnly = new Set();
+    // AVA: a resident AVA, its command's options worked out once, each job's
+    // test files in fresh workers as the command's own run makes them
+    // (strongAvaHost.mjs).
+    const avaArgs = residentAllowed ? avaArguments(withoutNpx(command, root)) : undefined;
+    const avaHosts = residentHosts({ script: "strongAvaHost.mjs", args: avaArgs, root, environment: { ...environment, SUPERCOV_STRONG_PLAN: "" }, log: join(work, "ava-hosts.log"), asCommand: true });
     const commonJs = packageIsCommonJs(root);
     const broken = new Set();
     const residentFor = (file) => {
@@ -478,6 +490,8 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             return esmHosts;
         if (runner === "vitest-browser" && vitestArgs && !commandOnly.has(file))
             return vitestHosts;
+        if (runner === "ava" && avaArgs && !commandOnly.has(file))
+            return avaHosts;
         return undefined;
     };
     // Rust compiled to wasm (SUPERCOV_WASM_STRONG): a job that starts the
@@ -921,6 +935,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     mochaHosts.close();
     esmHosts.close();
     vitestHosts.close();
+    avaHosts.close();
     write({ summary: true, driver: "jobs", workers, ...profile, durationMs: Date.now() - started });
     return 0;
 }

@@ -6,7 +6,7 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { delimiter } from "node:path";
-import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, turns, vitestArguments, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { WASM_OUT, avaArguments, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, turns, vitestArguments, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -333,6 +333,10 @@ test("a command that starts Jest or Mocha itself names its arguments to them", (
     assert.deepEqual(vitestArguments(["/p/node_modules/.bin/vitest", "run", "--project", "browser"]), ["run", "--project", "browser"]);
     assert.deepEqual(vitestArguments(["node", "node_modules/vitest/vitest.mjs", "run"]), ["run"]);
     assert.equal(vitestArguments(["npm", "test"]), undefined);
+    assert.deepEqual(avaArguments(["/p/node_modules/.bin/ava", "--serial"]), ["--serial"]);
+    assert.deepEqual(avaArguments(["node", "node_modules/ava/entrypoints/cli.mjs"]), []);
+    assert.equal(avaArguments(["npm", "test"]), undefined);
+    assert.equal(avaArguments(["node", "java.js"]), undefined);
     const root = mkdtempSync(join(tmpdir(), "supercov-package-"));
     try {
         assert.equal(packageIsCommonJs(root), true);
