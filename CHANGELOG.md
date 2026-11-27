@@ -14,6 +14,10 @@
 - Jobs of a split strong pass now each run their own mutants, and `supercov merge` holds every verdict they reached between them. Each job dealt its share from its own measurement, by what each mutant's candidates cost and which mutants its plan decided; where a suite covers a little differently from run to run (randomized inputs, timing), the jobs dealt differently, so some mutants ran in two jobs and others in none, and the merged totals came out well under the jobs' totals added up (never a wrong verdict). A mutant's share now follows from its id alone, the same on every machine, decided mutants included.
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
 
+**Changed**
+
+- A Go run builds only what changed since the last run, as `go test` does. Every run wrote its own evidence path into each test package's harness, so Go compiled every package with tests and linked every test binary again on each run. The path is now the same for every run of a copy. Measured on an Actions runner, `go test -count=1 ./...` under Supercov: gin's test command 2.27 s to 1.07 s (plain 0.86 s), cobra's 1.16 s to 0.49 s (plain 0.46 s).
+
 ## 4.29.19
 
 **Fixed**
