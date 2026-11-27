@@ -248,8 +248,8 @@ fn closing_rank_of(_node: Node) -> i32 {
 /// coverage instrumenter braces (`if`, `when`, `try`, a lambda): a probe
 /// closing there would close inside the last brace.
 fn ends_in_braced_branch(node: Node) -> bool {
-    let mut current = Some(node);
-    while let Some(at) = current {
+    let mut at = node;
+    loop {
         if matches!(
             at.kind(),
             "if_expression"
@@ -262,12 +262,15 @@ fn ends_in_braced_branch(node: Node) -> bool {
         ) {
             return true;
         }
-        current = (0..at.child_count())
+        let Some(last) = (0..at.child_count())
             .rev()
             .filter_map(|index| at.child(index))
-            .find(|child| child.end_byte() == node.end_byte() && !child.is_extra());
+            .find(|child| child.end_byte() == node.end_byte() && !child.is_extra())
+        else {
+            return false;
+        };
+        at = last;
     }
-    false
 }
 
 /// The runtime class a probe calls.
@@ -743,18 +746,15 @@ impl ProjectIndex {
             | "interface_declaration"
             | "enum_declaration"
             | "record_declaration"
-            | "object_declaration" => {
-                let name = node
-                    .child_by_field_name("name")
-                    .or_else(|| named_children(node).find(|child| child.kind() == "identifier"))
-                    .map(|name| text(name, source).to_owned());
-                if let Some(name) = &name {
-                    self.classes.insert(name.clone());
-                }
-                name
-            }
+            // Both grammars give each of these a `name`.
+            | "object_declaration" => node
+                .child_by_field_name("name")
+                .map(|name| text(name, source).to_owned()),
             _ => None,
         };
+        if let Some(name) = &inner {
+            self.classes.insert(name.clone());
+        }
         let class = inner.as_deref().unwrap_or(class);
         for child in named_children(node) {
             self.add(child, source, language, class);
@@ -1178,9 +1178,9 @@ pub fn enumerate(
         logging_lines: BTreeSet::new(),
         package: String::new(),
         deferred: Vec::new(),
-        root: Some(tree.root_node()),
+        root: tree.root_node(),
     };
-    enumerator.loggers = logger_names(tree.root_node(), source, language);
+    enumerator.loggers = logger_names(tree.root_node(), source);
     match language {
         JvmLanguage::Java => enumerator.java_node(tree.root_node(), Context::Value),
         JvmLanguage::Kotlin => enumerator.kotlin_file(tree.root_node()),
@@ -1235,7 +1235,7 @@ struct Enumerator<'a> {
     /// The lambdas being walked whose code runs later (`JvmMutant::deferred`).
     deferred: Vec<Range>,
     /// The file's tree, for the statement around a mutant.
-    root: Option<Node<'a>>,
+    root: Node<'a>,
 }
 
 /// The logging packages PIT's `LoggingCallsFilter` knows by default.
@@ -1249,14 +1249,15 @@ const LOGGING_PACKAGES: &[&str] = &[
 ];
 
 /// Variables and fields that hold a logger of a framework PIT knows: declared
-/// with a type imported from one, or initialised by one's factory.
-fn logger_names(root: Node, source: &str, language: JvmLanguage) -> BTreeSet<String> {
+/// with a type imported from one, or initialised by one's factory. Java's
+/// declarations and Kotlin's have kinds of their own, so one walk reads
+/// either language.
+fn logger_names(root: Node, source: &str) -> BTreeSet<String> {
     let mut imported = BTreeSet::new();
     let mut names = BTreeSet::new();
     fn walk(
         node: Node,
         source: &str,
-        language: JvmLanguage,
         imported: &mut BTreeSet<String>,
         names: &mut BTreeSet<String>,
     ) {
@@ -1276,7 +1277,7 @@ fn logger_names(root: Node, source: &str, language: JvmLanguage) -> BTreeSet<Str
                     imported.insert(simple);
                 }
             }
-            "field_declaration" | "local_variable_declaration" if language == JvmLanguage::Java => {
+            "field_declaration" | "local_variable_declaration" => {
                 let ty = node
                     .child_by_field_name("type")
                     .map(|ty| text(ty, source).to_owned())
@@ -1293,7 +1294,7 @@ fn logger_names(root: Node, source: &str, language: JvmLanguage) -> BTreeSet<Str
                     }
                 }
             }
-            "property_declaration" if language == JvmLanguage::Kotlin => {
+            "property_declaration" => {
                 let declared = text(node, source);
                 let logging = imported.iter().any(|name| {
                     declared.contains(&format!(": {name}"))
@@ -1311,10 +1312,10 @@ fn logger_names(root: Node, source: &str, language: JvmLanguage) -> BTreeSet<Str
             _ => {}
         }
         for child in named_children(node) {
-            walk(child, source, language, imported, names);
+            walk(child, source, imported, names);
         }
     }
-    walk(root, source, language, &mut imported, &mut names);
+    walk(root, source, &mut imported, &mut names);
     names
 }
 
@@ -1411,33 +1412,35 @@ impl<'a> Enumerator<'a> {
     /// The first line of the statement around `range`: the node whose
     /// parent is a block, a body or a switch group.
     fn statement_lines(&self, range: Range) -> (u32, u32) {
-        let Some(root) = self.root else {
-            return (self.line(range.0), self.line(range.1));
-        };
-        let mut node = root.descendant_for_byte_range(range.0, range.1);
-        while let Some(at) = node {
-            let parent = at.parent();
-            if parent.is_none_or(|parent| {
-                matches!(
-                    parent.kind(),
-                    "block"
-                        | "statements"
-                        | "class_body"
-                        | "function_body"
-                        | "switch_block"
-                        | "switch_block_statement_group"
-                        | "switch_rule"
-                        | "lambda_literal"
-                        | "enum_class_body"
-                        | "program"
-                        | "source_file"
-                )
-            }) {
-                return (self.line(at.start_byte()), self.line(at.end_byte()));
+        // A range within the file has a node around it, the root at least,
+        // and the walk up ends at the root.
+        let mut at = self
+            .root
+            .descendant_for_byte_range(range.0, range.1)
+            .unwrap_or(self.root);
+        loop {
+            match at.parent() {
+                Some(parent)
+                    if !matches!(
+                        parent.kind(),
+                        "block"
+                            | "statements"
+                            | "class_body"
+                            | "function_body"
+                            | "switch_block"
+                            | "switch_block_statement_group"
+                            | "switch_rule"
+                            | "lambda_literal"
+                            | "enum_class_body"
+                            | "program"
+                            | "source_file"
+                    ) =>
+                {
+                    at = parent;
+                }
+                _ => return (self.line(at.start_byte()), self.line(at.end_byte())),
             }
-            node = parent;
         }
-        (self.line(range.0), self.line(range.1))
     }
 
     /// The code of `range` with `[from, to)` replaced by `with`.
@@ -1670,7 +1673,7 @@ impl Enumerator<'_> {
                 }
             }
             "binary_expression" => self.java_binary(node, context),
-            "unary_expression" => self.java_unary(node, context),
+            "unary_expression" => self.java_unary(node),
             "update_expression" => {
                 self.java_step(node, context == Context::Statement);
                 self.java_children(node, Context::Value);
@@ -1691,7 +1694,8 @@ impl Enumerator<'_> {
             }
             "method_invocation" => {
                 self.note_logging(node);
-                if context == Context::Condition && !self.java_constant(node) {
+                // A call is never a constant javac folds.
+                if context == Context::Condition {
                     self.negate(node);
                 }
                 self.java_children(node, Context::Value);
@@ -1711,23 +1715,13 @@ impl Enumerator<'_> {
                 self.java_children(node, Context::Value);
             }
             "true" | "false" => {}
+            // Every kind `java_type_of` reads as a `boolean` has its arm
+            // above, so nothing here is a condition's jump.
             _ => {
-                let inner = if context == Context::Condition {
-                    // Anything else in a condition is evaluated as a value
-                    // and then jumped on.
-                    if self.java_type_of(node) == Ty::Prim(Prim::Boolean)
-                        && !self.java_constant(node)
-                    {
-                        self.negate(node);
-                    }
-                    Context::Value
-                } else {
-                    Context::Value
-                };
                 let inner = if matches!(node.kind(), "program" | "class_body" | "interface_body") {
                     Context::Statement
                 } else {
-                    inner
+                    Context::Value
                 };
                 self.java_children(node, inner);
             }
@@ -1750,7 +1744,6 @@ impl Enumerator<'_> {
                 "class_body" | "enum_body" | "interface_body" | "annotation_type_body" => {
                     self.java_class_body(child, false);
                 }
-                "enum_body_declarations" => self.java_class_body(child, false),
                 _ => {}
             }
         }
@@ -1792,10 +1785,9 @@ impl Enumerator<'_> {
     }
 
     fn java_class_body(&mut self, body: Node, static_context: bool) {
-        let enumeration = body.kind() == "enum_body"
-            || body
-                .parent()
-                .is_some_and(|parent| parent.kind() == "enum_body");
+        // An enum's declarations after its constants are its body's own
+        // members (below), not a body of their own.
+        let enumeration = body.kind() == "enum_body";
         let mut members = named_children(body).collect::<Vec<_>>();
         if let Some(declarations) = members
             .iter()
@@ -1807,9 +1799,10 @@ impl Enumerator<'_> {
         for member in &members {
             if member.kind() == "field_declaration" || member.kind() == "constant_declaration" {
                 let modifiers = modifiers_text(*member, self.source);
-                let is_final = modifiers.contains("final")
-                    || body.kind() == "interface_body"
-                    || member.kind() == "constant_declaration";
+                // An interface's or annotation type's fields are all
+                // `constant_declaration`s.
+                let is_final =
+                    modifiers.contains("final") || member.kind() == "constant_declaration";
                 let ty = member
                     .child_by_field_name("type")
                     .map_or(Ty::Unknown, |ty| java_type(text(ty, self.source)));
@@ -1828,8 +1821,11 @@ impl Enumerator<'_> {
                         None
                     };
                     let name = text(name, self.source).to_owned();
-                    if let Some(class) = self.classes.last_mut() {
-                        class.fields.insert(
+                    self.classes
+                        .last_mut()
+                        .expect("a class body is walked inside its class")
+                        .fields
+                        .insert(
                             name,
                             Var {
                                 ty: ty.clone(),
@@ -1837,7 +1833,6 @@ impl Enumerator<'_> {
                                 constant,
                             },
                         );
-                    }
                 }
             }
         }
@@ -1902,15 +1897,15 @@ impl Enumerator<'_> {
                 collect_calls_in(*body, self.source, &class_name, &mut pending);
             }
         }
-        if let Some(class) = self.classes.last_mut() {
-            class.initializing = initializing;
-        }
+        self.classes
+            .last_mut()
+            .expect("a class body is walked inside its class")
+            .initializing = initializing;
         for member in members {
             match member.kind() {
                 "field_declaration" | "constant_declaration" => {
                     let is_static = modifiers_text(member, self.source).contains("static")
-                        || member.kind() == "constant_declaration"
-                        || body.kind() == "interface_body";
+                        || member.kind() == "constant_declaration";
                     self.methods.push(Method {
                         name: if is_static { "<clinit>" } else { "<init>" }.to_owned(),
                         returns: None,
@@ -2385,12 +2380,9 @@ impl Enumerator<'_> {
                 lines,
             );
         }
-        // One probe serves every return mutant of the value.
-        let placeable = self.language == JvmLanguage::Java || !ends_in_braced_branch(value);
-        if placeable
-            && self.mutants.len() > before
-            && let Some(first) = self.mutants.get_mut(before)
-        {
+        // One probe serves every return mutant of the value (Kotlin's
+        // returns are `kotlin_return`'s).
+        if let Some(first) = self.mutants.get_mut(before) {
             first.probe = Some(probe);
         }
     }
@@ -2525,7 +2517,7 @@ impl Enumerator<'_> {
         ty == Ty::Str
     }
 
-    fn java_unary(&mut self, node: Node, context: Context) {
+    fn java_unary(&mut self, node: Node) {
         let operator = node
             .child_by_field_name("operator")
             .map(|op| text(op, self.source).to_owned())
@@ -2538,12 +2530,10 @@ impl Enumerator<'_> {
                 // `!x` is a jump on `x`, inverted: one jump, PIT's to negate.
                 self.java_node(operand, Context::Condition);
             }
+            // A number is never a condition javac accepts.
             "-" => {
                 if !self.java_constant(node) {
                     self.invert(node, operand);
-                }
-                if context == Context::Condition {
-                    self.negate(node);
                 }
                 self.java_node(operand, Context::Value);
             }
@@ -2584,8 +2574,8 @@ impl Enumerator<'_> {
     ) {
         let base = operator.trim_end_matches('=');
         let target = self.java_type_of(left);
-        if base == "+" && (target == Ty::Str || target.known_reference() && target.prim().is_none())
-        {
+        // `+=` on a reference is a string concatenation.
+        if base == "+" && target.known_reference() {
             return;
         }
         let local_int = self.local_int(left);
@@ -2705,7 +2695,8 @@ impl Enumerator<'_> {
     /// else. `in_update` for a `for` loop's update, a statement.
     fn java_step(&mut self, node: Node, in_update: bool) {
         if node.kind() != "update_expression" {
-            if node.kind() == "assignment_expression" && in_update {
+            // Only a `for` update is walked here as anything else.
+            if node.kind() == "assignment_expression" {
                 // A compound assignment in a `for` update is walked with
                 // the others; it is a statement.
                 let operator = node
@@ -2910,10 +2901,8 @@ impl Enumerator<'_> {
     ) {
         let range = (node.start_byte(), node.end_byte());
         let (operator_range, _) = operator_range(node, left, right, self.source);
-        let written_to = if self.language == JvmLanguage::Kotlin
-            && !kotlin_infix(to).is_empty()
-            && operator.chars().all(char::is_alphabetic)
-        {
+        // Kotlin writes a bitwise operator only as its infix function.
+        let written_to = if self.language == JvmLanguage::Kotlin && !kotlin_infix(to).is_empty() {
             kotlin_infix(to)
         } else {
             to
@@ -2963,9 +2952,7 @@ impl Enumerator<'_> {
 
     /// Gives the mutant `push` just added its probe.
     fn attach(&mut self, before: usize, probe: Option<ValueProbe>) {
-        if self.mutants.len() > before
-            && let Some(mutant) = self.mutants.last_mut()
-        {
+        if let Some(mutant) = self.mutants.get_mut(before) {
             mutant.probe = probe;
         }
     }
@@ -3261,7 +3248,7 @@ fn collect_calls_in(node: Node, source: &str, class: &str, out: &mut Vec<String>
             .unwrap_or("");
         let created = created.split('<').next().unwrap_or(created);
         let created = created.rsplit('.').next().unwrap_or(created);
-        if class.is_empty() || created == class {
+        if created == class {
             out.push(format!(
                 "<init>/{}",
                 count(node.child_by_field_name("arguments"))
@@ -5985,5 +5972,1013 @@ public class M {
         );
         // `B` folds to true: only its replacement with false.
         assert_eq!(sorted(46), ["BooleanFalseReturnVals:false"]);
+    }
+
+    // Coverage of package A: types, return values, the project index, the
+    // enumerator's setup and its Java forms, and the helpers they share.
+
+    /// A file's mutants as `enumerate` lists them, the file its own project.
+    fn enumerated(file: &str, source: &str) -> Vec<JvmMutant> {
+        let language = if file.ends_with(".kt") {
+            JvmLanguage::Kotlin
+        } else {
+            JvmLanguage::Java
+        };
+        let tree = crate::jvm_instrumenter::parse(source, language).expect("parses");
+        let index = ProjectIndex::of([(file, source)]);
+        enumerate(source, &tree, language, &index)
+    }
+
+    /// The mutants starting on `line`, each as `Mutator:descriptor`, sorted.
+    fn listed_on(mutants: &[JvmMutant], line: u32) -> Vec<String> {
+        let mut found = mutants
+            .iter()
+            .filter(|mutant| mutant.start.0 == line)
+            .map(|mutant| format!("{}:{}", mutant.mutator.name(), mutant.descriptor))
+            .collect::<Vec<_>>();
+        found.sort();
+        found
+    }
+
+    /// Every node of `kind` in `node`'s subtree, in source order.
+    fn all_of<'t>(node: Node<'t>, kind: &str, out: &mut Vec<Node<'t>>) {
+        if node.kind() == kind {
+            out.push(node);
+        }
+        for child in named_children(node) {
+            all_of(child, kind, out);
+        }
+    }
+
+    /// Each primitive's Java name, Kotlin's names for the small ones, and
+    /// that `boolean` is neither numeric nor ranked in numeric promotion.
+    #[test]
+    fn primitives_by_name_and_by_rank() {
+        let all = [
+            Prim::Boolean,
+            Prim::Byte,
+            Prim::Short,
+            Prim::Char,
+            Prim::Int,
+            Prim::Long,
+            Prim::Float,
+            Prim::Double,
+        ];
+        assert_eq!(
+            all.map(Prim::java),
+            [
+                "boolean", "byte", "short", "char", "int", "long", "float", "double"
+            ]
+        );
+        for prim in all {
+            assert_eq!(Prim::from_java(prim.java()), Some(prim));
+        }
+        assert_eq!(kotlin_type("Byte"), Ty::Prim(Prim::Byte));
+        assert_eq!(kotlin_type("Short?"), Ty::Boxed(Prim::Short));
+        assert!(!Prim::Boolean.numeric() && Prim::Char.numeric());
+        assert_eq!(Prim::Boolean.rank(), 0);
+        assert_eq!(Prim::Boolean.promote(Prim::Byte), Prim::Int);
+    }
+
+    /// Kotlin's function types, `Unit` and `Nothing`, and which types are
+    /// known references.
+    #[test]
+    fn kotlin_types_as_written() {
+        assert_eq!(kotlin_type("(Int) -> Unit"), Ty::Object("Function".into()));
+        assert_eq!(
+            kotlin_type("((Int) -> Unit)?"),
+            Ty::Object("Function".into())
+        );
+        assert_eq!(kotlin_type("(String)"), Ty::Str);
+        assert_eq!(kotlin_type("Unit"), Ty::Void);
+        assert_eq!(kotlin_type("Nothing"), Ty::Void);
+        assert_eq!(
+            kotlin_type("kotlin.collections.List<Int>"),
+            Ty::Object("List".into())
+        );
+        for reference in [Ty::Str, Ty::Object("List".into()), Ty::Null] {
+            assert!(reference.known_reference(), "{reference:?}");
+        }
+        for other in [
+            Ty::Boxed(Prim::Int),
+            Ty::Prim(Prim::Int),
+            Ty::Unknown,
+            Ty::Void,
+        ] {
+            assert!(!other.known_reference(), "{other:?}");
+        }
+    }
+
+    /// The empty value PIT's `EMPTY_RETURNS` returns for a type: a boxed
+    /// number's zero, none for a boxed `Boolean` or `Byte`, a primitive or
+    /// `null`, and Kotlin's mutable collections only in Kotlin.
+    #[test]
+    fn empty_values_by_type_and_language() {
+        let java = JvmLanguage::Java;
+        let kotlin = JvmLanguage::Kotlin;
+        assert_eq!(
+            empty_value(&Ty::Boxed(Prim::Int), java),
+            Some(ReturnValue::BoxedZero(Prim::Int))
+        );
+        assert_eq!(empty_value(&Ty::Boxed(Prim::Boolean), java), None);
+        assert_eq!(empty_value(&Ty::Boxed(Prim::Byte), java), None);
+        assert_eq!(empty_value(&Ty::Prim(Prim::Int), java), None);
+        assert_eq!(empty_value(&Ty::Null, java), None);
+        assert_eq!(empty_value(&Ty::Str, java), Some(ReturnValue::EmptyString));
+        let mutable = Ty::Object("MutableList".into());
+        assert_eq!(empty_value(&mutable, kotlin), Some(ReturnValue::EmptyList));
+        assert_eq!(empty_value(&mutable, java), None);
+        assert_eq!(empty_value(&Ty::Object("Optional".into()), kotlin), None);
+    }
+
+    /// Library calls whose result is known: `List.set(i, e)` keeps one,
+    /// `set` with another count is a setter, `await()` alone returns
+    /// nothing, and a name the lists do not hold is unknown.
+    #[test]
+    fn library_calls_known_to_return_nothing() {
+        assert_eq!(known_void("set", 2), Some(false));
+        assert_eq!(known_void("set", 1), Some(true));
+        assert_eq!(known_void("add", 2), Some(true));
+        assert_eq!(known_void("add", 1), Some(false));
+        assert_eq!(known_void("await", 0), Some(true));
+        assert_eq!(known_void("await", 1), None);
+        assert_eq!(known_void("println", 1), Some(true));
+        assert_eq!(known_void("frobnicate", 0), None);
+    }
+
+    /// PIT's replacement of each shift, Kotlin's infix names included, and
+    /// none for an operator it does not mutate.
+    #[test]
+    fn math_replacements_of_shifts() {
+        assert_eq!(math_of(">>>"), Some(("<<", "ushr")));
+        assert_eq!(math_of("ushr"), Some(("<<", "ushr")));
+        assert_eq!(math_of(">>"), Some(("<<", "shr")));
+        assert_eq!(math_of("&&"), None);
+        assert_eq!(compare_helper("=="), None);
+    }
+
+    /// Numeric literals in Java's and Kotlin's spellings, and those whose
+    /// digits do not fit their base.
+    #[test]
+    fn numeric_literals_and_their_types() {
+        assert_eq!(number_literal("1.5d"), Some((1.5, Prim::Double)));
+        assert_eq!(number_literal("2e3"), Some((2000.0, Prim::Double)));
+        assert_eq!(number_literal("2.5f"), Some((2.5, Prim::Float)));
+        assert_eq!(number_literal("0x1F"), Some((31.0, Prim::Int)));
+        assert_eq!(number_literal("0x1fL"), Some((31.0, Prim::Long)));
+        assert_eq!(number_literal("0b101u"), Some((5.0, Prim::Int)));
+        assert_eq!(number_literal("017"), Some((15.0, Prim::Int)));
+        assert_eq!(number_literal("1_000"), Some((1000.0, Prim::Int)));
+        for broken in ["0xZZ", "0b12", "09", "1.2.3"] {
+            assert_eq!(number_literal(broken), None, "{broken}");
+        }
+    }
+
+    /// Type arguments split at their top level, and what a type variable's
+    /// name looks like.
+    #[test]
+    fn type_arguments_and_type_variables() {
+        assert_eq!(split_type_arguments(""), [""]);
+        assert_eq!(
+            split_type_arguments("Map<K, V>, String"),
+            ["Map<K, V>", "String"]
+        );
+        assert!(is_type_variable("T"));
+        assert!(!is_type_variable("TT"));
+        assert!(!is_type_variable("t"));
+    }
+
+    /// What a lambda returns by the JDK method it is passed to: `mapToLong`'s
+    /// a `long`, `map`'s the body's type boxed, nothing known for a body of
+    /// unknown type or a method the JDK list does not hold.
+    #[test]
+    fn lambda_returns_by_the_method_taking_them() {
+        assert_eq!(
+            functional_return("mapToLong", || None),
+            Some(Ty::Prim(Prim::Long))
+        );
+        assert_eq!(
+            functional_return("thenComparingDouble", || None),
+            Some(Ty::Prim(Prim::Double))
+        );
+        assert_eq!(
+            functional_return("map", || Some(Ty::Prim(Prim::Int))),
+            Some(Ty::Boxed(Prim::Int))
+        );
+        assert_eq!(functional_return("map", || Some(Ty::Unknown)), None);
+        assert_eq!(functional_return("map", || Some(Ty::Str)), Some(Ty::Str));
+        assert_eq!(functional_return("forEach", || None), Some(Ty::Void));
+        assert_eq!(functional_return("frobnicate", || None), None);
+    }
+
+    /// What a lambda returns by the functional type it is assigned to: the
+    /// primitive interfaces', the type argument's, the body's where the
+    /// argument is a type variable, and nothing where no argument is
+    /// written or the interface is not a functional one.
+    #[test]
+    fn lambda_returns_by_their_functional_type() {
+        let none = || None;
+        assert_eq!(
+            functional_type_return("LongSupplier", none),
+            Some(Ty::Prim(Prim::Long))
+        );
+        assert_eq!(
+            functional_type_return("java.util.function.DoubleSupplier", none),
+            Some(Ty::Prim(Prim::Double))
+        );
+        assert_eq!(functional_type_return("Runnable", none), Some(Ty::Void));
+        assert_eq!(functional_type_return("Function", none), None);
+        assert_eq!(functional_type_return("Comparable<T>", none), None);
+        assert_eq!(
+            functional_type_return("Function<String, Integer>", none),
+            Some(Ty::Boxed(Prim::Int))
+        );
+        assert_eq!(
+            functional_type_return("BiFunction<A, B, List<String>>", none),
+            Some(Ty::Object("List".into()))
+        );
+        assert_eq!(
+            functional_type_return("Supplier<T>", || Some(Ty::Prim(Prim::Int))),
+            Some(Ty::Boxed(Prim::Int))
+        );
+        assert_eq!(
+            functional_type_return("Supplier<T>", || Some(Ty::Object("E".into()))),
+            Some(Ty::Object("Object".into()))
+        );
+        assert_eq!(
+            functional_type_return("Supplier<T>", || Some(Ty::Object("Foo".into()))),
+            None
+        );
+        assert_eq!(functional_type_return("Supplier<?>", none), None);
+    }
+
+    /// A call key matches a declaration of its name and parameter count, or
+    /// of any count where the declaration takes a variable number.
+    #[test]
+    fn calls_match_declarations_by_name_and_count() {
+        assert!(calls_declaration("f/1", "f/1"));
+        assert!(calls_declaration("f/3", "f/*"));
+        assert!(!calls_declaration("f/1", "f/2"));
+        assert!(!calls_declaration("g/1", "f/1"));
+        assert_eq!(declaration_key("f", None), "f/*");
+    }
+
+    /// The JDK's functional interfaces named anywhere in a type, an
+    /// underscore being part of a name.
+    #[test]
+    fn functional_types_by_name() {
+        assert!(names_functional_type("Runnable"));
+        assert!(names_functional_type("Map<String, My_Supplier>"));
+        assert!(names_functional_type("IntBinaryOperator"));
+        assert!(!names_functional_type("Supplier_Of"));
+        assert!(!names_functional_type("String"));
+    }
+
+    /// A type as written, less its annotations and their arguments, nested
+    /// parentheses included.
+    #[test]
+    fn types_without_their_annotations() {
+        assert_eq!(without_annotations(""), "");
+        assert_eq!(without_annotations("int"), "int");
+        assert_eq!(without_annotations("@Nullable String"), "String");
+        assert_eq!(without_annotations("@a.b_C String"), "String");
+        assert_eq!(
+            without_annotations("@Size(max = (2)) List<@NonNull String>"),
+            "List< String>"
+        );
+        assert_eq!(without_annotations("String @"), "String");
+        assert_eq!(without_annotations("@A(1"), "");
+    }
+
+    /// The name a loop's condition reads first: through an increment and
+    /// parentheses, and none where it starts with a call or a field.
+    #[test]
+    fn the_name_a_condition_reads_first() {
+        let source = "class A { void f() { while (i++ < n) {} while ((j) > 0) {} while (check(i)) {} while (a.b < 3) {} } }";
+        let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Java).expect("parses");
+        let mut loops = Vec::new();
+        all_of(tree.root_node(), "while_statement", &mut loops);
+        let read = loops
+            .iter()
+            .map(|node| {
+                first_read(
+                    node.child_by_field_name("condition").expect("condition"),
+                    source,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            read,
+            [Some("i".to_owned()), Some("j".to_owned()), None, None]
+        );
+    }
+
+    /// A Java method's parameter count: none fixed with varargs, a comment
+    /// and a receiver parameter not counted.
+    #[test]
+    fn java_parameter_counts() {
+        let source = "class A { void f(/* c */ int x, int... ys) {} void g(A this, int x) {} }";
+        let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Java).expect("parses");
+        let mut methods = Vec::new();
+        all_of(tree.root_node(), "method_declaration", &mut methods);
+        let arities = methods
+            .iter()
+            .map(|method| {
+                java_arity(
+                    method
+                        .child_by_field_name("parameters")
+                        .expect("parameters"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(arities, [None, Some(1)]);
+    }
+
+    /// A Kotlin function's return type as written: none for an abstract one
+    /// without a type, or for an expression body without one.
+    #[test]
+    fn kotlin_written_return_types() {
+        let source = "interface I { fun f() }\nfun g(): Int = 1\nfun h() = 1\n";
+        let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Kotlin).expect("parses");
+        let mut functions = Vec::new();
+        all_of(tree.root_node(), "function_declaration", &mut functions);
+        let written = functions
+            .iter()
+            .map(|function| kotlin_written_return(*function, source))
+            .collect::<Vec<_>>();
+        assert_eq!(written, [None, Some("Int".to_owned()), None]);
+    }
+
+    /// The project index reads Java and Kotlin (a `.kts` script too), skips
+    /// a file that does not parse, and answers for overloads: a Kotlin
+    /// `vararg` takes any count, an abstract `fun` returns nothing,
+    /// declarations that disagree on `void` say nothing, and a lambda's
+    /// parameter type is known only where every overload with a functional
+    /// type there agrees.
+    #[test]
+    fn the_project_index_across_files_and_overloads() {
+        let empty = ProjectIndex::of(std::iter::empty::<(&str, &str)>());
+        assert!(empty.methods.is_empty() && empty.classes.is_empty());
+        let index = ProjectIndex::of([
+            ("a/Bad.java", "class Bad {"),
+            (
+                "a/build.gradle.kts",
+                "inline fun <T> measure(block: () -> T): T = block()\nfun each(vararg xs: Int) {}\ninterface Resettable { fun reset() }\nobject Registry { fun size(): Int = 0 }\n",
+            ),
+            (
+                "a/A.java",
+                "class A { void on(Runnable r) {} void put(String key, Runnable r) {} void run(String name, Runnable... tasks) {} int mixed(int x) { return x; } }",
+            ),
+            (
+                "a/B.java",
+                "class B { void on(Runnable r) {} void mixed(int x) {} }",
+            ),
+            (
+                "a/C.java",
+                "class C { void on(java.util.function.Supplier<String> s) {} }",
+            ),
+        ]);
+        assert!(!index.classes.contains("Bad"), "{:?}", index.classes);
+        for class in ["Registry", "Resettable", "A", "B", "C"] {
+            assert!(
+                index.classes.contains(class),
+                "{class}: {:?}",
+                index.classes
+            );
+        }
+        assert!(index.inline("measure"));
+        assert!(!index.inline("each"));
+        assert_eq!(index.methods["each"][0].arity, None);
+        assert_eq!(index.void_call("each", 3, None), Some(true));
+        assert_eq!(index.void_call("reset", 0, None), Some(true));
+        assert_eq!(index.void_call("mixed", 1, None), None);
+        assert_eq!(index.void_call("mixed", 1, Some("B")), Some(true));
+        assert_eq!(index.parameter_type("on", 1, 0), None);
+        assert_eq!(index.parameter_type("put", 2, 0), None);
+        assert_eq!(index.parameter_type("put", 2, 1), Some("Runnable"));
+        assert_eq!(index.parameter_type("run", 3, 2), None);
+        assert_eq!(index.parameter_type("absent", 1, 0), None);
+    }
+
+    /// A Java file of bare statements (a script, which tree-sitter reads as
+    /// a program) declares, increments and returns outside any method:
+    /// nothing PIT could mutate.
+    #[test]
+    fn statements_outside_a_class_list_nothing() {
+        let listed = enumerated("a/S.java", "int x = 1;\nx++;\nreturn x + 1;\n");
+        assert!(listed.is_empty(), "{listed:?}");
+    }
+
+    /// A package named under an annotation, a record's compact constructor
+    /// (no parameters of its own), a receiver parameter, a `return;` and a
+    /// `for (;;);` with nothing in it.
+    #[test]
+    fn java_declarations_without_the_usual_parts() {
+        let source = r#"@Deprecated
+package a.b;
+
+record R(int a) {
+    R {
+        if (a < 0) {
+            throw new IllegalArgumentException();
+        }
+    }
+}
+
+class C {
+    void g(C this, int x) {
+        x++;
+        return;
+    }
+
+    void spin() {
+        for (;;);
+    }
+}
+"#;
+        let listed = enumerated("a/b/R.java", source);
+        assert_eq!(
+            listed_on(&listed, 6),
+            ["ConditionalsBoundary:<=", "NegateConditionals:negated"]
+        );
+        for mutant in listed.iter().filter(|mutant| mutant.start.0 == 6) {
+            assert_eq!(
+                (mutant.class.as_str(), mutant.method.as_str()),
+                ("a.b.R", "<init>")
+            );
+        }
+        // `x` is a local `int` though a receiver parameter comes first.
+        assert_eq!(listed_on(&listed, 14), ["Increments:--"]);
+        assert_eq!(listed.len(), 3, "{listed:?}");
+    }
+
+    /// A logger whose type is written with its package, and a line that
+    /// calls a logger factory directly: PIT's logging filter drops both
+    /// lines.
+    #[test]
+    fn java_logging_lines_by_qualified_type_and_by_factory() {
+        let source = r#"package a;
+
+import org.slf4j.LoggerFactory;
+
+class L {
+    private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(L.class);
+    int count;
+
+    void log() {
+        LOG.info("n" + (count + 1));
+        LoggerFactory.getLogger(L.class).warn("m" + (count - 1));
+        count = count * 2;
+    }
+}
+"#;
+        let listed = enumerated("a/L.java", source);
+        assert!(listed_on(&listed, 10).is_empty(), "{listed:?}");
+        assert!(listed_on(&listed, 11).is_empty(), "{listed:?}");
+        assert_eq!(listed_on(&listed, 12), ["Math:/"]);
+    }
+
+    /// Conditions and assignments: a body a constant `while` never runs, a
+    /// non-short-circuit `&` jumped on, a constant one that is not, compound
+    /// assignments as values (an `IINC`) and past `IINC`'s range or by a
+    /// fraction (arithmetic), a final field boxed (no constant), a final
+    /// local that is one, an assignment jumped on, `+=` on references, and
+    /// the returns javac folds to a constant.
+    #[test]
+    fn java_conditions_assignments_and_constant_returns() {
+        let source = r#"package a;
+
+class D {
+    static final boolean DEBUG = false;
+    static final int LIMIT = 3;
+    static final Integer BOX = 5;
+    boolean ready;
+
+    int run(int i, boolean x, boolean y) {
+        while (DEBUG) {
+            i++;
+        }
+        if (x & y) {
+            i--;
+        }
+        if (DEBUG & LIMIT > 2) {
+            i++;
+        }
+        int j = (i += 2) * 3;
+        int k = (i -= 3);
+        int m = (i -= 40000);
+        i += 2.5;
+        int unset;
+        unset = i + BOX;
+        final int twice = LIMIT * 2;
+        if (twice > 5) {
+            i--;
+        }
+        boolean b;
+        if (b = x) {
+            i++;
+        }
+        Object o = "a";
+        o += "b";
+        String s = "c";
+        s += "d";
+        return i + j + k + m + unset;
+    }
+
+    boolean big() {
+        return LIMIT > 2;
+    }
+
+    boolean small() {
+        return LIMIT < 2;
+    }
+
+    boolean on() {
+        return !DEBUG;
+    }
+
+    Boolean yes() {
+        return Boolean.TRUE;
+    }
+
+    boolean isReady() {
+        return this.ready;
+    }
+}
+"#;
+        let listed = enumerated("a/D.java", source);
+        let expected: [(u32, &[&str]); 25] = [
+            (10, &[]),
+            (11, &[]),
+            (13, &["Math:|", "NegateConditionals:negated"]),
+            (14, &["Increments:++"]),
+            (16, &[]),
+            (17, &[]),
+            (19, &["Increments:-=", "Math:/"]),
+            (20, &["Increments:+="]),
+            (21, &["Math:+="]),
+            (22, &["Math:-="]),
+            (24, &["Math:-"]),
+            (25, &[]),
+            (26, &[]),
+            (27, &["Increments:++"]),
+            (30, &["NegateConditionals:negated"]),
+            (31, &["Increments:--"]),
+            (34, &[]),
+            (36, &[]),
+            (
+                37,
+                &["Math:-", "Math:-", "Math:-", "Math:-", "PrimitiveReturns:0"],
+            ),
+            (41, &["BooleanFalseReturnVals:false"]),
+            (45, &["BooleanTrueReturnVals:true"]),
+            (49, &["BooleanFalseReturnVals:false"]),
+            (53, &["BooleanFalseReturnVals:false"]),
+            (
+                57,
+                &["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"],
+            ),
+            (4, &[]),
+        ];
+        for (line, mutants) in expected {
+            assert_eq!(listed_on(&listed, line), mutants, "{line}: {listed:?}");
+        }
+        // An `IINC` read as a value is written as a compound assignment.
+        let forms = listed
+            .iter()
+            .filter(|mutant| {
+                mutant.mutator == Mutator::Increments && matches!(mutant.start.0, 19 | 20)
+            })
+            .map(|mutant| mutant.placement.form.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            forms,
+            [
+                Form::Compound {
+                    from: "+=",
+                    to: "-=",
+                    statement: false
+                },
+                Form::Compound {
+                    from: "-=",
+                    to: "+=",
+                    statement: false
+                }
+            ]
+        );
+    }
+
+    /// Static initialisation: an interface's and an annotation type's
+    /// constants, an enum's static members and its instance field (set in
+    /// a constructor the static initializer calls only where the enum
+    /// declares one), a static functional field's lambda (mutated), one in
+    /// another static field and one in a static block (not), and the
+    /// anonymous classes static code creates (their methods mutated).
+    #[test]
+    fn java_static_initialisation() {
+        let source = r#"package a;
+
+import java.util.function.Function;
+
+interface I {
+    int Y = 2;
+
+    default boolean big() {
+        return Y > 1;
+    }
+}
+
+@interface Ann {
+    int X = 1 + 2;
+}
+
+enum E {
+    A, B;
+    static int created = 0;
+    int weight = created + 1;
+    static {
+        created++;
+    }
+}
+
+enum F {
+    C(1);
+    private final int code;
+    int extra = seed() + 2;
+    F(int code) {
+        this.code = code * 2;
+    }
+    static int seed() {
+        return 4;
+    }
+}
+
+class S {
+    static int base;
+    static final Function<Integer, Integer> NEXT = x -> x + 1;
+    static final Object HELD = wrap(() -> base * 3);
+    static final Runnable TASK = new Runnable() {
+        int runs = 1 + base;
+        public void run() {
+            base = base - 1;
+        }
+    };
+    static {
+        Runnable later = () -> { base++; };
+        new Thread(new Runnable() {
+            public void run() {
+                base--;
+            }
+        }).start();
+    }
+
+    static Object wrap(java.util.function.Supplier<Integer> s) {
+        return s;
+    }
+}
+"#;
+        let listed = enumerated("a/E.java", source);
+        let expected: [(u32, &[&str]); 15] = [
+            (9, &["BooleanFalseReturnVals:false"]),
+            (14, &[]),
+            (18, &[]),
+            (19, &[]),
+            (20, &["Math:-"]),
+            (22, &[]),
+            (29, &[]),
+            (31, &[]),
+            (34, &["PrimitiveReturns:0"]),
+            (40, &["EmptyObjectReturnVals:0", "Math:-"]),
+            (41, &[]),
+            (45, &["Math:+"]),
+            (49, &[]),
+            (52, &["Math:++"]),
+            (58, &["NullReturnVals:null"]),
+        ];
+        for (line, mutants) in expected {
+            assert_eq!(listed_on(&listed, line), mutants, "{line}: {listed:?}");
+        }
+        let method_on = |line: u32| {
+            listed
+                .iter()
+                .filter(|mutant| mutant.start.0 == line)
+                .map(|mutant| mutant.method.as_str())
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(method_on(20), BTreeSet::from(["<init>"]));
+        assert_eq!(method_on(40), BTreeSet::from(["lambda$static$"]));
+        assert_eq!(method_on(45), BTreeSet::from(["run"]));
+        assert_eq!(method_on(52), BTreeSet::from(["run"]));
+    }
+
+    /// Lambdas the enumeration cannot type from where they are passed (a
+    /// constructor's argument, a cast, a returned value), and call
+    /// statements on a `String` (the JDK's, whatever the project declares
+    /// of the name) and on `this`.
+    #[test]
+    fn java_lambdas_without_a_known_target_and_call_receivers() {
+        let source = r#"package a;
+
+class W {
+    int count;
+
+    void work() {
+        count++;
+    }
+
+    void trim() {
+    }
+
+    Runnable task() {
+        return () -> { count++; };
+    }
+
+    void start(String name) {
+        new Thread(() -> work()).start();
+        Object held = (Runnable) () -> work();
+        name.trim();
+        this.trim();
+    }
+}
+"#;
+        let listed = enumerated("a/W.java", source);
+        assert_eq!(listed_on(&listed, 7), ["Math:--"]);
+        assert_eq!(listed_on(&listed, 14), ["Math:--", "NullReturnVals:null"]);
+        // A lambda whose body calls a method that returns nothing returns
+        // nothing itself: PIT removes the call in its synthetic method.
+        assert_eq!(
+            listed_on(&listed, 18),
+            ["VoidMethodCall:removed", "VoidMethodCall:removed"],
+            "{listed:?}"
+        );
+        assert_eq!(
+            listed_on(&listed, 19),
+            ["VoidMethodCall:removed"],
+            "{listed:?}"
+        );
+        assert!(listed_on(&listed, 20).is_empty(), "{listed:?}");
+        assert_eq!(listed_on(&listed, 21), ["VoidMethodCall:removed"]);
+    }
+
+    /// Loop counters PIT's filter keeps or drops: a `for` with no condition
+    /// or one that starts with a call keeps its increment; an update that
+    /// is an assignment or a call has no `IINC` to drop; a `while` whose
+    /// body is one increment drops it, and one whose body is an `if`, an
+    /// empty block or a call has nothing to drop.
+    #[test]
+    fn java_loop_counters() {
+        let source = r#"package a;
+
+class Loops {
+    void run(int n) {
+        for (int i = 0; ; i++) {
+            if (i > n) {
+                break;
+            }
+        }
+        for (int i = 0; check(i); i++) {
+        }
+        for (int i = 0; i < n; i = i + 2) {
+        }
+        for (int i = 0; i < n; next()) {
+        }
+        int j = 0;
+        while (j < n) j++;
+        while (j > 7) if (check(j)) break;
+        while (j < 3) {
+        }
+        while (j < 9) {
+            j += 2;
+        }
+        while (j < 12) {
+            step();
+        }
+    }
+
+    boolean check(int i) {
+        return i > 0;
+    }
+
+    int next() {
+        return 1;
+    }
+
+    void step() {
+    }
+}
+"#;
+        let listed = enumerated("a/Loops.java", source);
+        let compare = ["ConditionalsBoundary:<=", "NegateConditionals:negated"];
+        let expected: [(u32, &[&str]); 12] = [
+            (5, &["Increments:--"]),
+            (
+                6,
+                &["ConditionalsBoundary:>=", "NegateConditionals:negated"],
+            ),
+            (10, &["Increments:--", "NegateConditionals:negated"]),
+            (
+                12,
+                &[
+                    "ConditionalsBoundary:<=",
+                    "Math:-",
+                    "NegateConditionals:negated",
+                ],
+            ),
+            (14, &compare),
+            (17, &compare),
+            (
+                18,
+                &[
+                    "ConditionalsBoundary:>=",
+                    "NegateConditionals:negated",
+                    "NegateConditionals:negated",
+                ],
+            ),
+            (19, &compare),
+            (21, &compare),
+            (22, &[]),
+            (24, &compare),
+            (25, &["VoidMethodCall:removed"]),
+        ];
+        for (line, mutants) in expected {
+            assert_eq!(listed_on(&listed, line), mutants, "{line}: {listed:?}");
+        }
+    }
+
+    /// Methods PIT leaves alone (`@Generated`, `@DoNotMutate`,
+    /// `@CoverageIgnore`), `@NotNull` ones by either spelling (no
+    /// `NullReturnVals`), and a `void` method returning a value, which javac
+    /// rejects: no return mutant.
+    #[test]
+    fn java_annotated_methods() {
+        let source = r#"package a;
+
+class G {
+    @Generated
+    int gen(int a) {
+        return a + 1;
+    }
+
+    @DoNotMutate
+    int keep(int a) {
+        return a + 1;
+    }
+
+    @CoverageIgnore
+    int skip(int a) {
+        return a + 1;
+    }
+
+    @NotNull
+    Object make() {
+        return new Object();
+    }
+
+    @org.jetbrains.annotations.NotNull
+    Object made() {
+        return new Object();
+    }
+
+    Object plain() {
+        return new Object();
+    }
+
+    void nothing(int a) {
+        return a + 1;
+    }
+}
+"#;
+        let listed = enumerated("a/G.java", source);
+        for line in [6, 11, 16, 21, 26] {
+            assert!(listed_on(&listed, line).is_empty(), "{line}: {listed:?}");
+        }
+        assert_eq!(listed_on(&listed, 30), ["NullReturnVals:null"]);
+        assert_eq!(listed_on(&listed, 34), ["Math:-"]);
+    }
+
+    /// A private constructor only a static field's `new` calls is static
+    /// initialisation, and so is a private method it calls on `this`; the
+    /// public constructor is not.
+    #[test]
+    fn java_singleton_construction_is_static_initialisation() {
+        let source = r#"package a;
+
+class Single {
+    static final Single INSTANCE = new Single();
+    private int seed;
+
+    private Single() {
+        this.prepare();
+        seed = seed + 1;
+    }
+
+    Single(int start) {
+        seed = start - 1;
+    }
+
+    private void prepare() {
+        seed = seed * 2;
+    }
+}
+"#;
+        let listed = enumerated("a/Single.java", source);
+        for line in [8, 9, 17] {
+            assert!(listed_on(&listed, line).is_empty(), "{line}: {listed:?}");
+        }
+        assert_eq!(listed_on(&listed, 13), ["Math:+"]);
+    }
+
+    /// Where a Kotlin operator's probe could not be compiled in its place:
+    /// two `Short`s (no helper of theirs), an `Int` and a `Long`, a right
+    /// side that ends in an `if`, shifts by a `Long` or of a `Double`,
+    /// `and` of mixed or of `Byte`s, and `-` of a `Short` or of an `if`. Two
+    /// `Int`s have one.
+    #[test]
+    fn kotlin_operators_without_a_probe() {
+        let source = r#"package a
+
+fun narrow(a: Short, b: Short): Int = a + b
+fun mixed(a: Int, b: Long): Long = a + b
+fun same(a: Int, b: Int): Int = a + b
+fun braced(a: Int, c: Boolean): Int = a + if (c) 1 else 2
+fun shiftLong(n: Int, m: Long): Int = n shl m
+fun shiftDouble(d: Double, n: Int): Int = d shl n
+fun andMixed(n: Int, m: Long): Long = n and m
+fun andBytes(p: Byte, q: Byte): Byte = p and q
+fun negShort(s: Short): Int = -s
+fun negIf(c: Boolean, a: Int, b: Int): Int = -if (c) a else b
+"#;
+        let listed = enumerated("a/P.kt", source);
+        for line in 3..=12 {
+            let mutator = if line >= 11 {
+                Mutator::InvertNegs
+            } else {
+                Mutator::Math
+            };
+            let found = listed
+                .iter()
+                .filter(|mutant| mutant.start.0 == line && mutant.mutator == mutator)
+                .collect::<Vec<_>>();
+            assert_eq!(found.len(), 1, "{line}: {listed:?}");
+            assert_eq!(
+                found[0].probe.is_some(),
+                line == 5,
+                "{line}: {:?}",
+                found[0]
+            );
+        }
+    }
+
+    /// Kotlin loggers PIT's filter knows: a property of an imported logger
+    /// type, and properties a factory makes with no import of it; a
+    /// destructured factory call is a logging line, not a logger.
+    #[test]
+    fn kotlin_loggers_by_type_and_by_factory() {
+        let source = r#"package a
+
+import org.slf4j.Logger
+
+class Logs {
+    private val log: Logger = make()
+    private val factory = LoggerFactory.getLogger("f")
+    private val manager = LogManager.getLogger("m")
+    var count = 0
+
+    fun run() {
+        log.info("a" + (count + 1))
+        factory.info("b" + (count + 2))
+        manager.info("c" + (count + 3))
+        val (pair, other) = LoggerFactory.getLogger("p") to 1
+        count = count - other
+    }
+}
+"#;
+        let listed = enumerated("a/Logs.kt", source);
+        for line in 12..=15 {
+            assert!(listed_on(&listed, line).is_empty(), "{line}: {listed:?}");
+        }
+        assert_eq!(listed_on(&listed, 16), ["Math:+"], "{listed:?}");
+    }
+
+    /// An object's property initialised by another class's method of the
+    /// same name: the object's private method is not initialisation.
+    #[test]
+    fn kotlin_initialisation_follows_unqualified_calls_only() {
+        let source = r#"package a
+
+object Registry {
+    private val size = Other.compute()
+    var counter = 0
+
+    private fun compute(): Int {
+        return counter + 1
+    }
+}
+"#;
+        let listed = enumerated("a/Registry.kt", source);
+        assert!(
+            listed_on(&listed, 8).contains(&"Math:-".to_owned()),
+            "{listed:?}"
+        );
     }
 }
