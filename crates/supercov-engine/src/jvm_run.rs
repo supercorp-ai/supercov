@@ -5236,8 +5236,8 @@ mod tests {
             coverage_model: crate::owned_evidence::jvm_coverage_model(),
         });
         let record = |name: &str, snapshots: usize| {
-            let mut record = run.request.raw_results[0].clone();
-            record.test = name.to_owned();
+            let mut record: crate::coverage_report::RawTestResult =
+                serde_json::from_value(serde_json::json!({ "test": name })).unwrap();
             record.runtime = vec![crate::coverage_report::RuntimeSnapshot::default(); snapshots];
             record
         };
@@ -5347,6 +5347,8 @@ mod tests {
             mutant("waiting"),
         ];
         let mut results = Results::new(&path);
+        results.merge_partials(&[], &tests);
+        assert_eq!(results.lines().len(), lines.len());
         results.merge_partials(&mutants, &tests);
         let added = results.lines()[lines.len()..].to_vec();
         assert_eq!(
@@ -6067,8 +6069,8 @@ e: /w/copy/src/A.kt: (x, 2): no line
                 .contains("-Drat.skip=true")
         );
         // Not Maven itself: the property goes through MAVEN_OPTS.
-        fs::remove_file(&request.results).ok();
-        let request = strong_request(&root, &out, &["sh", "-c", &report], &plan);
+        let again = root.with_extension("again");
+        let request = strong_request(&root, &again, &["sh", "-c", &report], &plan);
         assert_eq!(run_strong_jvm(&request, &mut Vec::new()), Ok(0));
         assert!(
             fs::read_to_string(out.join("opts"))
@@ -6080,6 +6082,25 @@ e: /w/copy/src/A.kt: (x, 2): no line
                 .unwrap()
                 .contains("-Drat.skip=true")
         );
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&out).ok();
+        fs::remove_dir_all(&again).ok();
+    }
+
+    /// A plan with no undecided mutant starts no build, and a pass whose
+    /// results have no directory works in the project's own.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_with_nothing_to_run_starts_no_build() {
+        let root = strong_project("strong-nothing");
+        let out = root.with_extension("out");
+        let request = StrongJvmRequest {
+            results: PathBuf::new(),
+            ..strong_request(&root, &out, &["false"], &serde_json::json!({}))
+        };
+        assert_eq!(run_strong_jvm(&request, &mut Vec::new()), Ok(0));
+        assert!(root.join(".supercov/strong/jvm").is_dir());
+        assert!(!root.join(".supercov/strong/build-0.log").exists());
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&out).ok();
     }
@@ -6133,11 +6154,18 @@ e: /w/copy/src/A.kt: (x, 2): no line
             "fs.write#jvm-run.instrument-workspace.strong-pass",
             "signal-install",
             "fs.write#jvm-run.run-strong-jvm.plan",
-            "spawn#process-supervision.spawn-contained",
         ] {
             let failed = crate::fault::during(fault, || run_strong_jvm(&request, &mut Vec::new()));
             assert!(failed.is_err(), "{fault}: {failed:?}");
         }
+        let unstartable = StrongJvmRequest {
+            command: vec![out.join("no-such-program").display().to_string()],
+            ..request.clone()
+        };
+        assert!(
+            run_strong_jvm(&unstartable, &mut Vec::new())
+                .is_err_and(|error| error.contains("no-such-program")),
+        );
         let interrupted = StrongJvmRequest {
             command: vec![
                 "sh".into(),
@@ -6761,22 +6789,18 @@ fn compile_errors(output: &str, workspace: &Path) -> Vec<(String, usize, usize, 
     let base = workspace.to_string_lossy().trim_end_matches('/').to_owned();
     let relative = |path: &str| -> Option<String> {
         let path = path.trim().trim_start_matches("file://");
-        let stripped = path
-            .strip_prefix(&base)
-            .or_else(|| {
-                std::fs::canonicalize(path)
-                    .ok()
-                    .and_then(|canonical| {
-                        canonical
-                            .strip_prefix(workspace)
-                            .ok()
-                            .map(|rest| rest.to_string_lossy().into_owned())
-                    })
-                    .map(|_| path)
-            })?
-            .trim_start_matches('/')
-            .to_owned();
-        Some(stripped)
+        let stripped = match path.strip_prefix(&base) {
+            Some(rest) => rest.to_owned(),
+            // A path into the copy by another way, such as a link: the
+            // part below the copy, not the path as printed.
+            None => std::fs::canonicalize(path)
+                .ok()?
+                .strip_prefix(workspace)
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        Some(stripped.trim_start_matches('/').to_owned())
     };
     let lines = output.lines().collect::<Vec<_>>();
     let mut errors = Vec::new();
