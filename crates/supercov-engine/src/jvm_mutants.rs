@@ -3875,8 +3875,6 @@ impl Enumerator<'_> {
                     .map(|name| text(name, self.source).to_owned())
                     .unwrap_or_else(|| "Companion".to_owned());
                 let object = node.kind() != "class_declaration";
-                let enumeration = text(node, self.source).trim_start().starts_with("enum")
-                    || modifiers_text(node, self.source).contains("enum");
                 let outer_methods = std::mem::take(&mut self.methods);
                 self.classes.push(Class {
                     name,
@@ -3913,10 +3911,13 @@ impl Enumerator<'_> {
                     }
                     self.scopes.pop();
                 }
+                // A class's own initialisation is its constructor's, even
+                // nested in an object: only an object's or a companion's is
+                // a static initializer.
                 for body in named_children(node)
                     .filter(|child| matches!(child.kind(), "class_body" | "enum_class_body"))
                 {
-                    self.kotlin_class_body(body, object || static_context, enumeration);
+                    self.kotlin_class_body(body, object || static_context);
                 }
                 self.classes.pop();
                 self.methods = outer_methods;
@@ -3959,8 +3960,9 @@ impl Enumerator<'_> {
                     }
                 }
                 // An initializer runs in the constructor, or in the static
-                // initializer for an object's or the file's properties.
-                let is_static = static_context || self.classes.is_empty() || is_const;
+                // initializer for an object's or the file's properties (where
+                // a `const` is: kotlinc allows one nowhere else).
+                let is_static = static_context || self.classes.is_empty();
                 self.methods.push(Method {
                     name: if is_static { "<clinit>" } else { "<init>" }.to_owned(),
                     returns: None,
@@ -4036,7 +4038,7 @@ impl Enumerator<'_> {
         }
     }
 
-    fn kotlin_class_body(&mut self, body: Node, static_context: bool, enumeration: bool) {
+    fn kotlin_class_body(&mut self, body: Node, static_context: bool) {
         let members = named_children(body).collect::<Vec<_>>();
         // Fields first, so that a function above a property knows its type.
         for member in &members {
@@ -4110,7 +4112,6 @@ impl Enumerator<'_> {
                 class.initializing = initializing;
             }
         }
-        let _ = enumeration;
         for member in members {
             match member.kind() {
                 "enum_entry" => {
@@ -4121,7 +4122,7 @@ impl Enumerator<'_> {
                             name: position.to_string(),
                             ..Class::default()
                         });
-                        self.kotlin_class_body(body, false, false);
+                        self.kotlin_class_body(body, false);
                         self.classes.pop();
                     }
                 }
@@ -4160,7 +4161,8 @@ impl Enumerator<'_> {
     fn kotlin_accessor(&mut self, accessor: Node, property: &str, ty: &Ty, nullable: bool) {
         let getter = accessor.kind() == "getter";
         // The JVM name kotlinc gives it: `getName`, `setName`, and `isOpen`
-        // for a property named `isOpen`.
+        // and `setOpen` for a property named `isOpen`, where what follows
+        // `is` is not a lowercase letter (`island` is `getIsland`).
         let capitalized = property
             .chars()
             .next()
@@ -4427,7 +4429,7 @@ impl Enumerator<'_> {
                     ..Class::default()
                 });
                 for body in named_children(node).filter(|child| child.kind() == "class_body") {
-                    self.kotlin_class_body(body, static_init, false);
+                    self.kotlin_class_body(body, static_init);
                 }
                 self.classes.pop();
                 self.methods = outer_methods;
@@ -4530,17 +4532,9 @@ impl Enumerator<'_> {
                     .collect::<Vec<_>>();
                 let count = statements.len();
                 for (position, statement) in statements.into_iter().enumerate() {
-                    if statement.kind() == "statements" {
-                        let inner = named_children(statement).collect::<Vec<_>>();
-                        let last = inner.len().saturating_sub(1);
-                        for (index, child) in inner.into_iter().enumerate() {
-                            if index == last {
-                                self.kotlin_node(child, Context::Value);
-                            } else {
-                                self.kotlin_statement(child);
-                            }
-                        }
-                    } else if position + 1 == count {
+                    if position + 1 == count {
+                        // The value, which a call of a method that returns
+                        // nothing still is a call of.
                         self.kotlin_node(statement, Context::Value);
                     } else {
                         self.kotlin_statement(statement);
@@ -4555,6 +4549,7 @@ impl Enumerator<'_> {
                 }
             }
             "return_expression" => {
+                // `return@label value`: the label is an identifier too.
                 if let Some(value) = named_children(node).find(|child| child.kind() != "label") {
                     let labelled = text(node, self.source).starts_with("return@");
                     if !labelled {
@@ -4610,7 +4605,7 @@ impl Enumerator<'_> {
                     match child.kind() {
                         "variable_declaration" | "multi_variable_declaration" => {
                             // A loop over an `Int` range (`0 until n`, `a..b`,
-                            // `n downTo 0`) counts in `Int`s.
+                            // `n downTo 0`, `a..b step 2`) counts in `Int`s.
                             let over_range = named_children(node).any(|part| {
                                 part.kind() == "range_expression"
                                     || (part.kind() == "infix_expression"
@@ -4618,13 +4613,15 @@ impl Enumerator<'_> {
                                             matches!(text(word, self.source), "until" | "downTo")
                                         }))
                             });
+                            // A destructuring's names are in its own
+                            // declarations, not here: only a plain variable's
+                            // is declared.
                             for name in named_children(child).filter(|n| n.kind() == "identifier") {
                                 let name = text(name, self.source).to_owned();
                                 self.declare(
                                     &name,
                                     Var {
-                                        ty: if over_range && child.kind() == "variable_declaration"
-                                        {
+                                        ty: if over_range {
                                             Ty::Prim(Prim::Int)
                                         } else {
                                             Ty::Unknown
@@ -4709,12 +4706,6 @@ impl Enumerator<'_> {
                 if context == Context::Condition
                     && named_children(node).last().is_some_and(|range| {
                         range.kind() != "range_expression"
-                            && !matches!(
-                                range
-                                    .child_by_field_name("operator")
-                                    .map(|operator| text(operator, self.source)),
-                                Some("until" | "downTo" | "..<")
-                            )
                             && !text(range, self.source).contains(" until ")
                             && !text(range, self.source).contains(" downTo ")
                     }) =>
@@ -4828,9 +4819,10 @@ impl Enumerator<'_> {
         }
     }
 
-    /// `require(a && b)`, `check(a || b)`: the inlined `if (!value) throw`
-    /// is a jump of its own on the whole condition, besides its operands'.
-    /// A single comparison's is the same mutant as the comparison's own.
+    /// `require(a && b)`, `check(a || b, { message })`: the inlined `if
+    /// (!value) throw` is a jump of its own on the whole condition, besides
+    /// its operands'. A single comparison's is the same mutant as the
+    /// comparison's own.
     fn kotlin_checked_compound<'t>(&self, call: Node<'t>) -> Option<Node<'t>> {
         let callee = named_children(call).next()?;
         if !matches!(text(callee, self.source), "require" | "check") {
@@ -4915,7 +4907,7 @@ impl Enumerator<'_> {
         let left_ty = self.kotlin_type_of(left);
         let right_ty = self.kotlin_type_of(right);
         let _ = node;
-        if operator == "+" && (left_ty == Ty::Str || matches!(left.kind(), "string_literal")) {
+        if operator == "+" && left_ty == Ty::Str {
             return true;
         }
         // A side known to be a reference: Kotlin's operators are functions
@@ -5985,5 +5977,701 @@ public class M {
         );
         // `B` folds to true: only its replacement with false.
         assert_eq!(sorted(46), ["BooleanFalseReturnVals:false"]);
+    }
+
+    // Coverage of package B1: Java's constants and types, the JDK methods'
+    // types, Kotlin's lambda reads and the Kotlin forms its walk meets.
+    mod inference_and_kotlin_forms {
+        use super::*;
+
+        /// What `read` says of `expression`, the initializer of a field of
+        /// Java class `M`, as the walk sees it in one of `M`'s methods: `M`'s
+        /// field `count` (an `int`) and constant `K` (3) and these locals in
+        /// scope: `int i`, `long l`, `byte b`, `boolean flag`, `String s`,
+        /// `Foo o`, `int[] ints` and `List list`.
+        fn java_reading<R>(expression: &str, read: impl FnOnce(&Enumerator, Node) -> R) -> R {
+            let source = format!("class M {{\n    Object v = {expression};\n}}\n");
+            let tree = crate::jvm_instrumenter::parse(&source, JvmLanguage::Java).expect("parses");
+            let index = ProjectIndex::of([("a/M.java", source.as_str())]);
+            let mut enumerator = Enumerator {
+                source: &source,
+                language: JvmLanguage::Java,
+                index: &index,
+                mutants: Vec::new(),
+                scopes: Vec::new(),
+                classes: Vec::new(),
+                methods: Vec::new(),
+                loggers: BTreeSet::new(),
+                logging_lines: BTreeSet::new(),
+                package: String::new(),
+                deferred: Vec::new(),
+                root: Some(tree.root_node()),
+            };
+            let var = |ty: Ty, constant: Option<Constant>| Var {
+                ty,
+                local: false,
+                constant,
+            };
+            enumerator.classes.push(Class {
+                name: "M".into(),
+                fields: HashMap::from([
+                    ("count".to_owned(), var(Ty::Prim(Prim::Int), None)),
+                    (
+                        "K".to_owned(),
+                        var(Ty::Prim(Prim::Int), Some(Constant::Number(3.0))),
+                    ),
+                ]),
+                ..Class::default()
+            });
+            enumerator.scopes.push(HashMap::from([
+                ("i".to_owned(), var(Ty::Prim(Prim::Int), None)),
+                ("l".to_owned(), var(Ty::Prim(Prim::Long), None)),
+                ("b".to_owned(), var(Ty::Prim(Prim::Byte), None)),
+                ("flag".to_owned(), var(Ty::Prim(Prim::Boolean), None)),
+                ("s".to_owned(), var(Ty::Str, None)),
+                ("o".to_owned(), var(Ty::Object("Foo".into()), None)),
+                ("ints".to_owned(), var(Ty::Object("int[]".into()), None)),
+                ("list".to_owned(), var(Ty::Object("List".into()), None)),
+            ]));
+            let start = source.find(" = ").expect("an initializer") + 3;
+            let node = tree
+                .root_node()
+                .descendant_for_byte_range(start, start + expression.len())
+                .expect("the expression");
+            assert_eq!(text(node, &source), expression);
+            read(&enumerator, node)
+        }
+
+        fn constant(expression: &str) -> Option<Constant> {
+            java_reading(expression, |enumerator, node| {
+                enumerator.java_constant_value(node)
+            })
+        }
+
+        fn java_type_of(expression: &str) -> Ty {
+            java_reading(expression, |enumerator, node| enumerator.java_type_of(node))
+        }
+
+        /// The value javac folds a constant expression to (JLS 15.29), where
+        /// the file shows every operand is a constant: literals, `char`s,
+        /// this class's constants, unary and binary operators, conditionals
+        /// and casts to a primitive type or `String`. Anything else is no
+        /// constant, among them an operand the file does not know, a division
+        /// by zero (javac refuses to fold it) and operator and operand pairs
+        /// javac refuses to compile at all.
+        #[test]
+        fn java_constants_fold_as_javac_folds_them() {
+            use Constant::{Bool, Number, Text};
+            let folded = [
+                (r"'\0'", Some(Number(0.0))),
+                ("'a'", Some(Number(97.0))),
+                ("K", Some(Number(3.0))),
+                ("M.K", Some(Number(3.0))),
+                ("+5", Some(Number(5.0))),
+                ("6 / 3", Some(Number(2.0))),
+                ("7 % 4", Some(Number(3.0))),
+                ("1 < 2", Some(Bool(true))),
+                ("2 <= 1", Some(Bool(false))),
+                ("2 > 1", Some(Bool(true))),
+                ("1 >= 2", Some(Bool(false))),
+                ("1 == 1", Some(Bool(true))),
+                ("1 != 1", Some(Bool(false))),
+                ("6 & 3", Some(Number(2.0))),
+                ("6 | 3", Some(Number(7.0))),
+                ("6 ^ 3", Some(Number(5.0))),
+                ("1 << 4", Some(Number(16.0))),
+                ("-16 >> 2", Some(Number(-4.0))),
+                ("16 >>> 2", Some(Number(4.0))),
+                ("true & true", Some(Bool(true))),
+                ("true && false", Some(Bool(false))),
+                ("false && true", Some(Bool(false))),
+                ("true || false", Some(Bool(true))),
+                ("false || true", Some(Bool(true))),
+                ("false | false", Some(Bool(false))),
+                ("true ^ true", Some(Bool(false))),
+                ("true != false", Some(Bool(true))),
+                ("true == false", Some(Bool(false))),
+                ("\"a\" + 1", Some(Text)),
+                ("1 + \"a\"", Some(Text)),
+                ("true ? 1 : 2", Some(Number(1.0))),
+                ("false ? 1 : 2", Some(Number(2.0))),
+                ("(String) \"a\"", Some(Text)),
+                ("(int) 2.7", Some(Number(2.0))),
+                ("(long) -2.7", Some(Number(-2.0))),
+                ("(float) 2.5", Some(Number(2.5))),
+                ("(double) 2.5", Some(Number(2.5))),
+            ];
+            for (expression, value) in folded {
+                assert_eq!(constant(expression), value, "{expression}");
+            }
+            let not_constant = [
+                "y",
+                "this.zz",
+                "Other.K",
+                "-y",
+                "y + 1",
+                "1 + y",
+                "1 / 0",
+                "7 % 0",
+                "\"a\" == \"b\"",
+                "y ? 1 : 2",
+                "true ? y : 2",
+                "true ? 1 : y",
+                "(Object) 1",
+                "(int) y",
+                // javac refuses these: no value to give them.
+                "-true",
+                "true < false",
+                "1 + true",
+            ];
+            for expression in not_constant {
+                assert_eq!(constant(expression), None, "{expression}");
+            }
+        }
+
+        /// The type of an expression as far as the file shows it, as javac
+        /// types it: literals, names and `this.` fields, an array's `length`
+        /// and elements, creations, conditionals (numeric promotion, `null`
+        /// taking the other side's type), assignments, unary and binary
+        /// operators (comparisons are `boolean`, `+` with a reference is a
+        /// `String`, a shift is its left side's promoted type), calls of the
+        /// JDK's known methods, lambdas and method references, and `this`.
+        #[test]
+        fn java_expressions_have_the_types_javac_gives_them() {
+            let int = Ty::Prim(Prim::Int);
+            let long = Ty::Prim(Prim::Long);
+            let boolean = Ty::Prim(Prim::Boolean);
+            let function = Ty::Object("Function".into());
+            let typed = [
+                ("true", boolean.clone()),
+                ("null", Ty::Null),
+                ("this.count", int.clone()),
+                ("this.zz", Ty::Unknown),
+                ("o.zz", Ty::Unknown),
+                ("ints.length", int.clone()),
+                ("s.length", Ty::Unknown),
+                ("list.length", Ty::Unknown),
+                ("ints[0]", int.clone()),
+                ("list[0]", Ty::Unknown),
+                ("y[0]", Ty::Unknown),
+                ("new int[3]", Ty::Object("[]".into())),
+                ("o instanceof String", boolean.clone()),
+                ("flag ? 1 : 2L", long.clone()),
+                ("flag ? true : false", boolean.clone()),
+                ("flag ? 1 : true", Ty::Unknown),
+                ("flag ? null : \"x\"", Ty::Str),
+                ("flag ? \"x\" : null", Ty::Str),
+                ("flag ? y : \"x\"", Ty::Str),
+                ("i = 2", int.clone()),
+                ("!flag", boolean.clone()),
+                ("-b", int.clone()),
+                ("-l", long.clone()),
+                ("~i", int.clone()),
+                ("-y", Ty::Unknown),
+                ("i < 2", boolean.clone()),
+                ("flag && flag", boolean.clone()),
+                ("1 + \"a\"", Ty::Str),
+                ("o + 1", Ty::Str),
+                ("1 + o", Ty::Str),
+                ("i << 2L", int.clone()),
+                ("l >> 1", long.clone()),
+                ("y >>> 1", Ty::Unknown),
+                ("flag & true", boolean.clone()),
+                ("i * 2L", long.clone()),
+                ("i * y", Ty::Unknown),
+                ("Integer.parseInt(s)", int.clone()),
+                ("s.trim()", Ty::Str),
+                ("make()", Ty::Unknown),
+                ("() -> 1", function.clone()),
+                ("String::valueOf", function.clone()),
+                ("this", Ty::Object("M".into())),
+                ("String.class", Ty::Unknown),
+            ];
+            for (expression, ty) in typed {
+                assert_eq!(java_type_of(expression), ty, "{expression}");
+            }
+        }
+
+        /// The JDK methods whose results' types the source does not name, by
+        /// class and name: `Integer.parseInt` is an `int`, `Math`'s are
+        /// `double`s but for those whose type follows their arguments', a
+        /// map entry's `getKey` is whatever the map holds.
+        #[test]
+        fn the_jdk_s_methods_have_their_declared_types() {
+            let known = [
+                (Some("String"), "valueOf", Some(Ty::Str)),
+                (Some("Integer"), "parseInt", Some(Ty::Prim(Prim::Int))),
+                (Some("Long"), "parseLong", Some(Ty::Prim(Prim::Long))),
+                (Some("Double"), "parseDouble", Some(Ty::Prim(Prim::Double))),
+                (Some("Math"), "abs", None),
+                (Some("Math"), "floorDiv", None),
+                (Some("Math"), "sqrt", Some(Ty::Prim(Prim::Double))),
+                (Some("entry"), "getKey", None),
+                (None, "trim", Some(Ty::Str)),
+                (Some("xs"), "size", Some(Ty::Prim(Prim::Int))),
+                (Some("n"), "longValue", Some(Ty::Prim(Prim::Long))),
+                (Some("n"), "doubleValue", Some(Ty::Prim(Prim::Double))),
+                (Some("n"), "floatValue", Some(Ty::Prim(Prim::Float))),
+                (Some("s"), "charAt", Some(Ty::Prim(Prim::Char))),
+                (Some("s"), "equals", Some(Ty::Prim(Prim::Boolean))),
+                (Some("s"), "frobnicate", None),
+            ];
+            for (object, name, ty) in known {
+                assert_eq!(known_method_type(object, name), ty, "{object:?}.{name}");
+            }
+        }
+
+        /// Whether `n`, a local declared first in a Kotlin function, is read
+        /// in a lambda among the statements after it (`body`).
+        fn read_later_in_a_lambda(body: &str) -> bool {
+            let source = format!("fun f(xs: List<Int>) {{\n    var n = 0\n{body}}}\n");
+            let tree =
+                crate::jvm_instrumenter::parse(&source, JvmLanguage::Kotlin).expect("parses");
+            let start = source.find("var n").expect("the declaration");
+            let declaration = tree
+                .root_node()
+                .descendant_for_byte_range(start, start + "var n = 0".len())
+                .expect("the declaration");
+            assert_eq!(declaration.kind(), "property_declaration");
+            kotlin_read_in_a_later_lambda(declaration, "n", &source)
+        }
+
+        /// A local is read in a later lambda by name or by a string's bare
+        /// `$n` template; `$n_` and `$nx` name other variables, and a read
+        /// outside a lambda, or no statement after the declaration, is no
+        /// such read.
+        #[test]
+        fn a_kotlin_local_is_read_in_a_later_lambda_by_name_or_template() {
+            assert!(read_later_in_a_lambda(
+                "    xs.forEach { println(\"$n\") }\n"
+            ));
+            assert!(read_later_in_a_lambda("    xs.forEach { println(n) }\n"));
+            assert!(!read_later_in_a_lambda(
+                "    xs.forEach { println(\"$n_\") }\n"
+            ));
+            assert!(!read_later_in_a_lambda(
+                "    xs.forEach { println(\"$nx\") }\n"
+            ));
+            assert!(!read_later_in_a_lambda("    println(n)\n"));
+            assert!(!read_later_in_a_lambda(""));
+        }
+
+        /// A Kotlin file's mutants, as `enumerate` lists them.
+        fn kotlin_mutants(file: &str, source: &str) -> Vec<JvmMutant> {
+            let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Kotlin).expect("parses");
+            let index = ProjectIndex::of([(file, source)]);
+            enumerate(source, &tree, JvmLanguage::Kotlin, &index)
+        }
+
+        /// The 1-based line of the first line of `source` holding `marker`.
+        fn line_of(source: &str, marker: &str) -> u32 {
+            let at = source.find(marker).expect("the marker");
+            source[..at].matches('\n').count() as u32 + 1
+        }
+
+        /// Every mutant as (line, `Mutator:descriptor`), sorted.
+        fn by_line(file: &str, source: &str) -> Vec<(u32, String)> {
+            let mut listed = kotlin_mutants(file, source)
+                .iter()
+                .map(|mutant| {
+                    (
+                        mutant.start.0,
+                        format!("{}:{}", mutant.mutator.name(), mutant.descriptor),
+                    )
+                })
+                .collect::<Vec<_>>();
+            listed.sort();
+            listed
+        }
+
+        /// The `Mutator:descriptor`s of the line holding `marker`, sorted.
+        fn on(listed: &[(u32, String)], source: &str, marker: &str) -> Vec<String> {
+            let line = line_of(source, marker);
+            listed
+                .iter()
+                .filter(|(at, _)| *at == line)
+                .map(|(_, mutant)| mutant.clone())
+                .collect()
+        }
+
+        /// Kotlin's declarations: a class with no body, with an empty
+        /// constructor and body, an empty object, an enum's entries, an
+        /// object's `init` and properties (its static initializer, which PIT
+        /// leaves alone), a class nested in an object (its own constructor,
+        /// which PIT mutates), secondary constructors with modifiers and with
+        /// no body, and a companion's private functions only its
+        /// initialization calls, one with a default argument and one called
+        /// twice.
+        #[test]
+        fn kotlin_declarations_list_the_mutants_pit_makes_of_them() {
+            let file = "a/Decl.kt";
+            let source = r#"package /* the package */ a
+
+class Plain
+
+class Empty() {}
+
+object Blank {}
+
+enum class Kind { ON, OFF }
+
+object Registry {
+    var count = 0
+    init {
+        count = count + 1
+    }
+    class Entry(val a: Int) {
+        val b = a + 1
+    }
+}
+
+class Built {
+    var total = 0
+    private constructor(x: Int) : this() {
+        total = x * 2
+    }
+    constructor()
+}
+
+class Shared {
+    companion object {
+        val limit = 2
+        private fun twice(n: Int) = n * 2
+        val doubled = twice(limit) + twice(limit)
+        private fun pad(n: Int = 1) = n + 1
+        val padded = pad()
+    }
+}
+"#;
+            let listed = by_line(file, source);
+            assert_eq!(
+                listed,
+                [
+                    (line_of(source, "val b = a + 1"), "Math:-".to_owned()),
+                    (line_of(source, "total = x * 2"), "Math:/".to_owned()),
+                ]
+            );
+            let mutants = kotlin_mutants(file, source);
+            assert_eq!(mutants[0].class, "a.Registry$Entry");
+            assert_eq!(mutants[0].method, "<init>");
+        }
+
+        /// A property's accessors are named as kotlinc names them: `isShut`
+        /// and `setOpen` for properties named `isShut` and `isOpen`,
+        /// `getIsland` for `island`. A getter returns the property's type
+        /// (none where the source does not show it), a getter with no body
+        /// is the compiler's, `@NotNull` keeps `null` from a nullable
+        /// return, and a `Unit` function's expression body is a statement.
+        #[test]
+        fn kotlin_accessors_and_expression_bodies_list_the_mutants_pit_makes() {
+            let file = "a/Door.kt";
+            let source = r#"package a
+
+import org.jetbrains.annotations.NotNull
+
+class Door(private val helper: Helper) {
+    var changes = 0
+    var isOpen = false
+        set(value) {
+            changes++
+            field = value
+        }
+    val isShut: Boolean
+        get() = !isOpen
+    val island: Boolean
+        get() = isOpen
+    val size
+        get() = helper.compute()
+    val width: Int = 3
+        get
+    @NotNull
+    fun label(): Helper? = helper.self()
+    fun touch(): Unit = ring()
+    fun ring() {}
+}
+"#;
+            let listed = by_line(file, source);
+            assert_eq!(
+                on(&listed, source, "get() = !isOpen"),
+                ["BooleanTrueReturnVals:true", "NegateConditionals:negated"]
+            );
+            assert_eq!(
+                on(&listed, source, "get() = isOpen"),
+                ["BooleanFalseReturnVals:false", "BooleanTrueReturnVals:true"]
+            );
+            for marker in [
+                "get() = helper.compute()",
+                "val width",
+                "        get\n",
+                "fun label",
+                "fun ring",
+            ] {
+                assert!(
+                    on(&listed, source, marker).is_empty(),
+                    "{marker}: {listed:?}"
+                );
+            }
+            assert_eq!(on(&listed, source, "fun touch"), ["VoidMethodCall:removed"]);
+            let mutants = kotlin_mutants(file, source);
+            let methods_on = |marker: &str| {
+                let line = line_of(source, marker);
+                mutants
+                    .iter()
+                    .filter(|mutant| mutant.start.0 == line)
+                    .map(|mutant| mutant.method.as_str())
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(methods_on("changes++"), BTreeSet::from(["setOpen"]));
+            assert_eq!(methods_on("get() = !isOpen"), BTreeSet::from(["isShut"]));
+            assert_eq!(methods_on("get() = isOpen"), BTreeSet::from(["getIsland"]));
+        }
+
+        /// Call statements: a `String`'s own method is the JDK's, whatever
+        /// the project declares of that name; a project `inline` function's
+        /// call and a constructor's are no calls to remove; `require` and
+        /// `check` are inlined, their whole `&&` condition a jump of its own
+        /// with the message passed in parentheses too, a project's `check`
+        /// with no condition argument nothing more; a lambda's last
+        /// statement is a call to remove like any other; and a collection
+        /// function's lambda is the method's own code.
+        #[test]
+        fn kotlin_calls_list_the_mutants_pit_makes_of_them() {
+            let file = "a/Calls.kt";
+            let source = r#"package a
+
+class Calls {
+    fun trim() {}
+    inline fun twice(block: () -> Unit) {
+        block()
+        block()
+    }
+    fun log() {}
+    fun act(s: String, done: Boolean, n: Int, xs: List<Int>) {
+        s.trim()
+        twice { }
+        Calls()
+        check(done && s.isEmpty(), { "not done" })
+        require(!done)
+        require(n > 0)
+        xs.forEach { log(); log() }
+        xs.forEach { log() }
+        val counted = xs.any { it > n }
+        val doubled = xs.map { x -> x * 2 }
+    }
+}
+
+class Gate {
+    fun check(): Boolean = true
+    fun check(block: () -> Boolean): Boolean = block()
+    fun use(done: Boolean) {
+        check()
+        check { done }
+    }
+}
+"#;
+            let listed = by_line(file, source);
+            for marker in [
+                "s.trim()",
+                "twice { }",
+                "Calls()",
+                "        check()",
+                "check { done }",
+                "        block()",
+            ] {
+                assert!(
+                    on(&listed, source, marker).is_empty(),
+                    "{marker}: {listed:?}"
+                );
+            }
+            assert_eq!(
+                on(&listed, source, "check(done"),
+                [
+                    "NegateConditionals:negated",
+                    "NegateConditionals:negated",
+                    "NegateConditionals:negated"
+                ]
+            );
+            assert_eq!(
+                on(&listed, source, "require(!done)"),
+                ["NegateConditionals:negated"]
+            );
+            assert_eq!(
+                on(&listed, source, "require(n > 0)"),
+                ["ConditionalsBoundary:>=", "NegateConditionals:negated"]
+            );
+            assert_eq!(
+                on(&listed, source, "{ log(); log() }"),
+                ["VoidMethodCall:removed", "VoidMethodCall:removed"]
+            );
+            assert_eq!(on(&listed, source, "{ log() }"), ["VoidMethodCall:removed"]);
+            assert_eq!(
+                on(&listed, source, "xs.any"),
+                ["ConditionalsBoundary:>=", "NegateConditionals:negated"]
+            );
+            assert_eq!(on(&listed, source, "xs.map"), ["Math:/"]);
+            let mutants = kotlin_mutants(file, source);
+            let any = line_of(source, "xs.any");
+            assert!(
+                mutants
+                    .iter()
+                    .filter(|mutant| mutant.start.0 == any)
+                    .all(|mutant| mutant.method == "act" && mutant.deferred.is_none()),
+                "{mutants:?}"
+            );
+        }
+
+        /// Kotlin's control flow and conditions: branches a constant leaves
+        /// out (a second file-level constant included), an `if` with no
+        /// branch, loops destructuring their element and over a stepped
+        /// range (`Int`s), a `when` with a guard, with no entries and as a
+        /// statement, a `try` as statements, a labelled return's value,
+        /// chains led by `!` (one jump each), conditions that are an index,
+        /// a `this.` property, a call of an operator function or a Boolean
+        /// `and`, constant comparisons and arithmetic (folded), operators of
+        /// other types (functions), equality with a literal (a jump), and an
+        /// infix shift with a comment in it.
+        #[test]
+        fn kotlin_control_flow_lists_the_mutants_pit_makes_of_it() {
+            let file = "a/Flow.kt";
+            let source = r#"package a
+
+const val LIMIT = 3
+const val DEBUG = false
+
+class Flow(private val bools: BooleanArray, private val vote: Vote) {
+    var flag = false
+    fun walk(n: Int, xs: List<Int>, pairs: Map<String, Int>, o: Any, other: Boolean) {
+        if (DEBUG) {
+            log() // left out
+        } else {
+            log() // kept
+        }
+        if (true) log() else log()
+        if (n > LIMIT) ;
+        for ((key, value) in pairs) { log() }
+        for (i in 0..10 step 2) {
+            val same = i == n
+        }
+        for ((a, b) in xs zip xs) { }
+        when (o) { is String if o.length > 2 -> log() else -> {} }
+        when (n) {}
+        when (n) {
+            1 -> log()
+            else -> {}
+        }
+        try {
+            log() // tried
+        } catch (e: Exception) {
+            log() // caught
+        } finally {
+            log() // finally
+        }
+        val parts = xs.map { return@map it + 1 }
+        val v = xs[n.inc()]
+        val empty = !xs.isEmpty()
+        val off = !this.flag
+        val first = !bools[0]
+        if (bools[1]) log()
+        if (this.flag) log()
+        val cast = o as String
+        val small = 1 < 2
+        val hour = 60 * 60
+        if (vote + vote) log()
+        val scaled = 2 * vote
+        val yes = flag == true
+        val one = 1 == n
+        val shifted = n shl /* by */ 2
+        val both = vote and vote
+        if (flag and other) log()
+        return
+    }
+    fun log() {}
+}
+
+class Vote(val n: Int) {
+    operator fun plus(other: Vote): Boolean = n > other.n
+    infix fun and(other: Vote): Vote = this
+}
+
+operator fun Int.times(vote: Vote): Vote = vote
+"#;
+            let listed = by_line(file, source);
+            let removed = || vec!["VoidMethodCall:removed".to_owned()];
+            let negated = || vec!["NegateConditionals:negated".to_owned()];
+            let negated_and_removed = || {
+                vec![
+                    "NegateConditionals:negated".to_owned(),
+                    "VoidMethodCall:removed".to_owned(),
+                ]
+            };
+            let compared = || {
+                vec![
+                    "ConditionalsBoundary:>=".to_owned(),
+                    "NegateConditionals:negated".to_owned(),
+                ]
+            };
+            let expected = [
+                ("if (DEBUG)", vec![]),
+                ("// left out", vec![]),
+                ("// kept", removed()),
+                ("if (true)", removed()),
+                ("if (n > LIMIT)", compared()),
+                ("for ((key, value)", removed()),
+                ("for (i in", vec![]),
+                ("val same", negated()),
+                ("for ((a, b)", vec![]),
+                (
+                    "when (o)",
+                    vec![
+                        "ConditionalsBoundary:>=".to_owned(),
+                        "NegateConditionals:negated".to_owned(),
+                        "VoidMethodCall:removed".to_owned(),
+                    ],
+                ),
+                ("when (n) {}", vec![]),
+                ("1 -> log()", removed()),
+                ("// tried", removed()),
+                ("// caught", removed()),
+                ("// finally", removed()),
+                ("return@map", vec!["Math:-".to_owned()]),
+                ("val v =", vec![]),
+                ("val empty", negated()),
+                ("val off", negated()),
+                ("val first", negated()),
+                ("if (bools[1])", negated_and_removed()),
+                ("if (this.flag)", negated_and_removed()),
+                ("val cast", vec![]),
+                ("val small", vec![]),
+                ("val hour", vec![]),
+                ("if (vote + vote)", negated_and_removed()),
+                ("val scaled", vec![]),
+                ("val yes", negated()),
+                ("val one", negated()),
+                ("val shifted", vec!["Math:shr".to_owned()]),
+                ("val both", vec![]),
+                (
+                    "if (flag and other)",
+                    vec![
+                        "Math:or".to_owned(),
+                        "NegateConditionals:negated".to_owned(),
+                        "VoidMethodCall:removed".to_owned(),
+                    ],
+                ),
+                ("        return\n", vec![]),
+            ];
+            for (marker, mutants) in expected {
+                assert_eq!(on(&listed, source, marker), mutants, "{marker}: {listed:?}");
+            }
+        }
+
+        /// Forms kotlinc refuses but the grammar reads, walked all the same:
+        /// a class's property that destructures has no name to record, and
+        /// its initializer is still the constructor's code.
+        #[test]
+        fn a_kotlin_class_property_that_destructures_is_still_walked() {
+            let file = "a/Split.kt";
+            let source = "package a\n\nclass Split(p: Pair<Int, Int>, n: Int) {\n    val (a, b) = make(n + 1)\n}\n";
+            assert_eq!(by_line(file, source), [(4, "Math:-".to_owned())]);
+        }
     }
 }
