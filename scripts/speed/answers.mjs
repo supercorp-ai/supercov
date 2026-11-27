@@ -58,6 +58,11 @@ for (const { text } of entries)
     names.set(match[4], `ATTEMPT(${match[1]}#${match[3]})`);
     names.set(match[2], `KEY(${match[1]})`);
   }
+// A node:test attempt is its test's key, its retry and the process's random
+// token (`<key>-<retry>-<token>`): named by its key and retry.
+for (const { path, text } of entries)
+  for (const match of `${path}\n${text}`.matchAll(/\b([0-9a-f]{24})-(\d+)-([0-9a-z]{11})\b/g))
+    if (!names.has(match[0])) names.set(match[0], `ATTEMPT(${match[1]}#${match[2]})`);
 for (const { text } of entries)
   for (const match of text.matchAll(/"workerId":"([^"]+)"/g))
     if (!names.has(match[1])) names.set(match[1], `WORKER${names.size}`);
@@ -155,7 +160,8 @@ for (const { path, text } of entries) {
   const name = scrub(path)
     .replace(/^execution\.host\..*\.jsonl$/, 'execution.host.jsonl')
     .replace(/^server\/background\/process-.*\.jsonl$/, 'server/background/process.jsonl')
-    .replace(/^playwright-(worker|status)-.*\.mcdc\.jsonl$/, 'playwright-$1.mcdc.jsonl');
+    .replace(/^playwright-(worker|status)-.*\.mcdc\.jsonl$/, 'playwright-$1.mcdc.jsonl')
+    .replace(/^node_test-.*\.mcdc\.jsonl$/, 'node_test.mcdc.jsonl');
   if (/\.jsonl$/.test(path)) (answers.evidence[name] ??= []).push(...text.split('\n').filter(Boolean).map((line) => JSON.parse(line)));
   else (answers.evidence[name] ??= []).push(/\.json$/.test(path) ? JSON.parse(text) : text);
 }
