@@ -1780,6 +1780,37 @@ test("npm's own process keeps no compiled code, a project's script does", { skip
   }
 });
 
+// A worker thread compiles with no cache: Node writes a thread's compiled
+// code as the thread ends, and a runner waits for its worker to end (AVA
+// stopped a suite whose workers spent their end renaming cache files on a
+// busy disk). Its process keeps the cache.
+test("a worker thread keeps no compiled code, its process does", { skip: process.platform === "win32" }, () => {
+  if (typeof Module.enableCompileCache !== "function")
+    return;
+  const registerUrl = new URL("../../runtime/javascript/register.mjs", import.meta.url).href;
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-worker-cache-"));
+  try {
+    const worker = `const { getCompileCacheDir } = require("node:module");
+require("node:worker_threads").parentPort.postMessage({ dir: getCompileCacheDir() ?? null, execArgv: process.execArgv });`;
+    writeFileSync(resolve(root, "main.mjs"), `
+      import { getCompileCacheDir } from "node:module";
+      import { Worker } from "node:worker_threads";
+      const worker = new Worker(${JSON.stringify(worker)}, { eval: true });
+      worker.once("message", (seen) => console.log(JSON.stringify({ main: getCompileCacheDir() ?? null, worker: seen })));
+    `);
+    const cache = resolve(root, "cache");
+    const ran = spawnSync(process.execPath, [`--import=${registerUrl}`, resolve(root, "main.mjs")], { encoding: "utf8", timeout: 15000, env: { ...process.env, NODE_COMPILE_CACHE: undefined, SUPERCOV_COMPILE_CACHE: cache } });
+    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+    const seen = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+    assert.ok(seen.main?.startsWith(resolve(cache, "node")), JSON.stringify(seen));
+    // The preload ran in the worker too.
+    assert.ok(seen.worker.execArgv.includes(`--import=${registerUrl}`), JSON.stringify(seen));
+    assert.equal(seen.worker.dir, null, JSON.stringify(seen));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // A test that spies on a built-in collection method counts its own code's
 // calls: a probe's first hit, a decision's end and a selection record through
 // the built-ins as the runtime found them, so the count is what it is without
