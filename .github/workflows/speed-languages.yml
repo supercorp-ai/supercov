@@ -16,7 +16,7 @@ concurrency:
 
 env:
   # A base ref to compare against, or empty to measure the head alone.
-  BASE_REF: ''
+  BASE_REF: 'ce132bc27835046d57ad788187a5fd5d756fdcff'
   PROJECTS: '["rust-semver","rust-ripgrep","python-click","python-h11","python-jinja","go-cobra","go-gin","ruby-rack","ruby-liquid","jvm-gson","jvm-commons-cli"]'
 
 jobs:
