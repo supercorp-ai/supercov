@@ -612,6 +612,11 @@ pub fn executions(
         let Some(file) = &test.file else {
             continue;
         };
+        // A test the runner skipped (`#[ignore]`, `test.skip`) ran nothing:
+        // it neither passed nor failed, and no record of it says either.
+        if test.outcome == "skipped" {
+            continue;
+        }
         let selector = TestSelector {
             file: file.clone(),
             name: test.name.clone(),

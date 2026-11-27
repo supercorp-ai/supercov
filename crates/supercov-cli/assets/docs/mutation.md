@@ -668,7 +668,16 @@ Limits: tests built for wasm run against mutants in Node, under WASI and in
 Chrome; tests run in Firefox, Safari or Edge have their mutants recorded
 `error`. Value probes do not cover `&&`, `||`, struct fields and returns that
 are not numbers or booleans: those mutants stay `unknown` where they ran, and
-the strong pass decides them.
+the strong pass decides them. Equivalent mutants are not detected for Rust:
+an equivalent mutant survives, as under cargo-mutants, and is accepted in
+`supercov.accepted.json` (Critical code and accepted mutants).
+
+A merged run's mutants run under its parts' test command; parts that differ
+only in the test names after `--` (`cargo test -- --exact a b`) give it
+without those names, since the pass names each test it runs. A test the
+measured run skipped (`#[ignore]`, unless the command asked for
+`--ignored` or `--include-ignored`) is neither passed nor failed, and is
+never a candidate.
 
 ### Go (preview)
 
