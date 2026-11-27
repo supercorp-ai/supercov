@@ -26,6 +26,8 @@ jobs:
             ref: d25da687b1362dc99c6ec403470ef8220d5bacba
           - variant: new
             ref: 3a8d8ec2c1bebe911f8e12abe72403e09c8b56cb
+          - variant: mid
+            ref: 7808d5ccc5ea62f687323bfaccd0696ea4cca342
           - variant: bytes
             ref: e7c95cb50a28760111e389fa5ab1219defb77ed7
     steps:
@@ -56,12 +58,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { pair: 'base bytes', mode: trace, count: 6 }
-          - { pair: 'base bytes', mode: abba, count: 45 }
-          - { pair: 'base bytes', mode: abba, count: 45 }
-          - { pair: 'bytes base', mode: abba, count: 45 }
-          - { pair: 'bytes base', mode: abba, count: 45 }
-          - { pair: 'plain bytes', mode: abba, count: 40 }
+          - { pair: 'mid bytes', mode: abba, count: 45 }
+          - { pair: 'mid bytes', mode: abba, count: 45 }
+          - { pair: 'bytes mid', mode: abba, count: 45 }
+          - { pair: 'bytes mid', mode: abba, count: 45 }
+          - { pair: 'new bytes', mode: abba, count: 45 }
+          - { pair: 'bytes new', mode: abba, count: 45 }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -83,6 +85,7 @@ jobs:
         run: tail -40 "$RUNNER_TEMP"/probe-diag/server-*.log || true
 
   measure:
+    if: false
     needs: build
     name: ${{ matrix.kind }} ${{ matrix.shard }} ${{ matrix.variants }}
     runs-on: ubuntu-24.04
@@ -135,6 +138,7 @@ jobs:
             case "$variant" in
               new) ;;
               bytes) ;;
+              mid) ;;
               await-action) extra="SUPERCOV_DIAG_SKIP=await-action" ;;
               collect) extra="SUPERCOV_DIAG_SKIP=collect" ;;
               base) ;;
@@ -146,7 +150,7 @@ jobs:
               skip-*) extra="SUPERCOV_DIAG_SKIP=${variant#skip-}" ;;
               *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
             esac
-            printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "${extra:-SPEED_NOTHING=1}" "$GITHUB_WORKSPACE/binaries/supercov-$(case "$variant" in base|bytes) echo "$variant";; *) echo new;; esac)/supercov" > "$RUNNER_TEMP/wrap/$variant"
+            printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "${extra:-SPEED_NOTHING=1}" "$GITHUB_WORKSPACE/binaries/supercov-$(case "$variant" in base|bytes|mid) echo "$variant";; *) echo new;; esac)/supercov" > "$RUNNER_TEMP/wrap/$variant"
             chmod +x "$RUNNER_TEMP/wrap/$variant"
             list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
           done

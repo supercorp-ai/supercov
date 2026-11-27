@@ -16,7 +16,7 @@ if [ ! -d "$SRC" ]; then
   (cd "$SRC" && git init -q && npm install --no-audit --no-fund >/dev/null 2>&1 && npx playwright install chromium >/dev/null 2>&1 \
     && git add -A && git -c user.name=diag -c user.email=diag@example.com commit -qm generated)
 fi
-port_of() { case $1 in plain) echo 3401;; base) echo 3402;; new) echo 3403;; bytes) echo 3404;; base-nohook) echo 3405;; bytes-nohook) echo 3406;; esac; }
+port_of() { case $1 in plain) echo 3401;; base) echo 3402;; new) echo 3403;; bytes) echo 3404;; base-nohook) echo 3405;; mid) echo 3407;; bytes-nohook) echo 3406;; esac; }
 start() {
   local v=$1 port; port=$(port_of "$v")
   local dir=$WORK/app-$v
@@ -64,7 +64,7 @@ stop_servers() {
   pkill -INT -f next-server || true
   for _ in $(seq 1 30); do pgrep -f next-server >/dev/null || break; sleep 1; done
   pkill -KILL -f next-server || true
-  for _ in $(seq 1 30); do pgrep -f "supercov-(base|new|bytes)/supercov" >/dev/null || break; sleep 1; done
+  for _ in $(seq 1 30); do pgrep -f "supercov-(base|new|bytes|mid)/supercov" >/dev/null || break; sleep 1; done
 }
 trap stop_servers EXIT
 if [ "$MODE" = profile ]; then
