@@ -104,9 +104,11 @@ const source = readFileSync(discussions, 'utf8');
 assert.equal(source.split(minuteBound).length, 2, discussions);
 writeFileSync(
   discussions,
+  // A function, so the `$&` and `$'` the new line holds are not read as
+  // replacement patterns.
   source.replace(
     minuteBound,
-    "name: new RegExp(`^${newDiscussion.title.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\\\S.* View Delete Discussion$`),",
+    () => "name: new RegExp(`^${newDiscussion.title.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\\\S.* View Delete Discussion$`),",
   ),
 );
 // Explicitly scope application code; generators and the mock worker are tooling.
