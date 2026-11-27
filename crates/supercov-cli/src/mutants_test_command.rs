@@ -522,8 +522,11 @@ struct Baseline<'a> {
 /// run (whose own is `supercov merge …`), its parts'. Parts that ran one
 /// command give it; Cargo commands that differ only in the test names after
 /// `--` give it without those names, since the pass names each test it runs
-/// itself. Parts that differ in anything else name no one command, and the
-/// caller is told to give it.
+/// itself; pytest and unittest commands that differ only in pytest-split's
+/// group give it without the split, and those that differ only in the test
+/// files or names they select give one that selects them all
+/// (`python_selections`). Parts that differ in anything else name no one
+/// command, and the caller is told to give it.
 fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
     if run.metadata.merged != Some(true) {
         return Ok(run.metadata.command.clone());
@@ -549,9 +552,11 @@ fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
         .iter()
         .map(|command| without_test_names(command))
         .collect::<BTreeSet<_>>();
+    let unfiltered_commands = unfiltered.iter().cloned().collect::<Vec<_>>();
     match (commands.len(), unfiltered.len()) {
         (1, _) => Ok(commands.remove(0)),
         (_, 1) => Ok(unfiltered.into_iter().next().unwrap_or_default()),
+        _ if let Some(command) = python_selections(&unfiltered_commands) => Ok(command),
         _ => Err(format!(
             "run {} is a merged run, and the runs it was merged from do not share one test command ({}): give the one its mutants run under after --, as supercov runs {} mutants test -- <test command>",
             run.id,
@@ -565,10 +570,110 @@ fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
     }
 }
 
+/// Where a command runs pytest or unittest: the place of the word after
+/// which its arguments are pytest's or unittest's (`pytest`, `py.test`, or
+/// `-m pytest` / `-m unittest`), and whether it is pytest.
+fn python_runner_at(command: &[String]) -> Option<(usize, bool)> {
+    command.iter().enumerate().find_map(|(at, word)| {
+        let stem = std::path::Path::new(word)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if stem == "pytest" || stem == "py.test" {
+            return Some((at, true));
+        }
+        let module = (at > 0 && command[at - 1] == "-m").then_some(word.as_str());
+        match module {
+            Some("pytest") => Some((at, true)),
+            Some("unittest") => Some((at, false)),
+            _ => None,
+        }
+    })
+}
+
+/// Parts of a pytest or unittest suite that differ only in the tests they
+/// select, one run of the command selecting all of theirs: words after the
+/// runner that name test files, directories or test ids (`tests/a.py`,
+/// `tests/unit`, `tests/a.py::test_x`, `tests.test_a`), in the same place in
+/// each command, with the rest the same. `pytest -q tests/a -x` and `pytest
+/// -q tests/b -x` give `pytest -q tests/a tests/b -x`. Any other difference
+/// names no one command.
+fn python_selections(commands: &[Vec<String>]) -> Option<Vec<String>> {
+    let first = commands.first()?;
+    let (runner, _) = python_runner_at(first)?;
+    let shortest = commands.iter().map(Vec::len).min()?;
+    let prefix = (0..shortest)
+        .take_while(|&at| commands.iter().all(|command| command[at] == first[at]))
+        .count();
+    if prefix <= runner {
+        return None;
+    }
+    let suffix = (0..shortest - prefix)
+        .take_while(|&back| {
+            commands
+                .iter()
+                .all(|command| command[command.len() - 1 - back] == first[first.len() - 1 - back])
+        })
+        .count();
+    // A test file (`a.py`, `a.py::test_x`), a directory (`tests/unit`: a
+    // path whose last part has no extension) or a dotted module name
+    // (`tests.test_a`); not an option, nor an option's value such as a
+    // report's file or a number.
+    let identifier = |part: &str| {
+        part.chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_alphabetic())
+            && part.chars().all(|c| c == '_' || c.is_alphanumeric())
+    };
+    let selects = |word: &String| {
+        let path = word.split("::").next().unwrap_or_default();
+        let last = path.rsplit('/').next().unwrap_or_default();
+        !word.starts_with('-')
+            && (path.ends_with(".py")
+                || (path.contains('/') && !last.contains('.'))
+                || (path.split('.').count() > 1 && path.split('.').all(identifier)))
+    };
+    let mut selected: Vec<String> = Vec::new();
+    for command in commands {
+        let middle = &command[prefix..command.len() - suffix];
+        if middle.is_empty() || !middle.iter().all(selects) {
+            return None;
+        }
+        for word in middle {
+            if !selected.contains(word) {
+                selected.push(word.clone());
+            }
+        }
+    }
+    let mut united = first[..prefix].to_vec();
+    united.extend(selected);
+    united.extend_from_slice(&first[first.len() - suffix..]);
+    Some(united)
+}
+
 /// A Cargo test command without the test names libtest takes after `--`
-/// (`cargo test -- --exact a b` is `cargo test -- --exact`); any other
-/// command as it is.
+/// (`cargo test -- --exact a b` is `cargo test -- --exact`); a pytest
+/// command without pytest-split's `--splits` and `--group`, which choose a
+/// part of the suite; any other command as it is.
 fn without_test_names(command: &[String]) -> Vec<String> {
+    if let Some((runner, true)) = python_runner_at(command)
+        && command
+            .iter()
+            .any(|word| word == "--splits" || word.starts_with("--splits="))
+    {
+        let mut kept = command[..=runner].to_vec();
+        let mut skip = false;
+        for word in &command[runner + 1..] {
+            if skip {
+                skip = false;
+            } else if word == "--splits" || word == "--group" {
+                skip = true;
+            } else if !(word.starts_with("--splits=") || word.starts_with("--group=")) {
+                kept.push(word.clone());
+            }
+        }
+        return kept;
+    }
     let cargo = command.iter().any(|word| {
         std::path::Path::new(word)
             .file_stem()
@@ -4112,6 +4217,67 @@ mod tests {
             without_test_names(&words("node --test -- a.test.js")),
             words("node --test -- a.test.js")
         );
+        // pytest-split's part of the suite.
+        assert_eq!(
+            without_test_names(&words("uv run pytest -q --splits 4 --group 2 -x")),
+            words("uv run pytest -q -x")
+        );
+        assert_eq!(
+            without_test_names(&words("python -m pytest --splits=4 --group=1")),
+            words("python -m pytest")
+        );
+        assert_eq!(
+            without_test_names(&words("pytest --group 2")),
+            words("pytest --group 2")
+        );
+    }
+
+    /// Parts of a pytest or unittest suite that select different tests run
+    /// as one command selecting them all; any other difference is no one
+    /// command.
+    #[test]
+    fn python_parts_that_select_different_tests_run_as_one_command() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let united = |commands: &[&str]| {
+            python_selections(&commands.iter().map(|text| words(text)).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            united(&[
+                "python -m pytest -q tests/a -x",
+                "python -m pytest -q tests/b -x"
+            ]),
+            Some(words("python -m pytest -q tests/a tests/b -x"))
+        );
+        assert_eq!(
+            united(&[
+                ".venv/bin/pytest tests/a.py tests/b.py",
+                ".venv/bin/pytest tests/a.py tests/c.py::test_x"
+            ]),
+            Some(words(
+                ".venv/bin/pytest tests/a.py tests/b.py tests/c.py::test_x"
+            ))
+        );
+        assert_eq!(
+            united(&[
+                "python -m unittest tests.test_a",
+                "python -m unittest tests.test_b"
+            ]),
+            Some(words("python -m unittest tests.test_a tests.test_b"))
+        );
+        // Another difference, a part selecting nothing, or no Python runner.
+        assert_eq!(united(&["pytest -k a tests", "pytest -k b tests"]), None);
+        assert_eq!(united(&["pytest tests/a -x", "pytest tests/b"]), None);
+        assert_eq!(united(&["pytest tests/a", "pytest"]), None);
+        assert_eq!(united(&["node --test a/x.js", "node --test b/x.js"]), None);
+        assert_eq!(
+            united(&["pytest --timeout 1.5", "pytest --timeout 2.5"]),
+            None
+        );
+        assert_eq!(
+            united(&["pytest --junitxml out/a.xml", "pytest --junitxml out/b.xml"]),
+            None
+        );
+        assert_eq!(united(&["pytest", "python -m pytest"]), None);
     }
 
     /// A failed command is said with the tests that did not pass, the first

@@ -777,7 +777,7 @@ try {
     );
     writeFileSync(
       resolve(strong, 'tests/test_cart.py'),
-      'import pytest\nfrom shop.cart import shipping, label, countdown\n\n\n@pytest.fixture\ndef big():\n    return 80\n\n\ndef test_free(big):\n    assert shipping(big) == 0\n\n\n@pytest.mark.parametrize("total, fee", [(10, 5), (20, 5)])\ndef test_paid(total, fee):\n    assert shipping(total) == fee\n\n\ndef test_label():\n    assert label("a").startswith("A")\n\n\ndef test_countdown():\n    assert countdown(3) == 0\n',
+      'import pytest\nfrom shop.cart import shipping, label, countdown\n\n\n@pytest.fixture\ndef big():\n    return 80\n\n\ndef test_free(big):\n    assert shipping(big) == 0\n\n\n@pytest.mark.parametrize("total, fee", [(10, 5), (20, 5)])\ndef test_paid(total, fee):\n    assert shipping(total) == fee\n\n\ndef test_label():\n    assert label("a").startswith("A")\n\n\ndef test_countdown():\n    assert countdown(3) == 0\n\n\n@pytest.mark.skip(reason="later")\ndef test_later():\n    assert shipping(50) == 1\n\n\n@pytest.mark.skipif(True, reason="needs credentials")\ndef test_credentials():\n    assert label("b") == "x"\n',
     );
     writeFileSync(resolve(strong, 'pytest.ini'), '[pytest]\npythonpath = .\n');
     run('git', ['init', '-q', '.'], { cwd: strong });
@@ -787,8 +787,12 @@ try {
       ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-n', '2'],
       { ...strongEnvironment, SUPERCOV_MUTANTS: '1' },
     );
+    // A test skipped by `pytest.mark.skip` or `skipif` is in the run,
+    // skipped: never one that did not pass, nor a candidate.
+    assert.equal(query(strong, ['runs', 'latest'], strongEnvironment).testOutcomes.skipped, 2);
     // `mutants test --json` answers with its reply alone, no envelope.
     const pass = successfulSupercov(strong, ['runs', 'latest', 'mutants', 'test', '--json'], strongEnvironment);
+    assert.doesNotMatch(pass.stderr, /did not pass/u, pass.stderr);
     const tested = JSON.parse(pass.stdout);
     // pytest's report of each fork's tests stays out of what Supercov says.
     assert.doesNotMatch(pass.stderr, /\[\s*\d+%\]|passed in|failed in/u, pass.stderr);
