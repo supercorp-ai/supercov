@@ -5496,9 +5496,7 @@ fn bun_source_imports_bootstrap_before_probes_even_with_shadowed_host_names() {
         .succeeds();
     for file in ["src/leaf.mjs", "src/common.cjs", "src/middle.ts"] {
         let source = kept_workspace_source(&project, file);
-        let loader = source
-            .find("new Function(\"s\", \"p\"")
-            .unwrap();
+        let loader = source.find("new Function(\"s\", \"p\"").unwrap();
         let fallback = source
             .find("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__)")
             .unwrap();
