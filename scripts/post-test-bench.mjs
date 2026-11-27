@@ -234,7 +234,7 @@ for (let round = 1; round <= rounds; round += 1) {
 
 // Where the last binary's time goes: each step once more under perf.
 if (process.env.BENCH_PERF === '1') {
-  const { name, path } = binaries.at(-1);
+  const { name, path } = binaries.find((binary) => binary.name === (process.env.BENCH_PERF_BINARY ?? 'base')) ?? binaries.at(-1);
   rmSync(join(project, '.supercov'), { recursive: true, force: true });
   mkdirSync(join(project, '.supercov'), { recursive: true });
   cpSync(join(fixtures, 'runs'), join(project, '.supercov/runs'), { recursive: true });
@@ -257,6 +257,7 @@ if (process.env.BENCH_PERF === '1') {
     if (merged) {
       profiled(['runs', merged], 'merged-index-build');
       profiled(['runs', merged, 'report', '--format', 'html', '--output', join(output, 'perf.html'), '--force'], 'report-html');
+      profiled(['diff', full, merged, '--json'], 'diff');
     }
   } catch (error) {
     console.log(`[bench] no profile: ${error.message}`);

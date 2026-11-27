@@ -30,14 +30,17 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        variant: [base, head]
+        include:
+          - { variant: base, ref: ce132bc2 }
+          - { variant: reads, ref: origin/perf/merge-reads-side-by-side }
+          - { variant: mergeindex, ref: origin/perf/merge-publishes-index }
+          - { variant: view, ref: origin/perf/report-view-cache }
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - id: ref
-        run: |
-          if [ "${{ matrix.variant }}" = base ]; then echo "sha=$(git rev-parse $BASE_REF)" >> "$GITHUB_OUTPUT"; else echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; fi
+        run: echo "sha=$(git rev-parse ${{ matrix.ref }})" >> "$GITHUB_OUTPUT"
       - id: cached
         uses: actions/cache@v4
         with:
@@ -124,7 +127,7 @@ jobs:
     needs: [build, fixtures]
     name: Measure
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -154,9 +157,9 @@ jobs:
           BENCH_MODE: measure
           BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
-          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,head=${{ github.workspace }}/binaries/supercov-head/supercov
+          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,reads=${{ github.workspace }}/binaries/supercov-reads/supercov,mergeindex=${{ github.workspace }}/binaries/supercov-mergeindex/supercov,view=${{ github.workspace }}/binaries/supercov-view/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
-          BENCH_ROUNDS: 3
+          BENCH_ROUNDS: 2
         run: node scripts/post-test-bench.mjs
       - if: always()
         uses: actions/upload-artifact@v4
