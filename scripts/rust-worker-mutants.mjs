@@ -66,7 +66,7 @@ pub fn shout(text: &str) -> String {
 }
 
 pub fn hidden(score: u32) -> u32 {
-    score + 1
+    score
 }
 
 // The routing is not what the gate is about: its mutants would each start
@@ -243,9 +243,10 @@ try {
   const listed = JSON.parse(run(root, binary, ['runs', 'latest', 'mutants', '--json', '--limit', '0']).stdout).data.mutants;
   const of = (line) => listed.filter((mutant) => mutant.file === 'worker/src/lib.rs' && mutant.span.start[0] === line);
   const said = (mutants) => mutants.map((mutant) => `${mutant.id}: ${JSON.stringify(mutant.strong)}`).join('\n');
+  console.log(said(listed.filter((mutant) => mutant.file === 'worker/src/lib.rs')));
 
   // grade()'s comparison, made `<`: killed.
-  const comparison = of(4).find((mutant) => mutant.mutator === 'BinaryOperator' && mutant.replacement === '<');
+  const comparison = of(4).find((mutant) => mutant.id.endsWith(':BinaryOperator:<'));
   assert.ok(comparison, `no \`<\` mutant of grade()'s comparison\n${said(of(4))}\n${pass.stderr}`);
   assert.equal(comparison.strong?.status, 'killed', `${said([comparison])}\n${pass.stderr}`);
 
