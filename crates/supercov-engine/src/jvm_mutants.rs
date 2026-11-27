@@ -1191,6 +1191,12 @@ pub fn enumerate(
     let mut mutants = enumerator.mutants;
     // PIT drops every mutant on a line that calls a logging framework.
     mutants.retain(|mutant| !logging.contains(&mutant.start.0));
+    in_order(mutants)
+}
+
+/// `mutants` in source order, outermost first, each mutant once: two that
+/// change the same code the same way are one mutant.
+fn in_order(mut mutants: Vec<JvmMutant>) -> Vec<JvmMutant> {
     mutants.sort_by(|a, b| {
         (
             a.range.0,
@@ -2493,10 +2499,9 @@ impl Enumerator<'_> {
                 if !self.java_constant(node) && !self.java_concatenates(node, &operator) {
                     self.arith(node, left, right, &operator, to, helper);
                 }
-                if context == Context::Condition
-                    && matches!(operator.as_str(), "&" | "|" | "^")
-                    && !self.java_constant(node)
-                {
+                // In a condition the operator is `&`, `|` or `^`: javac
+                // takes no other arithmetic as a boolean.
+                if context == Context::Condition && !self.java_constant(node) {
                     // A non-short-circuit operator is a value jumped on.
                     self.negate(node);
                 }
@@ -3237,10 +3242,12 @@ fn collect_calls_in(node: Node, source: &str, class: &str, out: &mut Vec<String>
             ));
         }
     }
-    if node.kind() == "call_expression"
-        && let Some(callee) = named_children(node).next()
-        && callee.kind() == "identifier"
-    {
+    let callee = (node.kind() == "call_expression").then(|| {
+        named_children(node)
+            .next()
+            .expect("the grammar gives a call its callee")
+    });
+    if let Some(callee) = callee.filter(|callee| callee.kind() == "identifier") {
         let arguments = named_children(node)
             .filter(|child| child.kind() == "value_arguments")
             .map(|arguments| named_children(arguments).count())
@@ -3277,8 +3284,17 @@ fn first_read(condition: Node, source: &str) -> Option<String> {
     loop {
         match node.kind() {
             "identifier" => return Some(text(node, source).to_owned()),
-            "binary_expression" => node = strip_parens(node.child_by_field_name("left")?),
-            "update_expression" => node = named_children(node).next()?,
+            "binary_expression" => {
+                node = strip_parens(
+                    node.child_by_field_name("left")
+                        .expect("the grammar gives a binary expression its left operand"),
+                )
+            }
+            "update_expression" => {
+                node = named_children(node)
+                    .next()
+                    .expect("the grammar gives an update its operand")
+            }
             _ => return None,
         }
     }
@@ -6765,6 +6781,39 @@ public class M {
 
     // Coverage of package A: types, return values, the project index, the
     // enumerator's setup and its Java forms, and the helpers they share.
+
+    /// Two mutants that change the same code the same way are one; the same
+    /// code changed by another mutator, or to another replacement, is not.
+    #[test]
+    fn a_mutant_listed_twice_is_one_mutant() {
+        let listed = enumerated(
+            "A.java",
+            "class A {\n    int f(int a, int b) {\n        return a + b;\n    }\n}\n",
+        );
+        let math = listed
+            .iter()
+            .find(|mutant| mutant.mutator == Mutator::Math)
+            .expect("a + b has a Math mutant")
+            .clone();
+        let other_replacement = JvmMutant {
+            descriptor: format!("{} again", math.descriptor),
+            ..math.clone()
+        };
+        let other_mutator = JvmMutant {
+            mutator: Mutator::ConditionalsBoundary,
+            ..math.clone()
+        };
+        let mut twice = listed.clone();
+        twice.extend([
+            math.clone(),
+            other_replacement.clone(),
+            other_mutator.clone(),
+        ]);
+        let once = in_order(twice);
+        assert_eq!(once.iter().filter(|mutant| **mutant == math).count(), 1);
+        assert!(once.contains(&other_replacement) && once.contains(&other_mutator));
+        assert_eq!(once.len(), listed.len() + 2);
+    }
 
     /// A file's mutants as `enumerate` lists them, the file its own project.
     fn enumerated(file: &str, source: &str) -> Vec<JvmMutant> {
