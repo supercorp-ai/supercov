@@ -66,7 +66,7 @@ export function decide(name, payload = {}) {
   if (labels.has(READY_LABEL) && action !== 'synchronize') return run(`opened with the \`${READY_LABEL}\` label`);
   return {
     run: false,
-    pending: `Not run on this commit: add the \`${READY_LABEL}\` label when it is ready to merge`,
+    pending: `Not run on this commit: add the \`${READY_LABEL}\` label when it is ready to merge (still on from before? take it off and add it again)`,
     stale: action === 'synchronize' && labels.has(READY_LABEL),
     reason: action === 'synchronize' ? 'a push to a pull request runs the fast tier alone' : 'not marked ready to merge',
   };
