@@ -1164,8 +1164,9 @@ pub(crate) fn publish_run_with_fault(
                     if crate::run_store::write_run_view(derived, view, (evidence_sha256, copied))
                         .is_err()
                     {
-                        let _ =
-                            fs::remove_file(derived.directory.join(crate::run_store::RUN_VIEW_FILE));
+                        let _ = fs::remove_file(
+                            derived.directory.join(crate::run_store::RUN_VIEW_FILE),
+                        );
                     }
                 }),
             ]

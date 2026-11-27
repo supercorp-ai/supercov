@@ -14,6 +14,7 @@
       "evidence.raw.gz",
       "query-index.v1.bin",
       "query-index.v1.bin.verified",
+      "run-view.json.gz",
       "run.json",
       "source-manifest.cache.json",
       "statement-spans.json",

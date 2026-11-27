@@ -1459,10 +1459,7 @@ fn hex(bytes: &[u8]) -> String {
 /// The view of `run` its reports read, from its analysis: the whole view of
 /// a run whose tests passed, and of a failed run what its passing tests ran.
 /// Its checkout is not compared here: it is as if it still matched.
-pub fn run_view_from_report(
-    run: &StoredRun,
-    report: &CoverageReport,
-) -> crate::run_view::RunView {
+pub fn run_view_from_report(run: &StoredRun, report: &CoverageReport) -> crate::run_view::RunView {
     let passed = run.metadata.test_exit_code == Some(0);
     let view = if passed {
         &report.view
