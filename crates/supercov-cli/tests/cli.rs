@@ -28903,12 +28903,18 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         .succeeds();
     contains_all(
         &weak_help,
-        &["in preview", "cargo-mutants", "Gremlins", "mutant for Ruby"],
+        &[
+            "in preview",
+            "cargo-mutants",
+            "PIT for\nJava and Kotlin",
+            "Gremlins",
+            "mutant for Ruby",
+        ],
     );
     let overview = project.supercov(&["--help"]).succeeds();
     assert!(
         overview.contains(
-            "Test the tests with mutants (JavaScript, TypeScript, Rust; Python, Go and Ruby in preview)"
+            "Test the tests with mutants (JavaScript, TypeScript, Rust, Java, Kotlin; Python, Go and Ruby in preview)"
         ),
         "{overview}"
     );

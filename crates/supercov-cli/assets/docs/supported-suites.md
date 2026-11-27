@@ -24,8 +24,8 @@ npx supercov -- mvn test
 | Python | Available | `npx supercov -- pytest` | Preview: mutmut 3.8.1's mutants |
 | Ruby | Available | `npx supercov -- rspec` | Preview: mutant 0.17.1's mutants |
 | Go | Available | `npx supercov -- go test ./...` | Preview: Gremlins 0.6.0's mutants |
-| Java | Available | `npx supercov -- mvn test` | Not yet |
-| Kotlin | Available | `npx supercov -- ./gradlew test` | Not yet |
+| Java | Available | `npx supercov -- mvn test` | PIT 1.17.1's mutants |
+| Kotlin | Available | `npx supercov -- ./gradlew test` | PIT 1.17.1's mutants |
 | Zig | Coming soon | — | — |
 | PHP | Coming soon | — | — |
 | C | Coming soon | — | — |
@@ -37,9 +37,9 @@ The npm-distributed CLI requires Node.js 22 or newer for every language.
 `npx supercov mutants -- <test command>` lists the mutants the language's
 established tool would make of every source the run measured, says from the
 run which ones no test reaches or infects, and runs the rest against the tests
-that reach them. JavaScript, TypeScript and Rust are fully supported; Python,
-Go and Ruby are in preview, each validated against its tool on public
-projects; Java and Kotlin have no mutants yet. The Mutation testing column of
+that reach them. JavaScript, TypeScript, Rust, Java and Kotlin are fully
+supported; Python, Go and Ruby are in preview, each validated against its
+tool on public projects. The Mutation testing column of
 each runner table below says whether that runner's tests run against mutants.
 A runner without a strong driver still gets the mutants list and the weak
 report, from its coverage; its mutants are `error` in a strong pass, counted
@@ -821,15 +821,15 @@ npx supercov -- npx playwright test
 
 | Runner | Attribution | Current requirement | Mutation testing |
 | --- | --- | --- | --- |
-| JUnit 5 (Jupiter) | Exact per test | JDK 17 or newer, Maven or Gradle | Not yet |
-| JUnit 4 (through Vintage) | Exact per test | — | Not yet |
-| Kotest | Exact per test, under the names Kotest itself reports | — | Not yet |
-| Spock | Exact per feature, under the names Spock itself reports | — | Not yet |
-| TestNG | Exact per test, each data-provider invocation its own | — | Not yet |
-| JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle | Not yet |
-| JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below | Not yet |
-| Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below | Not yet |
-| TestNG under Ant's `<testng>` | Exact per test, through the TestNG listener | TestNG 6.x with its Ant task — see below | Not yet |
+| JUnit 5 (Jupiter) | Exact per test | JDK 17 or newer, Maven or Gradle | PIT's mutants |
+| JUnit 4 (through Vintage) | Exact per test | — | PIT's mutants |
+| Kotest | Exact per test, under the names Kotest itself reports | — | PIT's mutants, each test through Kotest's own filter |
+| Spock | Exact per feature, under the names Spock itself reports | — | PIT's mutants; not yet verified on a public project |
+| TestNG | Exact per test, each data-provider invocation its own | — | PIT's mutants |
+| JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle | PIT's mutants |
+| JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below | PIT's mutants |
+| Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below | PIT's mutants; not yet verified on a public project |
+| TestNG under Ant's `<testng>` | Exact per test, through the TestNG listener | TestNG 6.x with its Ant task — see below | PIT's mutants; not yet verified on a public project |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its
