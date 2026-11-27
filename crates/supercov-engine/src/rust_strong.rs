@@ -1003,6 +1003,24 @@ fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
                 if crate::fault_fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
                     crate::fault_fs::write(&target, &bytes)?;
                 }
+                // As executable as the project's: a Worker's `./build.sh`,
+                // a test's script, run from the copy.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = |path: &Path| {
+                        std::fs::metadata(path)
+                            .map(|metadata| metadata.permissions().mode() & 0o777)
+                    };
+                    if let Ok(wanted) = mode(&entry.path())
+                        && mode(&target).is_ok_and(|mode| mode != wanted)
+                    {
+                        let _ = std::fs::set_permissions(
+                            &target,
+                            std::fs::Permissions::from_mode(wanted),
+                        );
+                    }
+                }
             }
         }
         Ok(())
@@ -4853,5 +4871,40 @@ mod tests {
         for (id, verdict) in apart {
             assert_eq!(verdict["status"], "survived", "{id}: {verdict}");
         }
+    }
+
+    /// The copy's files are as executable as the project's: a Worker's
+    /// `./build.sh` runs from the copy, and a mode changed since is
+    /// followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_keeps_each_file_s_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-modes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let copy = root.join("copy");
+        std::fs::create_dir_all(project.join("worker")).unwrap();
+        std::fs::write(project.join("worker/build.sh"), "worker-build\n").unwrap();
+        std::fs::write(project.join("worker/notes.txt"), "notes\n").unwrap();
+        let set = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        set(&project.join("worker/build.sh"), 0o755);
+        set(&project.join("worker/notes.txt"), 0o644);
+        sync_project(&project, &copy).unwrap();
+        assert_eq!(mode(&copy.join("worker/build.sh")), 0o755);
+        assert_eq!(mode(&copy.join("worker/notes.txt")), 0o644);
+        set(&project.join("worker/build.sh"), 0o700);
+        sync_project(&project, &copy).unwrap();
+        assert_eq!(mode(&copy.join("worker/build.sh")), 0o700);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
