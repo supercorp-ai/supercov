@@ -6535,9 +6535,12 @@ fn instrument_candidate_with_binding(
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
+    // The runtime's global, bound once for the helpers after the first.
+    let runtime_object = name_base.fresh().allocate("__supercovRuntimeObject");
     let runtime_locals = runtime_imports
         .iter()
         .map(|(_, local)| (*local).clone())
+        .chain([runtime_object.clone()])
         .collect::<Vec<_>>();
     insert_runtime_bindings(
         &allocator,
@@ -6545,6 +6548,7 @@ fn instrument_candidate_with_binding(
         runtime_binding,
         runtime_declaration_kind,
         runtime_imports,
+        &runtime_object,
     );
 
     if let Some(wrapper) = capability_wrapper {
@@ -6792,12 +6796,14 @@ fn instrument_strong<'a>(
         )),
     );
     runtime_imports.push(("strongSlot", &strong_slot));
+    let runtime_object = names.allocate("__supercovRuntimeObject");
     insert_runtime_bindings(
         allocator,
         program,
         runtime_binding,
         runtime_declaration_kind,
         runtime_imports,
+        &runtime_object,
     );
     if let Some(wrapper) = capability_wrapper {
         transform_capability_imports(allocator, program, source, wrapper);
@@ -6857,6 +6863,7 @@ fn insert_runtime_bindings<'a>(
     runtime_binding: RuntimeBinding,
     runtime_declaration_kind: VariableDeclarationKind,
     runtime_imports: Vec<(&str, &String)>,
+    runtime_object: &str,
 ) {
     let ast = AstBuilder::new(allocator);
     let typescript = program.source_type.is_typescript();
@@ -6868,41 +6875,66 @@ fn insert_runtime_bindings<'a>(
         // the program instead collided with the declaration every rewritten
         // test file carries for its assertion helpers.
         let typed = typescript && runtime_binding == RuntimeBinding::DirectGlobal;
-        let declarators =
-            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
-                let annotation = typed
-                    .then(|| runtime_helper_type(allocator, program.source_type, imported))
-                    .flatten();
-                let global_runtime =
-                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                        Span::default(),
-                        ast.expression_identifier(Span::default(), ast.ident("globalThis")),
-                        ast.identifier_name(
-                            Span::default(),
-                            ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
-                                "__SUPERCOV_DIRECT_RUNTIME__"
-                            } else {
-                                "__supercovRuntime"
-                            }),
-                        ),
-                        false,
-                    ));
-                let runtime_helper =
-                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                        Span::default(),
-                        global_runtime,
-                        ast.identifier_name(Span::default(), ast.ident(imported)),
-                        false,
-                    ));
-                ast.variable_declarator(
+        let global_runtime = || {
+            Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                Span::default(),
+                ast.expression_identifier(Span::default(), ast.ident("globalThis")),
+                ast.identifier_name(
+                    Span::default(),
+                    ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
+                        "__SUPERCOV_DIRECT_RUNTIME__"
+                    } else {
+                        "__supercovRuntime"
+                    }),
+                ),
+                false,
+            ))
+        };
+        // The first helper is read off the global, where the JavaScript
+        // frontend's loaders look for it; the global itself is bound once
+        // after it, and every other helper read from that binding: the
+        // global's name is long, a minifier keeps it, and a module that
+        // named it for each helper carried it several times over.
+        let shared = runtime_imports.len() > 2;
+        let mut declarators = ast.vec_with_capacity(runtime_imports.len() + 1);
+        for (position, (imported, local)) in runtime_imports.into_iter().enumerate() {
+            let annotation = typed
+                .then(|| runtime_helper_type(allocator, program.source_type, imported))
+                .flatten();
+            let object = if shared && position > 0 {
+                ast.expression_identifier(Span::default(), ast.ident(runtime_object))
+            } else {
+                global_runtime()
+            };
+            let runtime_helper =
+                Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                    Span::default(),
+                    object,
+                    ast.identifier_name(Span::default(), ast.ident(imported)),
+                    false,
+                ));
+            declarators.push(ast.variable_declarator(
+                Span::default(),
+                runtime_declaration_kind,
+                ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
+                annotation,
+                Some(runtime_helper),
+                false,
+            ));
+            if shared && position == 0 {
+                declarators.push(ast.variable_declarator(
                     Span::default(),
                     runtime_declaration_kind,
-                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
-                    annotation,
-                    Some(runtime_helper),
+                    ast.binding_pattern_binding_identifier(
+                        Span::default(),
+                        ast.ident(runtime_object),
+                    ),
+                    NONE,
+                    Some(global_runtime()),
                     false,
-                )
-            }));
+                ));
+            }
+        }
         program.body.insert(
             0,
             Statement::VariableDeclaration(ast.alloc_variable_declaration(
@@ -13927,6 +13959,8 @@ export function shapes(n: number): unknown {
                 let bound = code
                     .find(&format!("{helper} as "))
                     .or_else(|| code.find(&format!("__supercovRuntime.{helper}")))
+                    // Helpers after the first read the global's one binding.
+                    .or_else(|| code.find(&format!("__supercovRuntimeObject.{helper}")))
                     .unwrap_or_else(|| panic!("{file} binds no {helper}:\n{code}"));
                 assert!(
                     bound < first_user_code,
