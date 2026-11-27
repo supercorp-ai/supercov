@@ -33,6 +33,10 @@ runs:
         # dropped after half a minute and tried again, on the next mirror.
         printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' "$HOME/apt-archives" \
           | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+        # The packages come from Ubuntu's archive alone. The image also lists
+        # Microsoft's repository, which answered 403 to every attempt on
+        # 2026-11-27, and an index that fails to update fails the install.
+        grep -l packages.microsoft.com /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
         for attempt in 1 2 3 4 5 6; do
           timeout 8m bash -c "$INSTALL" && exit 0
           echo "attempt $attempt did not finish; trying again"
