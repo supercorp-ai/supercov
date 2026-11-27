@@ -61,6 +61,22 @@ jobs:
           out="$PWD/out"; mkdir -p "$out"
           cd "$RUNNER_TEMP/module"
           "$RUNNER_TEMP/bin/supercov" -- go test ./... > "$out/measure.log" 2>&1 || true
+          # Probe: what building the type-check helper costs, from a cold
+          # build cache, from the one the measured run left, without
+          # -trimpath (which keeps the stdlib packages `go test` compiled),
+          # and again once its packages are cached (setup-go's cache).
+          helper_src="$GITHUB_WORKSPACE/crates/supercov-engine/runtime-assets/go/mutants"
+          probe="$RUNNER_TEMP/helper-probe"; mkdir -p "$probe/src"
+          cp "$helper_src/main.go" "$helper_src/go.mod" "$probe/src/"
+          user_cache=$(go env GOCACHE)
+          cp -r "$user_cache" "$probe/cache-trim"; cp -r "$user_cache" "$probe/cache-plain"
+          timed() { local label=$1; shift; local s=$(date +%s.%N); (cd "$probe/src" && env GOWORK=off GOFLAGS=-mod=mod CGO_ENABLED=0 "$@" >/dev/null 2>&1); echo "$label $(echo "$(date +%s.%N) - $s" | bc)" >> "$out/helper-build.txt"; }
+          timed cold-trimpath env GOCACHE="$probe/cache-cold" go build -trimpath '-ldflags=-s -w' -o "$probe/a" .
+          timed user-trimpath env GOCACHE="$probe/cache-trim" go build -trimpath '-ldflags=-s -w' -o "$probe/b" .
+          timed user-plain env GOCACHE="$probe/cache-plain" go build '-ldflags=-s -w' -o "$probe/c" .
+          timed cached-trimpath env GOCACHE="$probe/cache-trim" go build -trimpath '-ldflags=-s -w' -o "$probe/d" .
+          timed cached-plain env GOCACHE="$probe/cache-plain" go build '-ldflags=-s -w' -o "$probe/e" .
+          cat "$out/helper-build.txt"
           start=$(date +%s.%N)
           "$RUNNER_TEMP/bin/supercov" runs latest mutants test --json > "$out/strong.json" 2> "$out/strong.log" || true
           echo "$(date +%s.%N) - $start" | bc > "$out/strong-seconds.txt"
