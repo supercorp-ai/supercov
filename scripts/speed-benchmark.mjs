@@ -282,7 +282,10 @@ export default {
 };
 const application = process.env.SPEED_APP ?? 'bulletproof';
 assert.ok(applications[application], `SPEED_APP names no application: ${application}`);
-const { project, description, suites, reset, outputs = ['.next'], browserProfile = false } = applications[application]();
+const { project, description, suites: allSuites, reset, outputs = ['.next'], browserProfile = false } = applications[application]();
+// SPEED_SUITES (`unit,e2e`) names the suites to run, where a job has time for
+// only some of them.
+const suites = process.env.SPEED_SUITES ? allSuites.filter((suite) => process.env.SPEED_SUITES.split(',').includes(suite.name)) : allSuites;
 
 // The flow's own time from Playwright's report, its mean over the
 // repetitions that passed: the server's build and start are left out, so

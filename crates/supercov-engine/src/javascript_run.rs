@@ -536,6 +536,10 @@ fn node_options(preload: &Path) -> String {
 
 /// Supercov's part of `NODE_OPTIONS`, without the shell's.
 fn own_node_options(preload: &Path) -> String {
+    // DIAGNOSTIC ONLY (never merged): without Node's source maps.
+    if std::env::var("SUPERCOV_DIAG_NO_SOURCE_MAPS").is_ok_and(|value| value == "1") {
+        return format!("--import={}", crate::workspace::file_url(preload));
+    }
     format!(
         "--enable-source-maps --import={}",
         crate::workspace::file_url(preload)

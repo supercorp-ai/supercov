@@ -50,7 +50,8 @@ const isNpmItself = (() => {
 // of a two-file suite spent most of a minute ending: 20 of 24 runs failed
 // where AVA alone passed. A worker thread compiles as it would without
 // Supercov; a process keeps the cache.
-if (!isNpmItself && isMainThread)
+// DIAGNOSTIC ONLY (never merged): SUPERCOV_DIAG_SKIP=cache.
+if (!isNpmItself && isMainThread && !(process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").includes("cache"))
     enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
