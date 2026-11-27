@@ -21,6 +21,14 @@ const projects = {
     test: 'cargo test --workspace',
     rounds: 1,
   },
+  'rust-bytes': {
+    repo: 'https://github.com/tokio-rs/bytes', ref: 'v1.7.2',
+    test: 'cargo test',
+  },
+  'rust-serde-json': {
+    repo: 'https://github.com/serde-rs/json', ref: 'v1.0.128',
+    test: 'cargo test',
+  },
   'python-click': {
     repo: 'https://github.com/pallets/click', ref: '8.1.7',
     setup: 'python -m venv .venv && .venv/bin/pip install -q -e . pytest==8.3.3',
