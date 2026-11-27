@@ -2402,8 +2402,12 @@ fn run_job(
         // code, the tests never ran it in its mutated form -- they ran a
         // separately built artifact, such as a Worker's wasm -- and could
         // not have failed: not a survivor.
+        // Judged only where a test ran: a candidate passed over (one the
+        // test binary no longer lists) ran nothing, and says nothing of
+        // reach either way.
         if let Some(named) = ordinal
             && runner.reports_reach
+            && ran > 0
             && job.passed_before == 0
             && !reached(&runner.results, named)
         {
