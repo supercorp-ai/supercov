@@ -1570,17 +1570,19 @@ mod tests {
 
     /// A return PIT reports on a line outside its statement is paired by
     /// its method in the last pass; an operation there is not, and both
-    /// sides keep theirs. A file with no mutants joins nothing.
+    /// sides keep theirs. A file with no mutants joins nothing, and a
+    /// mutant of a file the run does not have is PIT's alone.
     #[test]
     fn a_return_far_from_its_statement_is_paired_by_its_method() {
         let mutants = twice_mutants();
-        let pit = mutants
+        let mut pit = mutants
             .iter()
             .map(|mutant| PitMutant {
                 key: mutant.key.clone(),
                 ..pit_mutant("A.java", 40, mutant.mutator.name())
             })
             .collect::<Vec<_>>();
+        pit.push(pit_mutant("Elsewhere.java", 3, "Math"));
         let ours = BTreeMap::from([
             ("src/A.java".to_owned(), mutants.clone()),
             ("src/B.java".to_owned(), Vec::new()),
@@ -1603,13 +1605,12 @@ mod tests {
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            join.only_pit,
-            returns(false)
-                .into_iter()
-                .map(|(_, at)| at)
-                .collect::<Vec<_>>()
-        );
+        let mut only_pit = returns(false)
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect::<Vec<_>>();
+        only_pit.push(mutants.len());
+        assert_eq!(join.only_pit, only_pit);
     }
 
     /// What decides each of PIT's own Kotlin categories, beside what does
