@@ -25,6 +25,11 @@ pub const STRONG_RESULTS: &str = "SUPERCOV_STRONG_RESULTS";
 /// for its budget or a signal alike. A driver judges nothing a stop cut
 /// short (`playwrightStrongReporter.mjs` and the Rust driver read it).
 pub const STOPPED_AT: &str = "stopped-at";
+
+/// What a driver is doing while it decides no mutant (`building 53 switched
+/// mutant(s) (build 2)`), beside its results, for the progress line: there
+/// only while it lasts.
+pub const PHASE: &str = "phase";
 /// `<file>#<index>`: the mutant switched on in a process from its start;
 /// `-` or unset for none. `file` is the mutant's file as `mutants.json`
 /// keys it, `index` its place in that file's list.
