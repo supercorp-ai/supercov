@@ -6,6 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+/// The reason code, before its plain words, of a pass's `no-coverage` for
+/// a mutant whose tests passed without ever running its mutated code.
+pub const NOT_REACHED_MUTATED: &str = "not-reached-mutated";
+
 use crate::strong_plan::{Decided, PlannedMutant, Progress, StrongPlan, StrongVerdicts, Verdict};
 
 /// The verdict a plan gives a mutant without running it: survived where no
@@ -225,6 +229,20 @@ pub fn merged_verdicts(
                 .find(|(.., verdict)| verdict.status == status)
                 .map(|(index, _, verdict)| (*index, (*verdict).clone()))
         };
+        // A pass's own `no-coverage`: its tests passed but never ran the
+        // mutated code. Another run's plan-decided `no-coverage` is that
+        // run's measuring, which the merged plan decides again.
+        let not_reached = || {
+            held.iter()
+                .find(|(.., verdict)| {
+                    verdict.status == "no-coverage"
+                        && verdict
+                            .reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.starts_with(NOT_REACHED_MUTATED))
+                })
+                .map(|(index, _, verdict)| (*index, (*verdict).clone()))
+        };
         let survived_in = held
             .iter()
             .filter(|(.., verdict)| verdict.status == "survived")
@@ -236,7 +254,7 @@ pub fn merged_verdicts(
         {
             Some(definite)
         } else if survived_in.is_empty() {
-            first_of("no-coverage").or_else(|| first_of("error"))
+            not_reached().or_else(|| first_of("error"))
         } else {
             let whole = plan.tests.iter().filter(|test| {
                 test.file
@@ -256,7 +274,7 @@ pub fn merged_verdicts(
         };
         // A pass's own `no-coverage` (its tests passed but never ran the
         // mutated code): where no run killed it or let it survive.
-        let kept = kept.or_else(|| first_of("no-coverage"));
+        let kept = kept.or_else(not_reached);
         if let Some((index, verdict)) = kept {
             taken[index] += 1;
             merged.insert(mutant.id.clone(), verdict);
@@ -685,17 +703,22 @@ mod tests {
         let plan = StrongPlan {
             mutant_set: "set".into(),
             tests: vec![test("t1", "t/a.test.js")],
-            mutants: ["apart", "killed", "errored"]
+            mutants: ["apart", "killed", "errored", "planned"]
                 .iter()
                 .map(|id| mutant(id, "src/a.js", &[0], &[]))
                 .collect(),
         };
-        let first = verdicts(&[
-            ("apart", "no-coverage"),
-            ("killed", "no-coverage"),
-            ("errored", "error"),
-        ]);
-        let second = verdicts(&[("killed", "killed"), ("errored", "no-coverage")]);
+        // A pass's own, with its reason; another run's plan-decided one,
+        // without, is not kept.
+        let not_reached = |id: &str| {
+            let mut verdict = verdict("no-coverage");
+            verdict.reason = Some(format!("{NOT_REACHED_MUTATED}: its 1 test(s) passed"));
+            (id.to_owned(), verdict)
+        };
+        let mut first = verdicts(&[("errored", "error"), ("planned", "no-coverage")]);
+        first.extend([not_reached("apart"), not_reached("killed")]);
+        let mut second = verdicts(&[("killed", "killed")]);
+        second.extend([not_reached("errored")]);
         let tests = ids(&["t1"]);
         let none = BTreeSet::new();
         let nothing = Progress::new();

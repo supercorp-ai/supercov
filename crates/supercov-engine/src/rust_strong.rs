@@ -565,7 +565,15 @@ fn pass(
             RustCargoCommandKind::CargoTest => None,
         },
         stop: stop.clone(),
-        reports_reach: learned.is_none(),
+        // Wasm test modules (`wasm-pack test`, a wasm runner such as
+        // wasm-bindgen-test-runner) have no file to say they ran a mutant in.
+        reports_reach: learned.is_none()
+            && !built.artifacts.iter().any(|artifact| {
+                artifact
+                    .executable
+                    .extension()
+                    .is_some_and(|extension| extension == "wasm")
+            }),
     };
 
     // Baselines: every test a mutant runs against, with no mutant.
@@ -2414,13 +2422,10 @@ fn run_job(
     })
 }
 
-/// The reason code a mutant whose tests passed without running its mutated
-/// code is given, before its plain words.
-pub(crate) const NOT_REACHED_MUTATED: &str = "not-reached-mutated";
-
 fn not_reached_reason(ran: usize) -> String {
     format!(
-        "{NOT_REACHED_MUTATED}: its {ran} test(s) passed but never ran the mutated code; they ran a separately built artifact (such as a Worker's wasm built outside the pass) or a copy of the code the pass did not switch, so they could not fail"
+        "{}: its {ran} test(s) passed but never ran the mutated code; they ran a separately built artifact (such as a Worker's wasm built outside the pass) or a copy of the code the pass did not switch, so they could not fail",
+        crate::strong_verdicts::NOT_REACHED_MUTATED
     )
 }
 
