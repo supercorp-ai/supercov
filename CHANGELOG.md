@@ -42,6 +42,10 @@
 
 - `supercov merge` decompresses each run's evidence once, on a core of its own. It read every run's archive one after another, then read each again to keep what the run answers with. On Excalidraw's Vitest suite split into 16 shards, the merge took 7.8 s; it now takes 5.2 s, about 0.3 GB more at its peak, the merged run byte for byte the same.
 
+**Changed**
+
+- A Go run builds only what changed since the last run, as `go test` does. Every run wrote its own evidence path into each test package's harness, so Go compiled every package with tests and linked every test binary again on each run. The path is now the same for every run of a copy. Measured on an Actions runner, `go test -count=1 ./...` under Supercov: gin's test command 2.27 s to 1.07 s (plain 0.86 s), cobra's 1.16 s to 0.49 s (plain 0.46 s).
+
 ## 4.29.19
 
 **Fixed**
