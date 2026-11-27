@@ -33,12 +33,12 @@ const projects = {
   'go-cobra': {
     repo: 'https://github.com/spf13/cobra', ref: 'v1.8.1',
     setup: 'go mod download',
-    test: 'go test ./...',
+    test: 'go test -count=1 ./...',
   },
   'go-gin': {
     repo: 'https://github.com/gin-gonic/gin', ref: 'v1.10.0',
     setup: 'go mod download',
-    test: 'go test ./...',
+    test: 'go test -count=1 ./...',
   },
   'ruby-rack': {
     repo: 'https://github.com/rack/rack', ref: 'v3.1.8',
