@@ -6934,7 +6934,7 @@ mod tests {
             run.filters.passed = run.view.clone();
             run.view.tests.push(failed);
             run.passed_is_whole = false;
-            let sections = sections_from::<_, CoverageIndexError>(
+            let mut sections = sections_from::<_, CoverageIndexError>(
                 [
                     (CoverageViewId::All, &run.view),
                     (CoverageViewId::Passed, &run.filters.passed),
@@ -6945,6 +6945,7 @@ mod tests {
                 None,
             )
             .unwrap();
+            sections.extend(mutation_sections(run.mutation.as_ref()).unwrap());
             let lines = sections
                 .iter()
                 .find(|section| section.kind == SECTION_TEST_LINES)
@@ -7083,7 +7084,7 @@ mod tests {
         run.view.tests.push(failed.clone());
         run.filters.failed.tests = vec![failed];
         run.passed_is_whole = false;
-        let built = sections_from::<_, CoverageIndexError>(
+        let mut built = sections_from::<_, CoverageIndexError>(
             [
                 (CoverageViewId::All, &run.view),
                 (CoverageViewId::Passed, &run.filters.passed),
@@ -7094,6 +7095,7 @@ mod tests {
             None,
         )
         .unwrap();
+        built.extend(mutation_sections(run.mutation.as_ref()).unwrap());
         for sections in [built, coverage_index_sections(&run).unwrap()] {
             let count = |kind: u32| {
                 sections
