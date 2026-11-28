@@ -284,7 +284,13 @@ but `+`, whose operands must be known numbers); Kotlin probes only where
 both operands are known primitives of the same type. Elsewhere a mutant
 has no probe and is decided by reach alone. A probe that recorded nothing
 says its code never ran, which is what decides reach in a Kotlin
-expression body, where no statement point is.
+expression body, where no statement point is. A body whose mutants none of
+these probes holds gets a reach probe of its own: `fun f() = e` is written
+`fun f() = kotlin.run { Supercov.wreach(slot); e }` (`run` is inline, so
+the body's type, a `return` in it and a suspending call in it are as
+written), except a `tailrec` function's body and a getter's that reads
+`field`. Its mutants then run against the tests that ran the body, and are
+`no-coverage` where none did.
 
 A probe's opening ranks inside the coverage wrappers at its start and its
 closing between their parentheses (5, 20, 21) and the braces and `else`
