@@ -4988,7 +4988,7 @@ mod tests {
         std::fs::write(root.join("broken"), "").unwrap();
         let (said, _) = pass("broken.jsonl");
         assert!(
-            said.contains("without the mutants (they do not build for wasm: error: unplaced"),
+            said.contains("without the mutants (they do not build for wasm: unplaced"),
             "{said}"
         );
         let _ = std::fs::remove_dir_all(root);
