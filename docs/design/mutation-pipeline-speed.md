@@ -93,7 +93,7 @@ seconds (the five projects within 0.5 s of each other):
 project's own tests compiled is compiled again. Without it the same program
 builds in a third of the time wherever the cache does not hold the
 helper's packages yet (a first run, a cache saved by a job without
-Supercov). Not taken yet: the coordinator set the cold-cache figure aside.
+Supercov). Taken: the helper is built without `-trimpath`.
 
 Found on the way: the helper's cache key was its source alone, so a pass
 after a Go upgrade (or for another `GOOS`, `GOARCH`, `GOFLAGS`) reused a
@@ -183,7 +183,7 @@ survived verdicts cannot move, since each copy is its own module graph.
 A timeout can turn into a kill when a killing file runs before the one that
 timed out, and `compare.mjs` reports that. This is
 `vitestStrongReporter.mjs`, which belongs to the JavaScript strong pass's
-work.
+work. Handed to it with these figures.
 
 ### Python: the order of a mutant's tests
 
@@ -191,8 +191,9 @@ Each mutant runs in one forked process, its candidates in collection order,
 stopping at the first failure. Collection order keeps the suite's own order
 between the tests that run, so running likely killers first is not exact
 where tests depend on order. One fork per test, in kill-history order,
-would be exact on its own terms, but it changes what a test runs after.
-Open; not started.
+would be exact on its own terms, but it changes what each test runs after:
+a test would no longer see the state the candidates before it left, as it
+does in the suite. Dropped.
 
 ### Already in place
 
