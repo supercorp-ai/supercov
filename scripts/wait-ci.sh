@@ -98,7 +98,13 @@ while true; do
         # and the job that posts it): grouped apart, a passed job never hides
         # a failed status.
         ([$c.nodes[] | {name: (.name // .context), kind: (if .context then "status" else "check" end), result: (.conclusion // .status // .state // ""), required: (.isRequired == true)}]) as $checks
-        | (if any($checks[]; .required) then [$checks[] | select(.required)] else $checks end) as $deciding
+        # A required commit status is the answer of its tier (scripts/ci-tiers.mjs):
+        # the job of the same name that posts it, from this run or a
+        # cancelled earlier one, says nothing more.
+        | ([$checks[] | select(.kind == "status" and .required) | .name]) as $answered
+        | (if any($checks[]; .required)
+           then [$checks[] | select(.required and (.kind == "status" or (.name as $n | $answered | index($n) | not)))]
+           else $checks end) as $deciding
         | ($deciding | group_by([.kind, .name])
           | map(select(any(.[]; .result as $s | $failed | split(" ") | index($s))
                        and (any(.[]; .result as $s | "SUCCESS NEUTRAL SKIPPED \($pending)" | split(" ") | index($s)) | not)) | .[0].name)
