@@ -42,8 +42,9 @@ const adapter = (targetModule === "@playwright/test"
 // function, out of the page's global scope.
 // DIAGNOSTIC ONLY (never merged): skip parts of the browser work.
 const diagSkip = new Set((process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").filter(Boolean));
-const browserRuntimeSource = readFileSync(new URL("./runtime.mjs", import.meta.url), "utf8");
-const browserRuntimeExport = browserRuntimeSource.lastIndexOf("\nexport {");
+// DIAGNOSTIC: SUPERCOV_DIAG_PRELUDE names a minified copy of runtime.mjs.
+const browserRuntimeSource = readFileSync(process.env.SUPERCOV_DIAG_PRELUDE || new URL("./runtime.mjs", import.meta.url), "utf8");
+const browserRuntimeExport = Math.max(browserRuntimeSource.lastIndexOf("\nexport {"), browserRuntimeSource.lastIndexOf("export{"));
 if (/^import\s/m.test(browserRuntimeSource) || browserRuntimeExport < 0)
     throw new Error("Supercov's browser runtime must stay self-contained");
 const browserRuntimePrelude = `(() => { if (globalThis.__SUPERCOV_DIRECT_RUNTIME__) return;\n${browserRuntimeSource.slice(0, browserRuntimeExport)}\n})();`;

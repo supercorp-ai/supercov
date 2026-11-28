@@ -45,8 +45,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'clone' }
+          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 7/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 9/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 11/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -67,6 +73,7 @@ jobs:
               noinstr) extra="SUPERCOV_SOURCE_ROOTS=${{ matrix.app == 'large' && 'lib/db.ts' || 'packages/math/src/angle.ts' }}" ;;
               maps-*) extra="SUPERCOV_DIAG_MAPS=${variant#maps-}" ;;
               nosmap) extra="SUPERCOV_DIAG_NO_SOURCE_MAPS=1" ;;
+              minprelude) extra="SUPERCOV_DIAG_PRELUDE=$RUNNER_TEMP/runtime.min.mjs" ;;
               *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
             esac
             printf '#!/bin/sh\nexport %s\nexec %s "$@"\n' "$extra" "$GITHUB_WORKSPACE/binaries/supercov-new/supercov" > "$RUNNER_TEMP/wrap/$variant"
@@ -74,6 +81,11 @@ jobs:
             list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
           done
           echo "DIAG_BINARIES=$list" >> "$GITHUB_ENV"
+      # The runtime as a page's prelude, minified (whitespace and comments
+      # only): what parsing a third of the text saves each document.
+      - run: |
+          npx -y esbuild@0.24.0 runtime/javascript/runtime.mjs --minify-whitespace --legal-comments=none --format=esm --outfile="$RUNNER_TEMP/runtime.min.mjs"
+          wc -c runtime/javascript/runtime.mjs "$RUNNER_TEMP/runtime.min.mjs"
       - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
       - uses: ./.github/actions/system-packages
         with:
