@@ -8,7 +8,7 @@
 // Needs Postgres on localhost:5450 (database `rallly`) and Mailpit on
 // localhost:1025/8025, as Rallly's .env.test says.
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, word, at, all) =>
@@ -83,5 +83,29 @@ catch {
 const strongDirectory = join(project, ".supercov/strong");
 if (existsSync(strongDirectory))
     cpSync(strongDirectory, join(out, "strong"), { recursive: true });
+// Every log the pass and its commands wrote (a round's command output, the
+// server's build), wherever under .supercov it is: a round that fails says
+// why only there.
+const logs = join(out, "supercov-logs");
+const collect = (directory, depth = 0) => {
+    let entries;
+    try {
+        entries = readdirSync(directory, { withFileTypes: true });
+    }
+    catch {
+        return;
+    }
+    for (const entry of entries) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory() && entry.name !== "node_modules" && entry.name !== ".next" && depth < 12)
+            collect(path, depth + 1);
+        else if (entry.isFile() && /\.log$/.test(entry.name)) {
+            const target = join(logs, path.slice(project.length + 1).replaceAll("/", "__"));
+            mkdirSync(logs, { recursive: true });
+            cpSync(path, target);
+        }
+    }
+};
+collect(join(project, ".supercov"));
 writeFileSync(join(out, "summary.json"), JSON.stringify({ project: "rallly", specs, budget: Number(budget), seconds: { ...seconds, supercovStrong: seconds["supercov-strong"] }, supercovSummary: pass.summary ?? null, driver: pass.passes ?? [] }, null, 2));
 console.log(JSON.stringify({ seconds, summary: pass.summary, passes: pass.passes }, null, 1));
