@@ -528,7 +528,6 @@ mod tests {
         });
         let wrote = receiver.recv_timeout(std::time::Duration::from_secs(10));
         writeln!(diagnostics).unwrap();
-        drop(diagnostics);
         assert!(
             wrote.is_ok(),
             "a thread writing to standard error waited for the run's diagnostics"
