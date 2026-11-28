@@ -43,6 +43,10 @@ const PROFILED_STAGES = 50;
 // their ends).
 const CONTINUOUS_LOOK_MS = 50;
 // How much each of a mutant's batches of later files grows over the one before.
+// How many of a test file's runs against mutants of one source file its
+// kills of every mutant count for, where it ran few of that file's: the
+// file's chance to kill a mutant there starts at its chance anywhere.
+const PAIR_PRIOR = 2;
 const BATCH_GROWTH = Math.max(1, Number(process.env["SUPERCOV_STRONG_BATCH_GROWTH"]) || 4);
 // A continuous run's slots beyond each file's own, and the bytes of test
 // files they may name: Vitest reads every slot's file at once as the run
@@ -1230,13 +1234,33 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     }
     // How often each test file killed the mutants it ran, learned as the
     // pass goes: a file's chance to kill over its cost (its tests' measured
-    // time and a copy's start) orders a mutant's later files.
+    // time and a copy's start) orders a mutant's files. The chance is the
+    // file's kills of mutants in the same source file as this one where it
+    // ran some (a file that tests one module kills its mutants, not
+    // another's), drawn toward the file's kills of every mutant while it
+    // ran few of them.
     const fileRuns = new Map();
     const fileKills = new Map();
+    const pairRuns = new Map();
+    const pairKills = new Map();
+    const pairOf = (job, group) => `${job.mutant.file}\0${group.file}`;
+    const noteRun = (job, group) => {
+        fileRuns.set(group.file, (fileRuns.get(group.file) ?? 0) + 1);
+        pairRuns.set(pairOf(job, group), (pairRuns.get(pairOf(job, group)) ?? 0) + 1);
+    };
+    const noteKill = (job, group) => {
+        fileKills.set(group.file, (fileKills.get(group.file) ?? 0) + 1);
+        pairKills.set(pairOf(job, group), (pairKills.get(pairOf(job, group)) ?? 0) + 1);
+    };
+    const killChance = (job, group) => {
+        const overall = ((fileKills.get(group.file) ?? 0) + 1) / ((fileRuns.get(group.file) ?? 0) + 2);
+        const pair = pairOf(job, group);
+        return ((pairKills.get(pair) ?? 0) + PAIR_PRIOR * overall) / ((pairRuns.get(pair) ?? 0) + PAIR_PRIOR);
+    };
     const startCost = () => profile.copies ? profile.startMs / profile.copies : 300;
-    const killScore = (group) => ((fileKills.get(group.file) ?? 0) + 1) / ((fileRuns.get(group.file) ?? 0) + 2) / (estimateOf(group) + startCost());
+    const killScore = (job, group) => killChance(job, group) / (estimateOf(group) + startCost());
     const nextBatch = (job) => {
-        job.later.sort((a, b) => killScore(b) - killScore(a));
+        job.later.sort((a, b) => killScore(job, b) - killScore(job, a));
         const batch = job.later.splice(0, job.batch);
         job.batch *= BATCH_GROWTH;
         return batch;
@@ -1383,9 +1407,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
         job.ran += outcome.tests.length;
         const chosen = claim.tests;
-        fileRuns.set(group.file, (fileRuns.get(group.file) ?? 0) + 1);
+        noteRun(job, group);
         const kill = (evidence, verdict) => {
-            fileKills.set(group.file, (fileKills.get(group.file) ?? 0) + 1);
+            noteKill(job, group);
             if (certain(group, chosen, evidence))
                 finish(job, verdict);
             else if (evidence.test && !group.whole) {
@@ -1609,7 +1633,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const estimateC = (group) => shapeOf(group) === "whole"
             ? overheadOf(group.file) + (testsOf.get(group.file) ?? []).reduce((sum, id) => sum + testMsOf(id), 0)
             : estimateOf(group);
-        const scoreC = (group) => ((fileKills.get(group.file) ?? 0) + 1) / ((fileRuns.get(group.file) ?? 0) + 2) / (estimateC(group) + startCost());
+        const scoreC = (job, group) => killChance(job, group) / (estimateC(group) + startCost());
         const remainingOf = (job) => job.chain.reduce((sum, group) => sum + estimateC(group) + startCost(), 0);
         // A mutant's copies running, and its kills waiting on a confirmation.
         for (const job of pending) {
@@ -1643,7 +1667,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             for (const group of job.chain) {
                 if (!baselineReady(group) || unusable(group))
                     continue;
-                if (!best || scoreC(group) > scoreC(best))
+                if (!best || scoreC(job, group) > scoreC(job, best))
                     best = group;
             }
             return best;
@@ -1798,7 +1822,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         };
         // What a copy's end says.
         const kill = (job, group, claim, outcome, evidence, verdict) => {
-            fileKills.set(group.file, (fileKills.get(group.file) ?? 0) + 1);
+            noteKill(job, group);
             const shape = claim.wholeFile ? "whole" : "union";
             const entry = baseOf(group.file)[shape];
             let sure;
@@ -1850,7 +1874,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 return;
             }
             job.ran += outcome.tests.length;
-            fileRuns.set(group.file, (fileRuns.get(group.file) ?? 0) + 1);
+            noteRun(job, group);
             const entry = baseOf(group.file)[claim.wholeFile ? "whole" : "union"];
             const failed = outcome.tests.find((test) => test.failed && !entry.failed?.has(test.test));
             const outside = entry.outside ? undefined : outcome.outside[0];
