@@ -60,7 +60,7 @@ The corpus finds a change in what runs hold once a release that made it is
 recorded and read. `store-shapes.txt` finds it as it is made. It lists each
 file a run keeps (`run.json`, each kind of entry in `evidence.raw.gz`,
 `test-executions.json`, `statement-spans.json`, `source-manifest.cache.json`,
-`assessment-input.json.gz`, `mutants.json` and `mutants-listed.json`,
+`assessment-input.json.gz`, `run-view.json.gz`, `mutants.json` and `mutants-listed.json`,
 `strong-mutation.json`, the query index's identity) with the version that
 names its shape, and every type in it, as written and as read. The test in
 `crates/supercov-engine/src/store_shapes.rs` works the shapes out from the

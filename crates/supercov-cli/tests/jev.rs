@@ -360,15 +360,11 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     assert!(!with_run.contains("judged to catch"), "{with_run}");
     // A run whose evidence cannot be read is named before anything is asked
     // of the provider.
-    // Read twice: for the run's view, then for what each test ran; and the
-    // store of runs, listed before either.
+    // Read for what each test ran (the run's view is kept beside it); and the
+    // store of runs, listed before it.
     for (fault, place) in [
         (
             "fs.read_from#evidence-archive.read.read-from",
-            "evidence-archive.read.read-from",
-        ),
-        (
-            "fs.read_from#evidence-archive.read.read-from@3",
             "evidence-archive.read.read-from",
         ),
         (

@@ -70,6 +70,10 @@ file assessment-input.json.gz
   version: none
   written and read: AssessmentInput
 
+file run-view.json.gz
+  version: run_store::RUN_VIEW_FILE_VERSION = 1
+  written and read: KeptRunView
+
 file strong-mutation.json
   version: strong_plan::STRONG_VERDICTS_SCHEMA_VERSION = 1
   written and read: StrongVerdicts
@@ -112,7 +116,22 @@ type BranchMeta, written and read = closed {
   alternatives: [BranchAlternativeMeta]
 }
 
+type BranchRecord, written and read = {
+  line: uint
+  block: uint
+  index: uint
+  taken: boolean
+}
+
 type BranchRole, written and read = "value" | "left" | "right"
+
+type BranchSite, written and read = {
+  kind: string
+  line: uint
+  column: uint
+  source: string
+  taken: [boolean]
+}
 
 type CandidateMutant, written and read = closed {
   id?: string
@@ -166,6 +185,14 @@ type CompanionRun, written and read = closed {
 type ComparisonSnapshot, written and read = closed {
   id: string
   outcomes: [string]
+}
+
+type ConditionRecord, written and read = {
+  line: uint
+  column: uint
+  index: uint
+  covered: boolean
+  source: string
 }
 
 type CoverageManifest, written and read = closed {
@@ -350,6 +377,17 @@ type FileFingerprint, written and read = closed {
   code?: Code | null
 }
 
+type FileView, written and read = {
+  file: string
+  metrics: [MetricView]
+  measuredLines: [uint]
+  uncoveredLines: [uint]
+  missingBranches: [Location]
+  missingConditions: [Location]
+  functions: [FunctionRecord]
+  branches: [BranchRecord]
+}
+
 type FrontendAttribution, written and read = closed {
   run: AttributionPrecision
   worker: AttributionPrecision
@@ -383,6 +421,12 @@ type FrontendRunnerDeclaration, written and read = closed {
   executionModel: ExecutionModel
   attribution: FrontendAttribution
   limitations: [FrontendLimitation]
+}
+
+type FunctionRecord, written and read = {
+  line: uint
+  name: string
+  covered: boolean
 }
 
 type GitIntegrity, written and read = closed {
@@ -425,6 +469,35 @@ type InstrumentedBuildCache, written and read = closed {
   reused: boolean
 }
 
+type KeptFile, written and read = closed {
+  file: FileView
+  conditions: [ConditionRecord]
+  points: [PointSite]
+  branchSites: [BranchSite]
+}
+
+type KeptIdentity, written and read = closed {
+  version: uint
+  viewSchema: uint
+  analysis: string
+  evidenceSha256: string
+  evidenceBytes: uint
+  run: string
+  generatedAt: string
+  suitePassed: boolean
+}
+
+type KeptRunView, written and read = closed {
+  identity: KeptIdentity
+  view: RunView
+  files: [KeptFile]
+}
+
+type Location, written and read = {
+  line: uint
+  column: uint
+}
+
 type LogicalSnapshot, written and read = closed {
   id: string
   vectors: [LogicalVector]
@@ -451,6 +524,20 @@ type McdcVector, written and read = closed {
   values: [boolean | null]
   outcome: boolean
 }
+
+type Metric, written and read = "lines" | "statements" | "functions" | "branches" | "mcdc"
+
+type MetricView, written and read =
+| {
+    state: "measured"
+  }
+| {
+    state: "notApplicable"
+  }
+| {
+    state: "incomplete"
+    unmeasured: uint
+  }
 
 type MutantOperator, written and read = closed {
   text: string
@@ -495,6 +582,24 @@ type PointMeta, written and read = closed {
   column: uint
   source: string
   label?: string | null
+}
+
+type PointSite, written = {
+  function: boolean
+  line: uint
+  column: uint
+  source: string
+  name: string | null
+  covered: boolean
+}
+
+type PointSite, read = {
+  function: boolean
+  line: uint
+  column: uint
+  source: string
+  name?: string | null
+  covered: boolean
 }
 
 type ProbeTableIds, written and read = closed {
@@ -644,6 +749,20 @@ type RunTimings, written and read = closed {
   instrumentedBuildMs: number
   testCommandMs: number
   evidencePublicationMs: number
+}
+
+type RunView, written and read = {
+  schemaVersion: uint
+  run: string
+  generatedAt: string
+  suitePassed: boolean
+  stale: boolean
+  staleReasons: [string]
+  complete: boolean
+  limitations: [string]
+  totals: [MetricView]
+  files: [FileView]
+  sourceNeighbourhoods: [(string, string)]
 }
 
 type RuntimeEvent, written and read = closed {
