@@ -98,3 +98,46 @@ What the per-shard builds show besides: eight of kotlinpoet's twelve
 shards start the build twice, the first ending after about 20 s when the
 compiler refuses a switch (a Kotlin mutant that does not compile is
 `unviable`); that is 180 s of kotlinpoet's strong pass.
+
+### 3. The tests that killed the file's other mutants first
+
+A JVM keeps, for each source file, the tests that killed its mutants and
+how many, and runs a mutant's candidates that did first, the most kills
+first, the rest in the plan's order. The first kill ends a mutant's run, so
+the order decides only which candidate kills it. Before, kotlinpoet's 54
+mutants killed after more than 100 candidates ran 13,256 tests between them.
+
+### 4. The pass's own JVMs, with C1 alone
+
+Where the pass has JVMs of its own (`SUPERCOV_STRONG_JVMS` above one), they
+run every mutant and the build's test JVM waits for them, and they run with
+`-XX:TieredStopAtLevel=1`. Each mutant's classes are loaded afresh, so what
+the JIT compiles is thrown away with its loader; C2's compilations of it
+took as much processor time as the tests did (commons-cli 266 s of JIT
+against 167 s of runs with a mutant), beside them, on as many processors as
+there are JVMs.
+
+Result of 3 and 4 together (run 46091426206 against 46085994371): every
+verdict the same (commons-cli 882, one `killed` now a `timeout` at the
+machine's speed; kotlinpoet 1,238).
+
+| | commons-cli before | after | kotlinpoet before | after |
+| --- | ---: | ---: | ---: | ---: |
+| JIT time (s) | 266 | 14 | 2,485 | 108 |
+| runs with a mutant | 7,395 | 6,534 | 38,371 | 32,839 |
+| their time (s) | 167 | 143 | 2,239 | 1,717 |
+| baselines' time (s) | 84 | 40 | 1,707 | 1,368 |
+| strong pass (s, wall) | 194 | 124 | 2,023 | 1,745 |
+| measured run (s, wall) | 36 | 25 | 1,018 | 936 |
+| PIT (s) | 94 | 115 | 1,346 | 1,425 |
+
+The measured durations the plan gives the JVM pass are all 0: the
+measured run records no duration for a JVM test, so each test's limits come
+from its baseline alone.
+
+Where kotlinpoet's time is left: each of its twelve shards starts Gradle
+three times (the measured run, the strong copy's build that the compiler
+refuses a switch in, the build again without it), and each shard measures
+and baselines the whole suite. Per shard the JVMs are busy for about 67 s
+of a 145 s strong pass. Survivors every test reaches (22 mutants with 857
+candidates each) are more than half the runs with a mutant.
