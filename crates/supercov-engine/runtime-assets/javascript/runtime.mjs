@@ -812,7 +812,7 @@ runtimeGlobal.__SUPERCOV_COMPACT_SNAPSHOT__ = compactSnapshotText;
 // event became an object, then a row, and the collector made each an object
 // again and then a column: on a page of 30,000 events, 26 ms at the end of
 // each test against 7.
-runtimeGlobal.__SUPERCOV_COLUMNS_SNAPSHOT__ = () => JSON.stringify(coverageSnapshotColumns());
+runtimeGlobal.__SUPERCOV_COLUMNS_SNAPSHOT__ = () => JSON.stringify(coverageSnapshotColumns(true));
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
 // A dedicated worker blocked in `Atomics.wait` runs no evaluation, so the
 // test runner could not read its evidence and reported the test as a lower

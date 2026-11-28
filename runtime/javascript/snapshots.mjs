@@ -121,6 +121,46 @@ export function expandSnapshot(value) {
         snapshot[key] = key === "events" ? events : key === "hits" ? hits.map((index) => strings[index]) : rest[key];
     return snapshot;
 }
+/** A decision vector's text (`T-F:T`, runtime.mjs vectorKey) as the vector. */
+function wholeVector(code) {
+    if (typeof code !== "string")
+        return code;
+    const at = code.lastIndexOf(":");
+    return {
+        values: [...code.slice(0, at)].map((value) => (value === "-" ? null : value === "T")),
+        outcome: code.slice(at + 1) === "T",
+    };
+}
+/**
+ * A compact snapshot (runtime.mjs, compactSnapshot) written out in full, as
+ * the engine reads it: what mergeSnapshots and eventsOfColumns read. Anything
+ * else is returned as it is.
+ */
+export function wholeSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || !Array.isArray(snapshot.idPrefixes))
+        return snapshot;
+    const { idPrefixes: prefixes, ...rest } = snapshot;
+    const id = (reference) => typeof reference === "number"
+        ? `${prefixes[reference % prefixes.length]}${Math.floor(reference / prefixes.length)}`
+        : reference;
+    const whole = { ...rest };
+    if (Array.isArray(rest.decisions))
+        whole.decisions = rest.decisions.map((entry) => Array.isArray(entry)
+            ? { id: id(entry[0]), vectors: entry.slice(1).map(wholeVector) }
+            : entry);
+    if (Array.isArray(rest.hits))
+        whole.hits = rest.hits.map(id);
+    if (Array.isArray(rest.logicals))
+        whole.logicals = rest.logicals.map((entry) => Array.isArray(entry)
+            ? { id: id(entry[0]), vectors: entry.slice(1).map((code) => ({ right: code[0] === "R", truthy: code[1] === "T" })) }
+            : entry);
+    if (rest.eventColumns?.vector)
+        whole.eventColumns = {
+            ...rest.eventColumns,
+            vector: Object.fromEntries(Object.entries(rest.eventColumns.vector).map(([position, vector]) => [position, wholeVector(vector)])),
+        };
+    return whole;
+}
 /**
  * A snapshot read as columns (runtime.mjs, coverageSnapshotColumns) with its
  * events as objects again, each as the runtime built it (hitEvent,

@@ -92,8 +92,14 @@ test("comparison outcomes are kept, each once per probe, and left out when there
 
 test("a snapshot read as columns is what the collector made of a compact one, and its events come back for a merge", async () => {
   const runtime = await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href);
-  const { columnarEvents, eventsOfColumns } = await import("../../runtime/javascript/snapshots.mjs");
-  const columns = () => JSON.parse(globalThis.__SUPERCOV_COLUMNS_SNAPSHOT__());
+  const { columnarEvents, eventsOfColumns, wholeSnapshot } = await import("../../runtime/javascript/snapshots.mjs");
+  // A page writes its columns compact (runtime.mjs, compactSnapshot); written
+  // out in full, they are what the collector stored before.
+  const columns = () => {
+    const written = JSON.parse(globalThis.__SUPERCOV_COLUMNS_SNAPSHOT__());
+    assert.ok(Array.isArray(written.idPrefixes), JSON.stringify(written));
+    return wholeSnapshot(written);
+  };
   // What the collector stored before: the compact text expanded, then as columns.
   const before = () => columnarEvents(expandSnapshot(JSON.parse(globalThis.__SUPERCOV_COMPACT_SNAPSHOT__(globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__()))));
   runtime.enableRuntimeSnapshotEvidence();

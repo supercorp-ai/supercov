@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepSnapshotText, recordLine } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents, eventsOfColumns, keepSnapshotText, recordLine, wholeSnapshot } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 import { PAGE_ANSWER_MS, PAGE_BUSY, PAGE_GONE, PAGE_TIMEOUT_MARKER, activatePageMutant, describeCall, installCopies, keepsWorker, ownDeadline, ownEndPast, pendingBefore, ranInWorker, stallDetails, stalledOn, strongClaim, strongFinish, watchPageWork, watchStall } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
@@ -391,7 +391,7 @@ class CoveragePhaseController {
         // A snapshot read as columns is stored as it is; merged with what
         // documents handed over as they left, its events are objects again.
         this.runtimeSnapshots = this.leftSnapshots.length > 0
-            ? [mergeSnapshots([...this.leftSnapshots, ...snapshots.map(eventsOfColumns)])]
+            ? [mergeSnapshots([...this.leftSnapshots, ...snapshots.map((snapshot) => eventsOfColumns(wholeSnapshot(snapshot)))])]
             : snapshots;
         return this.runtimeSnapshots;
     }
