@@ -175,7 +175,7 @@ test("a job past its limit beside others runs again alone before it is a timeout
     const rules = { "*": { w1: "locked" }, "src/a.js#0": { w1: "locked,fail" }, "src/a.js#7": { w1: "locked,fail" } };
     const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/w.test.js": ["w1", "w2"] }, workers: 8, aloneGraceMs: 10_000 });
     const status = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id, verdict.status]));
-    assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "survived", m3: "survived", m4: "survived", m5: "survived", m6: "survived", m7: "killed" }, JSON.stringify(summary));
+    assert.deepEqual(status, { m0: "killed", m1: "survived", m2: "survived", m3: "survived", m4: "survived", m5: "survived", m6: "survived", m7: "killed" }, JSON.stringify({ summary, verdicts }));
     assert.ok(summary.alone >= 1, JSON.stringify(summary));
 });
 
