@@ -25,13 +25,25 @@ runs:
   steps:
     - name: What the pull request changes
       shell: bash
+      env:
+        MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
       run: |
         changed="$RUNNER_TEMP/changed.txt"
         : > "$changed"
+        base=""
         if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
           # The checkout is the merge of the pull request into its base: its
           # first parent is the base, so this is the pull request's change.
-          git diff --name-only HEAD^1 HEAD > "$changed" || rm -f "$changed"
+          base=$(git rev-parse HEAD^1)
+        elif [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+          # The merge queue's commit: main as it is now, then each pull
+          # request queued before this one, then this one. What it changes
+          # is everything since main.
+          base="$MERGE_GROUP_BASE"
+        fi
+        if [ -n "$base" ]; then
+          git diff --name-only "$base" HEAD > "$changed" || rm -f "$changed"
+          echo "AFFECTED_BASE=$base" >> "$GITHUB_ENV"
         fi
         echo "CHANGED=$changed" >> "$GITHUB_ENV"
     - name: Find the map
@@ -43,7 +55,7 @@ runs:
         mode=$(node scripts/ci-affected.mjs triage "${{ inputs.workflow }}" | jq -r .mode)
         echo "mode=$mode" >> "$GITHUB_OUTPUT"
         [ "$mode" = map ] || exit 0
-        base=$(git rev-parse HEAD^1)
+        base="${AFFECTED_BASE:-$(git rev-parse HEAD^1)}"
         # The newest Self Coverage run whose commit the base holds, with its
         # map kept (every push to main keeps one, and so does a full run by
         # hand): the commits between are ones the map does not know, and
@@ -132,6 +144,9 @@ runs:
     - name: Plan the jobs
       id: plan
       shell: bash
+      env:
+        # A merge group's pull request is read for its title and labels.
+        GH_TOKEN: ${{ github.token }}
       run: node scripts/ci-affected.mjs plan "${{ inputs.workflow }}" "$RUNNER_TEMP/answer"
     # Named for the workflow: the slow tier calls several in one run.
     - uses: actions/upload-artifact@v4

@@ -21,6 +21,11 @@ on:
   # platform (scripts/ci-affected.mjs).
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  # The merge queue's commit: the pull request on main as main is now. Its
+  # `Fast tier` status, on that commit, is what the queue waits for before it
+  # merges (scripts/ci-tiers.mjs).
+  merge_group:
+    types: [checks_requested]
   # The fast tier each night on main, every job on every platform: a gate
   # whose own pull requests are rare goes stale where nothing runs it, and a
   # release then finds it broken. Its `Fast tier` status on main's commit is

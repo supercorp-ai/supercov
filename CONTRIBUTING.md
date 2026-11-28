@@ -34,7 +34,7 @@ It works on macOS and Linux; it needs `cargo-nextest`
 | --- | --- | --- |
 | Workflow | `ci.yml` | `slow-tier.yml`, calling `self-coverage.yml`, `compatibility.yml`, `react-compatibility.yml`, `next-compatibility.yml` and `release-gates.yml` |
 | What | build, `cargo fmt`, clippy, the tests the change can affect, engine integrations, wasm and worker gates | Self Coverage with its 100% gate on the changed lines, Compatibility, React, Next.js, the release gates (release build, packed install, benchmark) |
-| When | every push to every pull request, drafts included; each night on main | a pull request ready to merge; every push to a release pull request; each night on main |
+| When | every push to every pull request, drafts included; the merge queue's commit; each night on main | a pull request ready to merge; every push to a release pull request; the merge queue's commit; each night on main |
 | How long | about ten minutes | about twenty to thirty minutes |
 | Platforms | Linux; every platform on a release pull request, at night and with `full-ci` | Linux; every platform on a release pull request, at night and with `full-ci` |
 | Answer | the `Fast tier` commit status | the `Slow tier` commit status |
@@ -59,6 +59,28 @@ it on every push, in full. By hand, in full, on any branch:
 A push after the slow tier ran takes the `ready` label off and marks `Slow
 tier` pending on the new commit: it has not passed. Add the label again to run
 it there. Push the fixes a review asks for first, then add `ready` once.
+
+The label comes off when the push's slow-tier run gets a runner, which can be
+minutes after the push; until then it is still on, and adding it again does
+nothing (GitHub sends no event for a label already there). Wait until `Slow
+tier` on the new commit says "Not run on this commit" and the label is gone,
+then add it. `gh pr update-branch` is a push like any other.
+
+### Merging: the merge queue
+
+A pull request whose two statuses passed goes into the merge queue:
+`gh pr merge <number>` (the queue squashes; no merge method to choose). The
+queue makes a commit of main as it is now with the pull request on top (and
+the pull requests queued before it), runs both tiers on it as a `merge_group`
+event, and merges that commit once its `Fast tier` and `Slow tier` pass. The
+tiers run there as they did on the pull request: on what the group changes
+since main, or in full for a release pull request or `full-ci`
+(scripts/ci-tiers.mjs, scripts/ci-affected.mjs). If they fail, the pull
+request leaves the queue and main is untouched.
+
+There is no need to keep a pull request up to date with main by hand: the
+queue tests it on the newest main, so a merge never waits on a rebase and a
+second run of both tiers.
 
 On a pull request, Self Coverage measures the affected tests and the tests
 written in the files the change touches, and holds the lines the change adds or
@@ -94,11 +116,23 @@ gh api -X POST repos/supercorp-ai/supercov/rulesets --input - <<'JSON'
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": true,
+        "strict_required_status_checks_policy": false,
         "required_status_checks": [
           { "context": "Fast tier", "integration_id": 15368 },
           { "context": "Slow tier", "integration_id": 15368 }
         ]
+      }
+    },
+    {
+      "type": "merge_queue",
+      "parameters": {
+        "merge_method": "SQUASH",
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 3,
+        "min_entries_to_merge": 1,
+        "max_entries_to_merge": 5,
+        "min_entries_to_merge_wait_minutes": 0,
+        "check_response_timeout_minutes": 90
       }
     }
   ]
@@ -106,6 +140,9 @@ gh api -X POST repos/supercorp-ai/supercov/rulesets --input - <<'JSON'
 JSON
 ```
 
-`strict` asks for the branch to be up to date with main: a squash merge then
-has the tree that passed, and a release publishes that tree without running
-anything again (RELEASING.md).
+The merge queue merges the commit both tiers passed on, main as it was then
+with the pull request on top: a release publishes that tree without running
+anything again (RELEASING.md). So the branch need not be up to date with main
+(`strict` is off): the queue's commit always is. `max_entries_to_build` is how
+many queue commits run at once, each holding the pull requests before it;
+`check_response_timeout_minutes` covers the slow tier's longest run.

@@ -10,7 +10,9 @@
 //     and one labelled `full-ci` run every job on every platform. Any other
 //     pull request runs on Linux alone: in full where CI itself changed, as a
 //     corpus check where only tests/compat changed, and otherwise from the
-//     map. Prints JSON {platforms, mode, reason}.
+//     map. The merge queue's commit (a `merge_group` event) runs as the pull
+//     request it was made for would, on what the group changes on main.
+//     Prints JSON {platforms, mode, reason}.
 //   node scripts/ci-affected.mjs plan <workflow> [answer directory]
 //     Each job of the workflow (ci, compatibility, self-coverage, next, react)
 //     with whether it runs, its matrix and why, as the `jobs` output; the
@@ -42,6 +44,7 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { withQueuedPull } from './ci-tiers.mjs';
 
 // The checkout CI runs in: the working directory, as every step runs there.
 const repository = process.cwd();
@@ -90,7 +93,8 @@ const matches = (file, patterns) => patterns.some((pattern) => glob(pattern).tes
 
 function event() {
   const path = process.env.GITHUB_EVENT_PATH;
-  return path && existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+  const payload = path && existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+  return withQueuedPull(process.env.GITHUB_EVENT_NAME, payload);
 }
 
 function changedFiles() {
@@ -113,7 +117,9 @@ const CORPUS = ['tests/compat/**'];
  * and in full, from the map, as a corpus change, or not at all.
  */
 export function triage(name = process.env.GITHUB_EVENT_NAME, payload = event(), changed = changedFiles(), workflow = '') {
-  if (name !== 'pull_request') {
+  // The merge queue's commit runs as its pull request does, on the files the
+  // group changes (.github/actions/affected lists them from the group's base).
+  if (name !== 'pull_request' && name !== 'merge_group') {
     return { platforms: 'all', mode: 'full', reason: name === 'push' ? 'a push to main runs every test on every platform and keeps the map current' : `a ${name} run runs every test on every platform` };
   }
   const pull = payload.pull_request ?? {};

@@ -120,3 +120,20 @@ test('a workflow file runs in full only the workflows that run by it', async () 
   // Asked for no workflow, any workflow file still runs everything.
   assert.equal(mode(['.github/workflows/mutation-jvm.yml']), 'full');
 });
+
+test("the merge queue's commit runs as its pull request does, on what the group changes", async () => {
+  const { triage } = await import('../../scripts/ci-affected.mjs');
+  const group = (fields = {}) => ({
+    action: 'checks_requested',
+    merge_group: { head_ref: 'refs/heads/gh-readonly-queue/main/pr-355-0123abcd', base_sha: 'b', head_sha: 'h' },
+    pull_request: { title: 'x', head: { ref: 'x' }, labels: [], ...fields },
+  });
+  for (const workflow of ['ci', 'self-coverage', 'compatibility', 'react', 'next']) {
+    assert.deepEqual(triage('merge_group', group(), ['crates/x.rs'], workflow), { platforms: 'linux', mode: 'map', reason: '' });
+    assert.equal(triage('merge_group', group(), ['scripts/ci-affected.mjs'], workflow).mode, 'full');
+    assert.equal(triage('merge_group', group({ title: 'Release 4.30.0' }), ['crates/x.rs'], workflow).platforms, 'all');
+    assert.equal(triage('merge_group', group({ labels: [{ name: 'full-ci' }] }), ['crates/x.rs'], workflow).mode, 'full');
+    // Changed files it could not list run everything.
+    assert.equal(triage('merge_group', group(), null, workflow).mode, 'full');
+  }
+});
