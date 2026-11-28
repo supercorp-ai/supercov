@@ -67,7 +67,7 @@ def _sha256(data: bytes):
     _sha256 = sha256
     return sha256(data)
 
-PROBE_VERSION = 11
+PROBE_VERSION = 12
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -938,6 +938,9 @@ def install(
     _plain_process = _compiles_bytecode_only()
     for attribute in PROBE_NAMES:
         globals()[attribute] = entry_points[attribute]
+    # What probed code reads its aliases from (see supercov_instrument's
+    # `_import_aliases`): this module, reached without an import.
+    builtins.__supercov_probes__ = sys.modules[__name__]
     probing = Probing(files, relative_for, cache_directory, sites)
     probing.report = entry_points.get("limitation", probing.report)
     _probing = probing
