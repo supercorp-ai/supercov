@@ -624,7 +624,7 @@ if (diagInspect)
     process.once("exit", () => {
         try {
             const top = [...diagInspect.byRequest].sort((a, b) => b[1][0] - a[1][0]).slice(0, 12).map(([request, [ms, objects, descriptors]]) => ({ request, ms: Math.round(ms * 10) / 10, objects, descriptors }));
-            appendFileSync(process.env.SUPERCOV_DIAG_INSPECT_FILE, JSON.stringify({ pid: process.pid, argv: process.argv.slice(1, 3).join(" ").slice(-80), loads: diagInspect.loads, objects: diagInspect.objects, descriptors: diagInspect.descriptors, primitives: diagInspect.primitives, ms: Math.round(diagInspect.ms), top }) + "\n");
+            appendFileSync(process.env.SUPERCOV_DIAG_INSPECT_FILE, JSON.stringify({ pid: process.pid, argv: process.argv.slice(1, 3).join(" ").slice(-80), loads: diagInspect.loads, keysListed: diagInspect.keysListed, kinds: diagInspect.kinds, objects: diagInspect.objects, descriptors: diagInspect.descriptors, primitives: diagInspect.primitives, ms: Math.round(diagInspect.ms), top }) + "\n");
         }
         catch { }
     });
@@ -647,7 +647,15 @@ function inspectExports(value, depth = 0) {
     // process a descriptor read per key of every export's members.
     if (depth === 2)
         return;
-    for (const key of Reflect.ownKeys(object).slice(0, 200)) {
+    const diagKeys = Reflect.ownKeys(object);
+    if (diagInspect) {
+        diagInspect.keysListed = (diagInspect.keysListed ?? 0) + diagKeys.length;
+        const kind = ArrayBuffer.isView(object) ? "view" : Array.isArray(object) ? "array" : typeof object;
+        const entry = (diagInspect.kinds ??= {})[kind] ??= [0, 0];
+        entry[0] += 1;
+        entry[1] += diagKeys.length;
+    }
+    for (const key of diagKeys.slice(0, 200)) {
         if (key === "prototype" || key === "caller" || key === "callee")
             continue;
         try {
