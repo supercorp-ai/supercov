@@ -155,6 +155,22 @@ Native Rust mutants are already cheap: 0.4–1.4 s each once testing starts.
 
 **Next:** one Maven or Gradle build for both the measured run and the strong pass. Supercov still trails PIT end to end: commons-cli 128 s vs 100 s, kotlinpoet 2,520 s vs 1,430 s.
 
+## CI and the merge queue
+
+GitHub-hosted runners, about 43 jobs at once for the account; no added runner spend.
+
+| Tried | Result | Kept? |
+|---|---|---|
+| Self Coverage builds the measured workspace once; slices reuse it (#355) | Slice jobs 9–25 → 8–14 min; one 8 min build instead of one per slice | Kept |
+| A workflow file runs in full only the workflows that use it (#355) | A fix to one benchmark workflow no longer measures Self Coverage for an hour | Kept |
+| Ten-minute Self Coverage slices for pull requests (`SLICE_SECONDS` 900 → 600) (#355) | Shorter partial slices; full runs unchanged at ten slices | Kept |
+| Merge queue instead of "branch up to date" (#374) | Two green #355 runs were refused because main moved during them (~40 min each); the queue tests on the newest main | Kept |
+| A fast-tier failure no longer cancels the slow tier (#384) | A flaky fast-tier job had thrown away a 40 min slow-tier run | Kept |
+| Slow tier only in the queue; a pull request's `Slow tier` passes as "runs in the merge queue" (#386) | Half the slow-tier runs; no `ready` label | Kept |
+| Main's full Self Coverage (the map) every three hours, not on every merge (#400) | 127 job-minutes per merge before; about 105 saved per merge at two merges an hour | Kept |
+| Cancel the queue's superseded runs (queue-sweep.yml) | Twelve superseded runs held about 110 jobs at once before | Kept |
+| More concurrent queue groups (`max_entries_to_build` above 3) | Runners saturated (43 running, 121 waiting): more groups only add waiting jobs | Not done |
+
 ## Ideas not yet tried
 
 - JS: a supported Playwright hook for unawaited phase activation, if one appears.
