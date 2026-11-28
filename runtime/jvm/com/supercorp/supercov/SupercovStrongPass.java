@@ -731,6 +731,7 @@ public final class SupercovStrongPass {
       Outcome outcome = execute(test, true, mutant.file, mutant.index, mutated);
       profile.runs++;
       profile.runNanos += System.nanoTime() - run;
+      profile.measuredMillis += test.measuredMillis;
       if (ran == 1) {
         profile.firstRunNanos += System.nanoTime() - run;
       }
@@ -808,6 +809,8 @@ public final class SupercovStrongPass {
     long baselineNanos;
     int runs;
     long runNanos;
+    /** What the measured run took for the tests run with a mutant. */
+    long measuredMillis;
     long firstRunNanos;
     int confirmations;
     long confirmNanos;
@@ -858,6 +861,7 @@ public final class SupercovStrongPass {
       line.append(",\"runs\":").append(runs);
       line.append(",\"runMs\":").append(runNanos / 1_000_000L);
       line.append(",\"firstRunMs\":").append(firstRunNanos / 1_000_000L);
+      line.append(",\"measuredMs\":").append(measuredMillis);
       line.append(",\"confirmations\":").append(confirmations);
       line.append(",\"confirmMs\":").append(confirmNanos / 1_000_000L);
       line.append(",\"classesLoaded\":").append(classes);
