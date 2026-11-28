@@ -108,7 +108,7 @@ On small suites (jinja, cobra, rack) this fixed cost is what keeps Go, Python an
 |---|---|---|
 | Shard by mutant-id hash (#348) | Merged totals equal the shards' sum; fixes dropped and duplicated mutants | Kept (correctness) |
 | Go type-check helper cached per toolchain (#356) | Fixes reuse after a Go upgrade | Kept (correctness) |
-| Go helper built without `-trimpath` (#380) | Cold helper build 5.6–6.0 s → 1.6–1.9 s | Kept |
+| Go helper built without `-trimpath` (#380) | Helper build after the project's `go test` 5.6–6.0 s → 1.6–1.9 s | Kept |
 | Python: likely killers first (kill history) | 0.7% fewer test runs; 10 killed → timeout | Dropped: order decides killed vs timeout when a mutant both fails one test and hangs another |
 | Python: one fork per test | Changes what each test runs after | Dropped |
 | Higher-order batching (several mutants per run) | Exact only if no other batch mutant was evaluated; such batches save nothing | Dropped |
