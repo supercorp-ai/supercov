@@ -448,7 +448,8 @@ for (let round = 1; round <= rounds; round += 1) {
   // round and reverses every other (A B C, then C B A shifted), so no variant
   // always runs first or on a warmer machine. SPEED_ORDER_OFFSET shifts the
   // start, so jobs of one matrix start from different variants.
-  const variants = [{ name: 'plain' }, ...binaries];
+  // SPEED_PLAIN=0 leaves plain out, for a job with time for one run.
+  const variants = process.env.SPEED_PLAIN === 'only' ? [{ name: 'plain' }] : [...(process.env.SPEED_PLAIN === '0' ? [] : [{ name: 'plain' }]), ...binaries];
   const shift = (round - 1 + Number(process.env.SPEED_ORDER_OFFSET ?? 0)) % variants.length;
   let order = variants.map((_, index) => variants[(index + shift) % variants.length]);
   if (round % 2 === 0) order = order.reverse();

@@ -45,6 +45,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new', only: plain }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new', only: plain }
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'events' }
@@ -111,6 +113,7 @@ jobs:
           SPEED_SUITES: ${{ matrix.suites }}
           SPEED_DIAGNOSE_PASS: '0'
           SUPERCOV_DIAG_TIMING: '1'
+          SPEED_PLAIN: ${{ matrix.only == 'plain' && 'only' || '0' }}
           SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs
       - if: always()
