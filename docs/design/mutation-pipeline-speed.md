@@ -201,8 +201,38 @@ The lever, then: run first the tests that killed the most of the mutant's
 function's (then its file's) other mutants so far in the pass, then the
 cheapest (`_likeliest_first`). A mutant whose killer goes first has an
 empty prefix, so its confirmation is the killer alone without the mutant,
-cached per test. Branch `perf/python-kill-history-order`. Measured with
-`compare.mjs` on the Python corpus against current main: see the log.
+cached per test. Branch `perf/python-kill-history-order`.
+
+Measured on the Python corpus against main `55a8e970` (runs 46146364654
+and 46147644963): test executions 39,982 to 39,696 (-0.7%), forks and
+confirmations the same. The killers were mostly near the front already. 10
+verdicts moved from `killed` to `timeout`. In cachetools,
+`_cachedmethod.py:106` (a lock's lambda to `None`) was killed by a threading
+test that ran first. Run first instead, a test that hangs under the mutant
+held it to the time limit. When a mutant both kills and hangs, the order
+decides which comes first, so the order is not free for timeouts. Wall time
+rose (101 to 145 s), but the baseline's own time swung as much between the
+runs, so that is the runners. Dropped: no saving, and verdicts move.
+
+### Go: timeouts
+
+Go's timeouts cost most of its test time, all mutants that ran:
+
+| project | timeouts | their s | of the project's test s |
+| --- | ---: | ---: | ---: |
+| uuid | 6 | 18.4 | 20.1 |
+| go-humanize | 2 | 6.1 | 8.4 |
+| golang-lru | 5 | 19.8 | 51.3 |
+
+A mutant first runs a package under 1.5x its baseline and 1 s. Past that, it
+runs again alone, in a round of retries one at a time, under 3x and 3 s, so
+contention cannot make a timeout. Every corpus timeout hung (`the tests ran
+past ~3 s`), so each cost about 1 s of a worker and then 3 s with the
+machine otherwise idle. Running the retries side by side, one per idle
+core, would bring back the contention the round alone rules out. A lower
+hit limit (a billion evaluations) moves verdicts: btree passes a test that
+evaluates one comparison over a million times. Both are choices about what
+a timeout means, not exact changes. Open: for the coordinator to decide.
 
 ### Already in place
 
@@ -216,5 +246,5 @@ cached per test. Branch `perf/python-kill-history-order`. Measured with
 - 2026-11-28, run 46079225619: probe of the Go helper's build by cache and
   flags (table above).
 - 2026-11-28, run 46082195960: baseline measured with values.
-- 2026-11-28, run 46146364654: Python-only base on main `55a8e970`, for
-  the kill-history order.
+- 2026-11-28, runs 46146364654 and 46147644963: Python kill-history order
+  against main `55a8e970`; dropped (above).
