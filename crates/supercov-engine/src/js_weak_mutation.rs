@@ -344,11 +344,11 @@ fn pit_mutator(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Statu
     // A Kotlin expression body's reach probe says only whether the body
     // ran: where it did not, the mutant was not reached; where it did, the
     // mutant is decided as one with no probe is.
-    let reach = mutant
+    let body_reach = mutant
         .probe
         .as_ref()
         .filter(|site| site.ends_with("#reach"));
-    if reach.is_some_and(|site| records.comparisons(site).is_none()) {
+    if body_reach.is_some_and(|site| records.comparisons(site).is_none()) {
         return Some(verdict_of(
             Status::NotReached,
             "not-evaluated",
@@ -360,7 +360,7 @@ fn pit_mutator(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Statu
     let site = mutant
         .compare
         .as_ref()
-        .or(mutant.probe.as_ref().filter(|_| reach.is_none()));
+        .or(mutant.probe.as_ref().filter(|_| body_reach.is_none()));
     if let Some(site) = site {
         let Some(outcomes) = records.comparisons(site) else {
             return Some(verdict_of(
