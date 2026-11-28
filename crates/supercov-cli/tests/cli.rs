@@ -31238,9 +31238,11 @@ fn a_ruby_mutant_whose_tests_the_command_does_not_run_is_an_error() {
         return;
     };
     let project = Project::empty("ruby-strong-unloaded");
+    // calc.rb loads half.rb, so the pass under calc_test.rb switches it on,
+    // but only half_test.rb's test reaches it.
     project.write(
         "lib/calc.rb",
-        "class Calc\n  def big?(n)\n    n > 10\n  end\nend\n",
+        "require_relative 'half'\n\nclass Calc\n  def big?(n)\n    n > 10\n  end\nend\n",
     );
     project.write(
         "lib/half.rb",
