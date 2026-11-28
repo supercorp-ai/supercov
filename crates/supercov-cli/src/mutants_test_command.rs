@@ -556,23 +556,25 @@ fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
     match (commands.len(), unfiltered.len()) {
         (1, _) => Ok(commands.remove(0)),
         (_, 1) => Ok(unfiltered.into_iter().next().unwrap_or_default()),
-        _ if let Some(command) = python_selections(&unfiltered_commands) => Ok(command),
-        _ => Err(format!(
-            "run {} is a merged run, and the runs it was merged from do not share one test command ({}): give the one its mutants run under after --, as supercov runs {} mutants test -- <test command>",
-            run.id,
-            commands
-                .iter()
-                .map(|command| command.join(" "))
-                .collect::<Vec<_>>()
-                .join("; "),
-            run.id
-        )),
+        _ => python_selections(&unfiltered_commands).ok_or_else(|| {
+            format!(
+                "run {} is a merged run, and the runs it was merged from do not share one test command ({}): give the one its mutants run under after --, as supercov runs {} mutants test -- <test command>",
+                run.id,
+                commands
+                    .iter()
+                    .map(|command| command.join(" "))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                run.id
+            )
+        }),
     }
 }
 
 /// Where a command runs pytest or unittest: the place of the word after
-/// which its arguments are pytest's or unittest's (`pytest`, `py.test`, or
-/// `-m pytest` / `-m unittest`), and whether it is pytest.
+/// which its arguments are pytest's or unittest's (`pytest`, `py.test`,
+/// whether a script or `-m pytest`, or `-m unittest`), and whether it is
+/// pytest.
 fn python_runner_at(command: &[String]) -> Option<(usize, bool)> {
     command.iter().enumerate().find_map(|(at, word)| {
         let stem = std::path::Path::new(word)
@@ -582,12 +584,7 @@ fn python_runner_at(command: &[String]) -> Option<(usize, bool)> {
         if stem == "pytest" || stem == "py.test" {
             return Some((at, true));
         }
-        let module = (at > 0 && command[at - 1] == "-m").then_some(word.as_str());
-        match module {
-            Some("pytest") => Some((at, true)),
-            Some("unittest") => Some((at, false)),
-            _ => None,
-        }
+        (at > 0 && command[at - 1] == "-m" && word == "unittest").then_some((at, false))
     })
 }
 
@@ -601,7 +598,7 @@ fn python_runner_at(command: &[String]) -> Option<(usize, bool)> {
 fn python_selections(commands: &[Vec<String>]) -> Option<Vec<String>> {
     let first = commands.first()?;
     let (runner, _) = python_runner_at(first)?;
-    let shortest = commands.iter().map(Vec::len).min()?;
+    let shortest = commands.iter().map(Vec::len).fold(usize::MAX, usize::min);
     let prefix = (0..shortest)
         .take_while(|&at| commands.iter().all(|command| command[at] == first[at]))
         .count();
@@ -633,18 +630,26 @@ fn python_selections(commands: &[Vec<String>]) -> Option<Vec<String>> {
                 || (path.contains('/') && !last.contains('.'))
                 || (path.split('.').count() > 1 && path.split('.').all(identifier)))
     };
-    let mut selected: Vec<String> = Vec::new();
-    for command in commands {
-        let middle = &command[prefix..command.len() - suffix];
-        if middle.is_empty() || !middle.iter().all(selects) {
-            return None;
-        }
-        for word in middle {
+    let middles = commands
+        .iter()
+        .map(|command| &command[prefix..command.len() - suffix])
+        .collect::<Vec<_>>();
+    if middles
+        .iter()
+        .any(|middle| middle.is_empty() || !middle.iter().all(selects))
+    {
+        return None;
+    }
+    // Each word once, where the parts first select it.
+    let selected = middles
+        .into_iter()
+        .flatten()
+        .fold(Vec::<String>::new(), |mut selected, word| {
             if !selected.contains(word) {
                 selected.push(word.clone());
             }
-        }
-    }
+            selected
+        });
     let mut united = first[..prefix].to_vec();
     united.extend(selected);
     united.extend_from_slice(&first[first.len() - suffix..]);
@@ -661,18 +666,17 @@ fn without_test_names(command: &[String]) -> Vec<String> {
             .iter()
             .any(|word| word == "--splits" || word.starts_with("--splits="))
     {
-        let mut kept = command[..=runner].to_vec();
+        // An option's value is the word after it.
         let mut skip = false;
-        for word in &command[runner + 1..] {
+        let after = command[runner + 1..].iter().filter(|word| {
             if skip {
                 skip = false;
-            } else if word == "--splits" || word == "--group" {
-                skip = true;
-            } else if !(word.starts_with("--splits=") || word.starts_with("--group=")) {
-                kept.push(word.clone());
+                return false;
             }
-        }
-        return kept;
+            skip = *word == "--splits" || *word == "--group";
+            !(skip || word.starts_with("--splits=") || word.starts_with("--group="))
+        });
+        return command[..=runner].iter().chain(after).cloned().collect();
     }
     let cargo = command.iter().any(|word| {
         std::path::Path::new(word)
@@ -4230,6 +4234,10 @@ mod tests {
             without_test_names(&words("pytest --group 2")),
             words("pytest --group 2")
         );
+        assert_eq!(
+            without_test_names(&words("py.test --splits 2 --group 1 tests")),
+            words("py.test tests")
+        );
     }
 
     /// Parts of a pytest or unittest suite that select different tests run
@@ -4264,6 +4272,15 @@ mod tests {
             ]),
             Some(words("python -m unittest tests.test_a tests.test_b"))
         );
+        assert_eq!(
+            united(&["python -m unittest _tests.a", "python -m unittest _tests.b"]),
+            Some(words("python -m unittest _tests.a _tests.b"))
+        );
+        // A test two parts select is selected once.
+        assert_eq!(
+            united(&["pytest tests/a tests/b", "pytest tests/c tests/a"]),
+            Some(words("pytest tests/a tests/b tests/c"))
+        );
         // Another difference, a part selecting nothing, or no Python runner.
         assert_eq!(united(&["pytest -k a tests", "pytest -k b tests"]), None);
         assert_eq!(united(&["pytest tests/a -x", "pytest tests/b"]), None);
@@ -4278,6 +4295,8 @@ mod tests {
             None
         );
         assert_eq!(united(&["pytest", "python -m pytest"]), None);
+        assert_eq!(united(&[]), None);
+        assert_eq!(united(&["python -m tox a/b", "python -m tox a/c"]), None);
     }
 
     /// A failed command is said with the tests that did not pass, the first
