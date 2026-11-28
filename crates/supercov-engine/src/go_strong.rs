@@ -478,9 +478,11 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
     // fault-site: go-strong.helper.write-2
     fs::write(source.join("go.mod"), HELPER_MODULE).map_err(failed(&source))?;
     let output = Command::new(go)
-        // Without its symbol table and paths: a third smaller, and the
-        // same program.
-        .args(["build", "-trimpath", "-ldflags=-s -w", "-o"])
+        // Without its symbol table: a third smaller, and the same program.
+        // Not `-trimpath`, which gives every package another build ID: the
+        // standard library the project's own `go test` compiled is then
+        // compiled again, 5.6 to 6.0 s where 1.6 to 1.9 s build it.
+        .args(["build", "-ldflags=-s -w", "-o"])
         .arg(&binary)
         .arg(".")
         .current_dir(&source)
