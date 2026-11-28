@@ -540,7 +540,9 @@ fn pass(
         },
         diagnostics,
         stop,
-    )?;
+    );
+    stop.phase(None);
+    let built = built?;
     for (at, error) in &unviable {
         results.verdict(
             &jobs[*at].id,
@@ -601,7 +603,12 @@ fn pass(
         .chain(alone.iter().map(|(at, _)| at))
         .flat_map(|at| jobs[*at].candidates.iter().copied())
         .collect::<BTreeSet<_>>();
+    stop.phase(Some(format!(
+        "running each of {} test(s) without a mutant first",
+        needed.len()
+    )));
     let baselines = baselines(&runner, &tests, &needed, request.workers);
+    stop.phase(None);
     // Baselines a stop cut short tell no mutant's candidates.
     if stop.now() {
         return Ok(0);
@@ -683,7 +690,8 @@ fn pass(
         let job = &jobs[*at];
         let mutant_started = Instant::now();
         let (source, _) = sources[&job.file].as_ref().expect("a job's file was read");
-        match build_alone(
+        stop.phase(Some(format!("building {} on its own", job.id)));
+        let alone_built = build_alone(
             &root,
             &places,
             &build_invocation,
@@ -691,7 +699,9 @@ fn pass(
             job,
             source,
             stop,
-        ) {
+        );
+        stop.phase(None);
+        match alone_built {
             // The stop cut its build short: it is left for the next pass.
             Err(_) if stop.now() => break,
             Err(error) => {
@@ -1284,6 +1294,10 @@ fn build_switched(
             "[supercov] building {} switched mutant(s) (build {builds})",
             switchable.len()
         );
+        stop.phase(Some(format!(
+            "building {} switched mutant(s) (build {builds})",
+            switchable.len()
+        )));
         let (prepared, built) = switched_build(root, places, jobs, switchable, invocation, stop)?;
         if !prepared.declined.is_empty() {
             let declined = prepared
@@ -2152,6 +2166,21 @@ impl Stop {
 
     fn now(&self) -> bool {
         self.marker.exists()
+    }
+
+    /// Says beside the results what the pass is doing while it decides no
+    /// mutant (building, running each test without a mutant), for the
+    /// progress line; `None` once it decides mutants again.
+    fn phase(&self, doing: Option<String>) {
+        let path = self.marker.with_file_name(crate::strong_driver::PHASE);
+        match doing {
+            Some(doing) => {
+                let _ = std::fs::write(path, doing);
+            }
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 }
 

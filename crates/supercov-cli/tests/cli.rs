@@ -28611,7 +28611,7 @@ fn a_running_pass_says_how_far_it_got() {
     let to_run = reply["summary"]["ran"].as_u64().unwrap();
     assert!(
         lines.iter().any(|line| line.starts_with(&format!(
-            "[supercov] strong pass: 0 of {to_run} mutants (0 killed, 0 timed out, 0 survived, 0 errors), "
+            "[supercov] strong pass: 0 of {to_run} mutants (0 killed, 0 timed out, 0 survived, 0 didn't compile, 0 errors), "
         )) && !line.contains(" left")),
         "{said}"
     );

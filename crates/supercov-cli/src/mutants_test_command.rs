@@ -2373,6 +2373,7 @@ impl Progress {
             // When the pass's first attempt with a mutant began: its pace is
             // measured from there, not from the command's start.
             let mut first_mutant_at = None;
+            let mut estimate = Estimate::default();
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(SAVE_INTERVAL.min(interval))
             {
@@ -2401,14 +2402,28 @@ impl Progress {
                         std::time::Duration::from_millis(now.saturating_sub(first))
                     });
                     let left = status.as_ref().and_then(|status| status.left_ms);
+                    let estimate =
+                        estimate.left(&verdicts, &costs, pace, std::time::Instant::now());
+                    let phase = std::fs::read_to_string(
+                        results.with_file_name(supercov_engine::strong_driver::PHASE),
+                    )
+                    .ok();
                     eprintln!(
                         "{}",
-                        progress_line(&verdicts, &costs, started.elapsed(), pace, left)
+                        progress_line(
+                            &verdicts,
+                            &costs,
+                            started.elapsed(),
+                            estimate,
+                            left,
+                            phase.as_deref().map(str::trim)
+                        )
                     );
                     let last = results
                         .parent()
                         .and_then(crate::strong_status::last_output_line);
-                    for line in crate::strong_status::lines(
+                    for line in start_up_lines(
+                        phase.as_deref(),
                         status.as_ref(),
                         now,
                         verdicts.len(),
@@ -2625,36 +2640,93 @@ fn progress_line(
     verdicts: &std::collections::BTreeMap<String, Verdict>,
     costs: &std::collections::BTreeMap<String, u64>,
     elapsed: std::time::Duration,
-    pace: std::time::Duration,
+    estimate: Option<std::time::Duration>,
     round_left: Option<u64>,
+    phase: Option<&str>,
 ) -> String {
-    let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
-    let spent = verdicts.keys().filter_map(|id| costs.get(id)).sum::<u64>();
+    // The pass's own mutants: a verdict of another (one the plan decided,
+    // found not to compile) is not one of the "of".
+    let decided = verdicts
+        .iter()
+        .filter(|(id, _)| costs.contains_key(*id))
+        .map(|(_, verdict)| verdict)
+        .collect::<Vec<_>>();
+    let count = |status: &str| decided.iter().filter(|v| v.status == status).count();
+    let doing = phase.map_or(String::new(), |phase| format!("; {phase}"));
     let left = if let Some(left) = round_left {
         format!(
             "; about {} left in this round",
             supercov_engine::process_supervision::format_duration(u128::from(left))
         )
-    } else if spent > 0 {
-        let all = costs.values().sum::<u64>();
-        let rest = pace.as_millis() * u128::from(all.saturating_sub(spent)) / u128::from(spent);
+    } else if let Some(left) = estimate {
         format!(
             "; about {} left",
-            supercov_engine::process_supervision::format_duration(rest)
+            supercov_engine::process_supervision::format_duration(left.as_millis())
         )
     } else {
         String::new()
     };
     format!(
-        "[supercov] strong pass: {} of {} mutants ({} killed, {} timed out, {} survived, {} errors), {}{left}",
-        verdicts.len(),
+        "[supercov] strong pass: {} of {} mutants ({} killed, {} timed out, {} survived, {} didn't compile, {} errors), {}{doing}{left}",
+        decided.len(),
         costs.len(),
         count("killed"),
         count("timeout"),
         count("survived"),
+        count("unviable"),
         count("error"),
         supercov_engine::process_supervision::format_duration(elapsed.as_millis()),
     )
+}
+
+/// The lines under the progress line: what the command's start-up says,
+/// unless the driver says what it is doing (`phase`), which stands for them
+/// -- a Rust pass building is not a command starting.
+fn start_up_lines(
+    phase: Option<&str>,
+    status: Option<&crate::strong_status::DriverStatus>,
+    now: u64,
+    decided: usize,
+    last: Option<&str>,
+) -> Vec<String> {
+    if phase.is_some() {
+        return Vec::new();
+    }
+    crate::strong_status::lines(status, now, decided, last)
+}
+
+/// The progress line's time left: the cost of the mutants left at the pace
+/// of the cost decided so far, its building and other waits included, made
+/// each time a mutant is decided and counted down between. Made again at
+/// every tick, as it was, it rose through every build and every slow
+/// mutant, as the time grew and the cost decided did not.
+#[derive(Default)]
+struct Estimate {
+    spent: u64,
+    made: Option<(std::time::Instant, std::time::Duration)>,
+}
+
+impl Estimate {
+    fn left(
+        &mut self,
+        verdicts: &std::collections::BTreeMap<String, Verdict>,
+        costs: &std::collections::BTreeMap<String, u64>,
+        pace: std::time::Duration,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let spent = verdicts.keys().filter_map(|id| costs.get(id)).sum::<u64>();
+        if spent > 0 && spent != self.spent {
+            self.spent = spent;
+            let all = costs.values().sum::<u64>();
+            let rest = pace.as_millis() * u128::from(all.saturating_sub(spent)) / u128::from(spent);
+            self.made = Some((
+                now,
+                std::time::Duration::from_millis(u64::try_from(rest).unwrap_or(u64::MAX)),
+            ));
+        }
+        self.made
+            .map(|(at, left)| left.saturating_sub(now.saturating_duration_since(at)))
+    }
 }
 
 /// How many passes `mutants test` makes at most: a pass that stopped early
@@ -5351,7 +5423,11 @@ mod tests {
     }
 
     /// The time left is the plan's estimate of the mutants left at the pace
-    /// so far, by cost: a few costly mutants do not swing it.
+    /// so far, by cost: a few costly mutants do not swing it. It is made as
+    /// mutants are decided and counts down between, so a build or a slow
+    /// mutant does not make it climb. The line counts the pass's own
+    /// mutants, those that did not compile among them, and says what the
+    /// driver is doing while it decides none.
     #[test]
     fn a_pass_s_time_left_is_its_cost_left_at_its_pace() {
         let verdict = |status: &str| Verdict {
@@ -5366,39 +5442,77 @@ mod tests {
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>();
         let elapsed = std::time::Duration::from_secs(20);
-        let none = progress_line(&Default::default(), &costs, elapsed, elapsed, None);
+        let none = progress_line(&Default::default(), &costs, elapsed, None, None, None);
         assert_eq!(
             none,
-            "[supercov] strong pass: 0 of 3 mutants (0 killed, 0 timed out, 0 survived, 0 errors), 20s"
+            "[supercov] strong pass: 0 of 3 mutants (0 killed, 0 timed out, 0 survived, 0 didn't compile, 0 errors), 20s"
+        );
+        let building = progress_line(
+            &Default::default(),
+            &costs,
+            elapsed,
+            None,
+            None,
+            Some("building 3 switched mutant(s) (build 1)"),
+        );
+        assert!(
+            building.ends_with("0 errors), 20s; building 3 switched mutant(s) (build 1)"),
+            "{building}"
         );
         let decided = [
             ("cheap", verdict("killed")),
-            ("also-cheap", verdict("survived")),
+            ("also-cheap", verdict("unviable")),
+            // Not one of the pass's: not counted.
+            ("decided-elsewhere", verdict("unviable")),
         ]
         .map(|(id, verdict)| (id.to_owned(), verdict))
         .into_iter()
-        .collect();
-        let line = progress_line(&decided, &costs, elapsed, elapsed, None);
-        assert!(
-            line.starts_with(
-                "[supercov] strong pass: 2 of 3 mutants (1 killed, 0 timed out, 1 survived, 0 errors), 20s; about "
-            ),
-            "{line}"
+        .collect::<std::collections::BTreeMap<_, _>>();
+        let mut estimate = Estimate::default();
+        let at = std::time::Instant::now();
+        // Nothing decided: no estimate yet.
+        assert_eq!(
+            estimate.left(&Default::default(), &costs, elapsed, at),
+            None
         );
-        assert!(line.ends_with(&format!(
-            "about {} left",
-            supercov_engine::process_supervision::format_duration(980_000)
-        )));
-        // Paced from the first mutant, 10 s in: the start-up is not the
-        // mutants' pace.
-        let paced = progress_line(&decided, &costs, elapsed, elapsed / 2, None);
-        assert!(paced.ends_with(&format!(
-            "about {} left",
-            supercov_engine::process_supervision::format_duration(490_000)
-        )));
+        // While the driver says what it does, the command's start-up lines
+        // are not said.
+        assert!(start_up_lines(Some("building"), None, 0, 0, None).is_empty());
+        assert_eq!(
+            start_up_lines(None, None, 0, 0, Some("compiling")),
+            crate::strong_status::lines(None, 0, 0, Some("compiling"))
+        );
+        let left = estimate.left(&decided, &costs, elapsed, at);
+        assert_eq!(left, Some(std::time::Duration::from_secs(980)));
+        let line = progress_line(&decided, &costs, elapsed, left, None, None);
+        assert_eq!(
+            line,
+            "[supercov] strong pass: 2 of 3 mutants (1 killed, 0 timed out, 0 survived, 1 didn't compile, 0 errors), 20s; about 16m20s left"
+        );
+        // A minute on, nothing more decided, the pace far worse: it counts
+        // down, it does not climb.
+        let later = at + std::time::Duration::from_secs(60);
+        assert_eq!(
+            estimate.left(&decided, &costs, elapsed * 10, later),
+            Some(std::time::Duration::from_secs(920))
+        );
+        // Made again once another mutant is decided: from the pace then.
+        let mut more = decided.clone();
+        more.insert("costly".into(), verdict("survived"));
+        assert_eq!(
+            estimate.left(&more, &costs, elapsed, later),
+            Some(std::time::Duration::ZERO)
+        );
         // The driver's count of the runs its round has left, where it says
         // one, before any verdict too.
-        let counted = progress_line(&Default::default(), &costs, elapsed, elapsed, Some(95_000));
+        let counted = progress_line(
+            &Default::default(),
+            &costs,
+            elapsed,
+            None,
+            Some(95_000),
+            None,
+        );
         assert!(
             counted.ends_with("0 errors), 20s; about 1m35s left in this round"),
             "{counted}"

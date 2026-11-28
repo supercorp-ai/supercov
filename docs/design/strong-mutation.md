@@ -457,6 +457,16 @@ cost of the mutants left, at the pace of the cost decided so far over the
 time it took. Counting mutants, the pass above said "37 of 2460 ... about
 458m left", the estimate swinging from 158 to 1,229 minutes as a few costly
 mutants ended.
+The estimate is made when a mutant is decided, from the pace then (the
+builds and other waits included), and counts down between: made again at
+every tick, it rose through each build and each slow mutant, as time grew and
+the cost decided did not (a Rust shard said "about 32s left", then 37 s, then
+42 s, 15 s apart, deciding nothing). The line counts the pass's own mutants
+(a mutant the plan decided that the build found not to compile is not one of
+its "of"), with a column for those that did not compile, and says what the
+driver is doing while it decides none (`building 53 switched mutant(s) (build
+2)`, `running each of 120 test(s) without a mutant first`), in place of the
+command's start-up lines.
 
 ## Order and early exit
 
