@@ -1191,11 +1191,23 @@ impl CargoTestWorkers {
     /// may read one as a template for its own. The stand-in wraps whatever
     /// configuration a test's `wrangler dev` is given, as it starts.
     pub fn prepare(workspace: &Path, tools: &Path) -> Result<Option<Self>, String> {
+        Self::prepare_on(
+            workspace,
+            tools,
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )
+    }
+
+    /// [`Self::prepare`], finding `wrangler` on `path`.
+    pub(crate) fn prepare_on(
+        workspace: &Path,
+        tools: &Path,
+        path: &std::ffi::OsStr,
+    ) -> Result<Option<Self>, String> {
         if worker_configs(workspace).is_empty() {
             return Ok(None);
         }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let Some(real) = on_path(&path, "wrangler") else {
+        let Some(real) = on_path(path, "wrangler") else {
             return Ok(None);
         };
         let supercov = crate::fault::io(
@@ -1208,7 +1220,7 @@ impl CargoTestWorkers {
         write_stand_in(tools, &supercov)?;
         let hook = write_hook(tools)?;
         let mut directories = vec![tools.to_owned()];
-        directories.extend(std::env::split_paths(&path));
+        directories.extend(std::env::split_paths(path));
         let joined = std::env::join_paths(directories).map_err(|error| error.to_string())?;
         Ok(Some(Self {
             environment: vec![
@@ -1341,7 +1353,13 @@ pub fn launch_wrangler(arguments: Vec<std::ffi::OsString>) -> i32 {
         return 127;
     };
     if let Some(build) = std::env::var_os(STRONG_WORKER_ENV) {
-        let arguments = strong_arguments(arguments, &build.to_string_lossy());
+        let arguments = strong_arguments(
+            arguments,
+            &build.to_string_lossy(),
+            &std::env::var(crate::rust_schemata::ACTIVE_MUTANT_ENV).unwrap_or_default(),
+            std::env::var_os(crate::strong_driver::STRONG_RESULTS).map(PathBuf::from),
+            &std::env::current_dir().unwrap_or_default(),
+        );
         return exec_wrangler(&real, &arguments, &[]);
     }
     let watched = watched_arguments(
@@ -1427,36 +1445,41 @@ WebAssembly.instantiate = async function (source, imports) {{
     )
 }
 
-/// The arguments a strong pass's `wrangler dev` gets: each configuration it
-/// reads wrapped, its `[build]` run once per switched build (`build`) and
-/// left out of the copy, its entry the switch module then the Worker's own;
-/// and an inspector port, through which a poller notes the mutant reached.
-/// Anything else wrangler is asked runs as asked.
+/// The arguments a strong pass's `wrangler dev` gets, started in `cwd`:
+/// each configuration it reads whose Worker the pass built for `build`
+/// ([`build_worker`]) is wrapped, without its `[build]`, its entry the
+/// switch module for mutant `named`, then the Worker's own; and an inspector
+/// port, through which a poller appends `named` to `<results>.reached` once
+/// the Worker says it ran it. A Worker the pass did not build is served as
+/// wrangler builds it, with no mutant: its tests are said not to reach the
+/// mutant. Anything else wrangler is asked runs as asked.
 fn strong_arguments(
     mut arguments: Vec<std::ffi::OsString>,
     build: &str,
+    named: &str,
+    results: Option<PathBuf>,
+    cwd: &Path,
 ) -> Vec<std::ffi::OsString> {
     if !starts_dev(&arguments) || runs_remote(&arguments) {
         return arguments;
     }
-    let named = std::env::var(crate::rust_schemata::ACTIVE_MUTANT_ENV).unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
     let environment = started_environment(&arguments);
     let mut written = Vec::new();
-    for (number, (slot, config)) in started_configs(&arguments, &cwd).into_iter().enumerate() {
-        if let Err(reason) = build_once(&config, build) {
-            eprintln!(
-                "[supercov] the Worker of {} did not build: {reason}",
-                config.display()
-            );
-            continue;
-        }
-        let Ok((copy, files)) = wrap_config_with(
-            &config,
-            environment.as_deref(),
-            number,
-            Some(&strong_switch_module(&named)),
-        ) else {
+    for (number, (slot, config)) in started_configs(&arguments, cwd).into_iter().enumerate() {
+        let marker = config.with_file_name(STRONG_BUILT_MARKER);
+        let built = fs::read_to_string(&marker).is_ok_and(|text| text == build);
+        let wrapped = built
+            .then(|| {
+                wrap_config_with(
+                    &config,
+                    environment.as_deref(),
+                    number,
+                    Some(&strong_switch_module(named)),
+                )
+                .ok()
+            })
+            .flatten();
+        let Some((copy, files)) = wrapped else {
             continue;
         };
         match slot {
@@ -1473,81 +1496,44 @@ fn strong_arguments(
     }
     // The reach poller: while this wrangler lives, it notes the mutant
     // reached beside the pass's results; then it removes the copies.
-    let results = std::env::var_os(crate::strong_driver::STRONG_RESULTS);
-    let port = named_inspector_port(&arguments).or_else(|| {
-        free_port().ok().inspect(|port| {
-            arguments.push("--inspector-port".into());
-            arguments.push(port.to_string().into());
-        })
+    let Some(results) = results else {
+        return arguments;
+    };
+    let port = named_inspector_port(&arguments).unwrap_or_else(|| {
+        let port = free_port().unwrap_or(0);
+        arguments.push("--inspector-port".into());
+        arguments.push(port.to_string().into());
+        port
     });
-    if let (Some(port), Some(results), Ok(supercov)) = (port, results, std::env::current_exe()) {
-        let mut reached = results;
-        reached.push(".reached");
-        let note = std::env::temp_dir().join(format!(
-            "supercov-worker-strong-{}.started",
-            std::process::id()
-        ));
-        let _ = fs::write(&note, json!({"written": written}).to_string());
-        let _ = std::process::Command::new(supercov)
+    let mut reached = results.into_os_string();
+    reached.push(".reached");
+    let note = std::env::temp_dir().join(format!(
+        "supercov-worker-strong-{}.started",
+        std::process::id()
+    ));
+    let _ = fs::write(&note, json!({"written": written}).to_string());
+    let poller = crate::fault::io(
+        "reach-executable",
+        std::io::ErrorKind::NotFound,
+        std::env::current_exe,
+    )
+    .and_then(|supercov| {
+        std::process::Command::new(supercov)
             .arg(WRANGLER_REACH_COMMAND)
             .arg(std::process::id().to_string())
             .arg(port.to_string())
-            .arg(reached)
-            .arg(&named)
+            .arg(&reached)
+            .arg(named)
             .arg(&note)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .launch();
-    }
+            .launch()
+    });
+    // No poller: nothing would remove the copies but the next pass's sync,
+    // and the mutant is said not reached.
+    drop(poller);
     arguments
-}
-
-/// Runs the `[build] command` of the configuration at `config` once for the
-/// switched build `build`, whichever of the tests running side by side gets
-/// there first; the others wait for it. The pass builds each Worker itself
-/// first ([`build_worker`]), so this is a fallback. A build whose builder is
-/// gone (a test that ended under it) is taken over. Where the configuration
-/// has no build, nothing runs.
-fn build_once(config: &Path, build: &str) -> Result<(), String> {
-    let directory = config.parent().unwrap_or(Path::new("."));
-    let marker = directory.join(STRONG_BUILT_MARKER);
-    let lock = directory.join(".supercov-strong-worker-build.lock");
-    let done = || fs::read_to_string(&marker).is_ok_and(|text| text == build);
-    let started = Instant::now();
-    loop {
-        if done() {
-            return Ok(());
-        }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(mut file) => {
-                let _ = write!(file, "{}", std::process::id());
-                break;
-            }
-            Err(_) => {
-                let builder = fs::read_to_string(&lock)
-                    .ok()
-                    .and_then(|text| text.trim().parse::<u32>().ok());
-                let gone = builder.is_some_and(|pid| !process_alive(pid));
-                if gone || started.elapsed() >= BUILD_PATIENCE {
-                    let _ = fs::remove_file(&lock);
-                } else {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-    }
-    let outcome = if done() {
-        Ok(())
-    } else {
-        build_worker(config, build, None)
-    };
-    let _ = fs::remove_file(&lock);
-    outcome
 }
 
 /// Marks a Worker's directory with the switched build it was built for.
@@ -1569,24 +1555,22 @@ pub(crate) fn build_worker(
         return fs::write(&marker, build).map_err(|error| format!("{}: {error}", marker.display()));
     };
     let rustflags = worker_rustflags(&std::env::var("RUSTFLAGS").unwrap_or_default());
-    let mut shell = if cfg!(windows) {
-        let mut shell = std::process::Command::new("cmd");
-        shell.arg("/C");
-        shell
-    } else {
-        let mut shell = std::process::Command::new("sh");
-        shell.arg("-c");
-        shell
-    };
+    #[cfg(windows)]
+    let mut shell = std::process::Command::new("cmd");
+    #[cfg(windows)]
+    shell.arg("/C");
+    #[cfg(not(windows))]
+    let mut shell = std::process::Command::new("sh");
+    #[cfg(not(windows))]
+    shell.arg("-c");
     shell
         .arg(&command)
         .current_dir(directory)
         .env("RUSTFLAGS", rustflags)
+        .envs(target.map(|target| ("CARGO_TARGET_DIR", target)))
         .stdin(std::process::Stdio::null());
-    if let Some(target) = target {
-        shell.env("CARGO_TARGET_DIR", target);
-    }
     let output = shell
+        // fault-site: rust-worker.build-worker
         .launch_output()
         .map_err(|error| format!("`{command}`: {error}"))?;
     if !output.status.success() {
@@ -1599,14 +1583,38 @@ pub(crate) fn build_worker(
     fs::write(&marker, build).map_err(|error| format!("{}: {error}", marker.display()))
 }
 
+/// What the tests of a strong pass's switched build are started with, where
+/// `root` holds a Rust Worker and `path` a `wrangler`: Supercov's
+/// `wrangler` first on the path, and the switched build's id `build`, so
+/// each test's `wrangler dev` serves the Worker the pass built for it with
+/// the test's mutant switched on ([`strong_arguments`]). Nothing where
+/// there is no Worker or no `wrangler`.
+pub(crate) fn strong_environment(
+    root: &Path,
+    tools: &Path,
+    path: &std::ffi::OsStr,
+    build: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let workers = CargoTestWorkers::prepare_on(root, tools, path)?;
+    Ok(workers
+        .iter()
+        .flat_map(|workers| {
+            workers
+                .environment()
+                .map(|(name, value)| (name.to_owned(), value.to_string_lossy().into_owned()))
+                .chain([(STRONG_WORKER_ENV.to_owned(), build.to_owned())])
+        })
+        .collect())
+}
+
+/// The names [`strong_environment`] sets.
+pub(crate) const STRONG_ENVIRONMENT: [&str; 4] =
+    ["PATH", REAL_WRANGLER, HOOK_ENV, STRONG_WORKER_ENV];
+
 /// The configurations of the Rust Workers under `root`.
 pub(crate) fn rust_worker_configs(root: &Path) -> Vec<PathBuf> {
     worker_configs(root)
 }
-
-/// How long a test waits for another's build of the Worker before taking it
-/// over: a release wasm build of a large Worker takes minutes.
-const BUILD_PATIENCE: Duration = Duration::from_secs(900);
 
 /// The reach poller a strong pass's `wrangler dev` leaves running.
 pub const WRANGLER_REACH_COMMAND: &str = "__wrangler-reach";
@@ -1661,96 +1669,72 @@ fn watch_reach(port: u16, named: &str, reached: &Path, stop: &AtomicBool) {
         let seen = reach_session(&mut socket, named, stop);
         let _ = socket.close(None);
         if seen {
-            if let Ok(mut file) =
-                fs::open_with(fs::OpenOptions::new().create(true).append(true), reached)
-            {
-                let _ = writeln!(file, "{named}");
-            }
+            let _ = fs::open_with(fs::OpenOptions::new().create(true).append(true), reached)
+                .and_then(|mut file| writeln!(file, "{named}"));
             return;
         }
     }
 }
 
-/// One inspector connection: whether the Worker said its mutant ran, by
-/// its log line or, for what it logged before this connection, by
-/// `globalThis.__supercovReached`, asked as each context appears.
+/// What the Worker is asked, now and then: a log sent while no one listened
+/// is not sent again.
+const REACHED_QUESTION: &str = "globalThis.__supercovReached ?? null";
+
+/// One inspector connection: whether the Worker said its mutant ran, by its
+/// log line or, for what it logged before this connection, by
+/// `globalThis.__supercovReached`, asked every 50 ms. A message that cannot
+/// be sent shows as the connection's end at the next read.
 fn reach_session(
     socket: &mut tungstenite::WebSocket<TcpStream>,
     named: &str,
     stop: &AtomicBool,
 ) -> bool {
     use tungstenite::{Error, Message};
-    let send = |socket: &mut tungstenite::WebSocket<TcpStream>, message: Value| {
-        socket.send(Message::text(message.to_string())).is_ok()
-    };
-    if !send(socket, json!({"id": 1, "method": "Runtime.enable"})) {
-        return false;
-    }
-    let mut next_id = 2_u64;
-    let mut asked = Instant::now();
-    let mut contexts = Vec::<i64>::new();
     let marker = format!("{REACHED_MARKER}{named}");
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return false;
-        }
-        // Asked again now and then: a log sent while no one listened is not
-        // sent again.
-        if asked.elapsed() >= Duration::from_millis(50)
-            && let Some(context) = contexts.last()
-        {
+    let ask = json!({"id": 2, "method": "Runtime.evaluate",
+        "params": {"expression": REACHED_QUESTION, "returnByValue": true}})
+    .to_string();
+    let _ = socket.send(Message::text(
+        json!({"id": 1, "method": "Runtime.enable"}).to_string(),
+    ));
+    let mut asked = Instant::now() - Duration::from_secs(1);
+    while !stop.load(Ordering::Acquire) {
+        if asked.elapsed() >= Duration::from_millis(50) {
             asked = Instant::now();
-            let request = json!({"id": next_id, "method": "Runtime.evaluate", "params": {
-                "expression": "globalThis.__supercovReached ?? null",
-                "contextId": context, "returnByValue": true}});
-            next_id += 1;
-            if !send(socket, request) {
-                return false;
-            }
+            let _ = socket.send(Message::text(ask.clone()));
         }
-        match socket.read() {
+        let message = match socket.read() {
             Ok(Message::Text(text)) => {
-                let Ok(message) = serde_json::from_str::<Value>(text.as_str()) else {
-                    continue;
-                };
-                match message.get("method").and_then(Value::as_str) {
-                    Some("Runtime.executionContextCreated") => {
-                        if let Some(id) = message["params"]["context"]["id"].as_i64() {
-                            contexts.push(id);
-                        }
-                    }
-                    Some("Runtime.executionContextDestroyed") => {
-                        if let Some(id) = message["params"]["executionContextId"].as_i64() {
-                            contexts.retain(|context| *context != id);
-                        }
-                    }
-                    Some("Runtime.executionContextsCleared") => contexts.clear(),
-                    Some("Runtime.consoleAPICalled") => {
-                        let said = message["params"]["args"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(|argument| argument["value"].as_str() == Some(marker.as_str()));
-                        if said {
-                            return true;
-                        }
-                    }
-                    _ => {}
-                }
-                if message["result"]["result"]["value"].as_str() == Some(named) {
-                    return true;
-                }
+                serde_json::from_str::<Value>(text.as_str()).unwrap_or_default()
             }
             Ok(Message::Close(_)) => return false,
-            Ok(_) => {}
+            Ok(_) => continue,
             Err(Error::Io(error))
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
+                ) =>
+            {
+                continue;
+            }
             Err(_) => return false,
+        };
+        if said_reached(&message, named, &marker) {
+            return true;
         }
     }
+    false
+}
+
+/// Whether an inspector message says the mutant ran: the switch module's
+/// log line, or its answer to [`REACHED_QUESTION`].
+fn said_reached(message: &Value, named: &str, marker: &str) -> bool {
+    let logged = message["params"]["args"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|argument| argument["value"].as_str() == Some(marker));
+    logged || message["result"]["result"]["value"].as_str() == Some(named)
 }
 
 /// How the real `wrangler` is started.
@@ -1992,10 +1976,10 @@ fn wrap_config_with(
         if let (Some(name), Some(_)) = (environment, &environment_main) {
             document["env"][name]["main"] = json!(entry);
         }
-        if strong.is_some()
-            && let Some(object) = document.as_object_mut()
-        {
-            object.remove("build");
+        if strong.is_some() {
+            let _ = document
+                .as_object_mut()
+                .and_then(|object| object.remove("build"));
         }
         serde_json::to_string_pretty(&document).expect("plain data serializes")
     };
@@ -2873,6 +2857,285 @@ mod tests {
             worker_build_line("./build.sh", &root.join("worker")).as_deref(),
             Some("worker-build --release --features audit")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A strong pass's `wrangler dev`: each configuration whose Worker the
+    /// pass built for this build is served through a copy with the switch
+    /// module and no `[build]`, wherever the command names it; one the pass
+    /// did not build, or one no copy can be made of, is left as it is.
+    /// Anything but a local `wrangler dev` runs as asked. With the pass's
+    /// results, an inspector port is named for the reach poller.
+    #[test]
+    fn a_strong_wrangler_dev_serves_the_worker_the_pass_built() {
+        let root = temporary("strong-arguments");
+        let worker = root.join("worker");
+        fs::create_dir_all(&worker).unwrap();
+        let config = worker.join("wrangler.toml");
+        fs::write(
+            &config,
+            "name = \"w\"\nmain = \"build/worker/shim.mjs\"\n\n[build]\ncommand = \"./build.sh\"\n",
+        )
+        .unwrap();
+        let words = |words: &[&str]| {
+            words
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        let strong = |arguments: Vec<std::ffi::OsString>| {
+            strong_arguments(arguments, "b1", "src/lib.rs#0", None, &worker)
+        };
+        let wrapped =
+            |argument: &std::ffi::OsString| argument.to_string_lossy().contains(WRAPPED_PREFIX);
+        // Not a local `wrangler dev`: as asked.
+        for asked in [words(&["deploy"]), words(&["dev", "--remote"])] {
+            assert_eq!(strong(asked.clone()), asked);
+        }
+        // Not built for this build: left as it is.
+        let port = words(&["dev", "--inspector-port", "9"]);
+        assert_eq!(strong(port.clone()), port);
+        fs::write(worker.join(STRONG_BUILT_MARKER), "b0").unwrap();
+        assert_eq!(strong(port.clone()), port);
+        // Built for it: the copy, wherever the configuration is named.
+        fs::write(worker.join(STRONG_BUILT_MARKER), "b1").unwrap();
+        let default = strong(port.clone());
+        assert_eq!(default[..3], port[..]);
+        assert_eq!(default[3], "--config");
+        let copy = fs::read_to_string(&default[4]).unwrap();
+        assert!(
+            !copy.contains("[build]") && !copy.contains("build.sh"),
+            "{copy}"
+        );
+        let named = config.display().to_string();
+        let after = strong(words(&["dev", "-c", &named]));
+        assert!(wrapped(&after[2]), "{after:?}");
+        let inline = strong(words(&["dev", &format!("--config={named}")]));
+        assert!(
+            inline[1].to_string_lossy().starts_with("--config=") && wrapped(&inline[1]),
+            "{inline:?}"
+        );
+        // One no copy can be made of (it names no `main`) is left.
+        let bare = worker.join("bare.toml");
+        fs::write(&bare, "name = \"w\"\n").unwrap();
+        let named_bare = bare.display().to_string();
+        assert_eq!(
+            strong(words(&["dev", "-c", &named_bare])),
+            words(&["dev", "-c", &named_bare])
+        );
+        // With the pass's results: an inspector port where none was named,
+        // and a poller, here one that cannot start; a named port is kept.
+        let results = Some(root.join("results.jsonl"));
+        let ported = crate::fault::during("reach-executable", || {
+            strong_arguments(
+                words(&["dev", "-c", &named]),
+                "b1",
+                "src/lib.rs#0",
+                results.clone(),
+                &worker,
+            )
+        });
+        assert_eq!(ported[3], "--inspector-port", "{ported:?}");
+        let kept = crate::fault::during("reach-executable", || {
+            strong_arguments(port.clone(), "b1", "src/lib.rs#0", results.clone(), &worker)
+        });
+        assert_eq!(kept[..3], port[..]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The pass builds a Worker by its configuration's `[build] command`,
+    /// with Cargo's output where it says, and marks it built for its build;
+    /// one with no build is marked as it is. A build that fails, cannot
+    /// start, or whose configuration does not read says why.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_is_built_by_its_build_command_and_marked() {
+        let root = temporary("build-worker");
+        let config = root.join("wrangler.toml");
+        let write = |command: &str| {
+            fs::write(
+                &config,
+                format!("name = \"w\"\nmain = \"m.mjs\"\n\n[build]\ncommand = \"{command}\"\n"),
+            )
+            .unwrap();
+        };
+        let marked = || fs::read_to_string(root.join(STRONG_BUILT_MARKER)).ok();
+        write("echo \\\"$CARGO_TARGET_DIR\\\" > target.txt");
+        build_worker(&config, "b1", Some(&root.join("wasm"))).unwrap();
+        assert_eq!(marked().as_deref(), Some("b1"));
+        assert_eq!(
+            fs::read_to_string(root.join("target.txt")).unwrap().trim(),
+            root.join("wasm").display().to_string()
+        );
+        build_worker(&config, "b2", None).unwrap();
+        assert_eq!(marked().as_deref(), Some("b2"));
+        write("echo broke >&2; exit 3");
+        let failed = build_worker(&config, "b3", None).unwrap_err();
+        assert!(failed.contains("failed: broke"), "{failed}");
+        assert_eq!(marked().as_deref(), Some("b2"));
+        let unstarted = crate::fault::during("spawn#rust-worker.build-worker", || {
+            build_worker(&config, "b3", None)
+        });
+        assert!(unstarted.is_err(), "{unstarted:?}");
+        fs::write(&config, "name = \"w\"\nmain = \"m.mjs\"\n").unwrap();
+        build_worker(&config, "b4", None).unwrap();
+        assert_eq!(marked().as_deref(), Some("b4"));
+        assert!(build_worker(&root.join("gone.toml"), "b5", None).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A strong pass's tests get Supercov's `wrangler` and the build's id
+    /// where the project has a Rust Worker and a `wrangler` is on the path;
+    /// nothing otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn a_strong_pass_serves_workers_only_where_wrangler_is() {
+        let root = temporary("strong-environment");
+        fs::create_dir_all(root.join("worker")).unwrap();
+        fs::write(root.join("worker/Cargo.toml"), "[package]\nname = \"w\"\n").unwrap();
+        fs::write(
+            root.join("worker/wrangler.toml"),
+            "main = \"m\"\n[build]\ncommand = \"worker-build\"\n",
+        )
+        .unwrap();
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("wrangler"), "#!/bin/sh\n").unwrap();
+        let tools = root.join("tools");
+        let served = strong_environment(&root, &tools, bin.as_os_str(), "b1").unwrap();
+        let names = served
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            STRONG_ENVIRONMENT.iter().all(|name| names.contains(name)),
+            "{served:?}"
+        );
+        assert!(served.contains(&(STRONG_WORKER_ENV.to_owned(), "b1".to_owned())));
+        assert!(
+            strong_environment(&root, &tools, std::ffi::OsStr::new(""), "b1")
+                .unwrap()
+                .is_empty()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The reach poller's arguments: five, the pid and port numbers. Once
+    /// its wrangler is gone it removes the copies its note lists, and the
+    /// note.
+    #[test]
+    fn the_reach_poller_reads_its_arguments_and_cleans_up() {
+        let os = |words: &[&str]| {
+            words
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(poll_reach(os(&["1", "2"])), 2);
+        assert_eq!(poll_reach(os(&["x", "2", "r", "n", "o"])), 2);
+        assert_eq!(poll_reach(os(&["1", "x", "r", "n", "o"])), 2);
+        let root = temporary("reach-poller");
+        let copy = root.join(format!("{WRAPPED_PREFIX}1-0.toml"));
+        fs::write(&copy, "").unwrap();
+        let note = root.join("note.started");
+        fs::write(&note, json!({"written": [copy]}).to_string()).unwrap();
+        // A pid no process has (the kernel's limit is lower), and a port
+        // nothing listens on.
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let code = poll_reach(os(&[
+            "2147483646",
+            &port.to_string(),
+            &root.join("results.reached").display().to_string(),
+            "src/lib.rs#0",
+            &note.display().to_string(),
+        ]));
+        assert_eq!(code, 0);
+        assert!(!copy.exists() && !note.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// An inspector message says the mutant ran by the switch module's log
+    /// line or by its answer to the question; nothing else does.
+    #[test]
+    fn the_worker_says_its_mutant_ran_by_its_log_or_its_answer() {
+        let named = "src/lib.rs#0";
+        let marker = format!("{REACHED_MARKER}{named}");
+        let logged =
+            json!({"method": "Runtime.consoleAPICalled", "params": {"args": [{"value": marker}]}});
+        let answered = json!({"id": 2, "result": {"result": {"value": named}}});
+        let other = json!({"id": 2, "result": {"result": {"value": null}}});
+        let other_log =
+            json!({"method": "Runtime.consoleAPICalled", "params": {"args": [{"value": "hello"}]}});
+        assert!(said_reached(&logged, named, &marker));
+        assert!(said_reached(&answered, named, &marker));
+        assert!(!said_reached(&other, named, &marker));
+        assert!(!said_reached(&other_log, named, &marker));
+    }
+
+    /// The reach poller watches the Worker's inspector: it asks, reads what
+    /// the Worker says, passes over what is no text or no JSON, and once the
+    /// Worker says its mutant ran notes it and ends. A connection that
+    /// closes, breaks or cannot become one is tried again until the stop.
+    #[test]
+    fn the_reach_poller_notes_the_mutant_the_worker_says_it_ran() {
+        let root = temporary("reach-watch");
+        let reached = root.join("results.reached");
+        let named = "src/lib.rs#0";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            // Not an inspector: the connection is dropped before any answer.
+            let (first, _) = listener.accept().unwrap();
+            drop(first);
+            // One that closes.
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            assert_eq!(receive(&mut socket)["method"], "Runtime.enable");
+            socket.close(None).unwrap();
+            while socket.read().is_ok() {}
+            // One that breaks.
+            let (stream, _) = listener.accept().unwrap();
+            let socket = tungstenite::accept(stream).unwrap();
+            drop(socket);
+            // One that answers.
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            assert_eq!(receive(&mut socket)["method"], "Runtime.enable");
+            let asked = receive(&mut socket);
+            assert_eq!(asked["params"]["expression"], REACHED_QUESTION);
+            socket
+                .send(tungstenite::Message::binary(vec![1, 2]))
+                .unwrap();
+            socket.send(tungstenite::Message::text("not json")).unwrap();
+            answer(
+                &mut socket,
+                json!({"id": 2, "result": {"result": {"value": null}}}),
+            );
+            answer(
+                &mut socket,
+                json!({"method": "Runtime.consoleAPICalled", "params": {"args": [{"value": format!("{REACHED_MARKER}{named}")}]}}),
+            );
+            while socket.read().is_ok() {}
+        });
+        watch_reach(port, named, &reached, &AtomicBool::new(false));
+        server.join().unwrap();
+        assert_eq!(fs::read_to_string(&reached).unwrap(), format!("{named}\n"));
+        // Nothing listening, until the stop.
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        let unused = free.local_addr().unwrap().port();
+        drop(free);
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Release);
+        });
+        let elsewhere = root.join("elsewhere.reached");
+        watch_reach(unused, named, &elsewhere, &stop);
+        stopper.join().unwrap();
+        assert!(!elsewhere.exists());
         let _ = fs::remove_dir_all(root);
     }
 
