@@ -203,7 +203,10 @@ speed. PIT's soundness violations are the same ones as before. The pass ran
 20,798 tests with a mutant on kotlinpoet against 32,125; its wall time did
 not show it on this run's runners, whose builds took a third longer than
 the last run's on the shards whose runs did not change (shard 6: the same
-303 runs, 81 s against 55 s).
+303 runs, 81 s against 55 s). The probes cost the measured run nothing
+that shows: timed on the same runner as the suite without Supercov, the
+measured run took 1.01 times as long (run 46151588241) against 1.04 times
+without them (run 46153211191, the commit before).
 
 ## Next
 
