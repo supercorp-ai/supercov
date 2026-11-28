@@ -3286,7 +3286,6 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// The runtime class compiles with the project's main sources, under the
     /// project's own `--release`: gson builds for Java 7, where a lambda or
     /// a method reference does not compile and the whole build failed.
@@ -3304,7 +3303,8 @@ mod tests {
                 number + 1
             );
         }
-=======
+    }
+
     /// A Maven module's output is carried to the next run with the digest of
     /// each of its sources; a source rewritten to the same bytes is dated
     /// before the copy, so Maven finds the carried classes current for it,
@@ -3362,7 +3362,6 @@ mod tests {
         assert!(modified("src/main/java/B.java") >= recent);
         assert!(modified("tool/src/main/java/T.java") >= recent);
         fs::remove_dir_all(&base).ok();
->>>>>>> 6b114fa8 (A Maven or Gradle run compiles only what changed since the copy's last run)
     }
 
     #[test]
