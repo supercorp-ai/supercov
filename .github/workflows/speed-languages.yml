@@ -16,7 +16,7 @@ concurrency:
 
 env:
   # A base ref to compare against, or empty to measure the head alone.
-  BASE_REF: '82864d95aebe619228cb1745196e93cf970a759a'
+  BASE_REF: '37a032fe8fc6e98fef5ee91c4eb20fc5c0a7b2f8'
   PROJECTS: '["python-jinja","go-cobra","ruby-rack"]'
 
 jobs:
