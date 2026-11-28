@@ -1893,6 +1893,64 @@ test("a snapshot's events kept as columns are what columnarEvents made of them",
   }
 });
 
+// A compact snapshot (coverageSnapshotColumns(true)), its ids numbered by
+// their prefixes and its vectors as text, read back as the engine reads it,
+// is the snapshot written out in full, byte for byte: points and decisions of
+// two tables, an id that is no probe's, logical selections, and decision
+// events with and without a phase.
+test("a compact snapshot read back is the snapshot written out in full", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    runtime.enableRuntimeSnapshotEvidence();
+    runtime.resetCoverage("compact");
+    const results = [[runtime.coverageSnapshotColumns(), runtime.coverageSnapshotColumns(true)]];
+    const one = runtime.registerProbeV2({ key: "00000000000000aa", points: 14, decisionWidths: [2, 1], selectionPoints: [8, 1] });
+    const two = runtime.registerProbeV2({ key: "00000000000000bb", points: 3, decisionWidths: [3] });
+    const scope = { version: 1, runId: "run", workerId: "w", testId: "t", testKey: "t", retry: 0, attemptId: "t-0" };
+    runtime.coverageHitV2(one, 12);
+    runtime.coverageHit("x:1:2");
+    runtime.withCoverageCarrier({ scope, phaseId: "first" }, () => {
+      runtime.coverageHitV2(two, 0);
+      runtime.mcdcEndV2(one, 0, 5, true);
+      runtime.mcdcEndV2(two, 0, 1, false);
+      runtime.selectShortV2(one, 8, 0, "or");
+    });
+    runtime.withCoverageCarrier({ scope, phaseId: "second" }, () => {
+      runtime.coverageHitV2(one, 7);
+      runtime.mcdcEndV2(one, 1, 2, true);
+      runtime.mcdcEndV2(one, 0, 5, true);
+      runtime.selectShortV2(one, 8, 1, "or");
+    });
+    results.push([runtime.coverageSnapshotColumns(), runtime.coverageSnapshotColumns(true)]);
+    console.log(JSON.stringify(results));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const results = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  const vector = (code) => {
+    if (typeof code !== "string") return code;
+    const at = code.lastIndexOf(":");
+    return { values: [...code.slice(0, at)].map((value) => (value === "-" ? null : value === "T")), outcome: code.slice(at + 1) === "T" };
+  };
+  const whole = ({ idPrefixes: prefixes, ...rest }) => {
+    const id = (reference) => (typeof reference === "number" ? `${prefixes[reference % prefixes.length]}${Math.floor(reference / prefixes.length)}` : reference);
+    const out = { ...rest };
+    out.decisions = rest.decisions.map((entry) => (Array.isArray(entry) ? { id: id(entry[0]), vectors: entry.slice(1).map(vector) } : entry));
+    out.hits = rest.hits.map(id);
+    out.logicals = rest.logicals.map((entry) => (Array.isArray(entry) ? { id: id(entry[0]), vectors: entry.slice(1).map((code) => ({ right: code[0] === "R", truthy: code[1] === "T" })) } : entry));
+    if (rest.eventColumns) out.eventColumns = { ...rest.eventColumns, vector: Object.fromEntries(Object.entries(rest.eventColumns.vector).map(([at, code]) => [at, vector(code)])) };
+    return out;
+  };
+  for (const [full, compact] of results) assert.equal(JSON.stringify(whole(compact)), JSON.stringify(full));
+  const [full, compact] = results[1];
+  // Numbered where it could be, and smaller.
+  assert.ok(compact.hits.some((hit) => typeof hit === "number") && compact.hits.includes("x:1:2"), JSON.stringify(compact));
+  assert.ok(compact.decisions.every(Array.isArray) && compact.logicals.every(Array.isArray), JSON.stringify(compact));
+  assert.ok(Object.values(compact.eventColumns.vector).every((code) => typeof code === "string"), JSON.stringify(compact));
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(full).length);
+});
+
 test("a process writing records writes each value its probes see once per context, after saying it records values", () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-server-values-"));
   try {

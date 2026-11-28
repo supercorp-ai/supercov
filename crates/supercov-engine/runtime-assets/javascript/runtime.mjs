@@ -544,13 +544,124 @@ function coverageSnapshot() {
     snapshot.comparisons = comparisonSnapshot();
   return snapshot;
 }
+// A probe's id as its table's prefix and its place: `~p<key>.<place>` and
+// `~d<key>.<place>`, the names probePlaceName makes. Any other id is kept
+// whole. Looked up once per id: a run names the same ids in every test.
+var compactIdPattern = /^(~[pd][0-9a-f]{16}\.)(0|[1-9][0-9]{0,8})$/;
+var compactIdParts = /* @__PURE__ */ new Map();
+function compactIdOf(id) {
+  let parts = compactIdParts.get(id);
+  if (parts === void 0) {
+    const match = typeof id === "string" ? compactIdPattern.exec(id) : null;
+    parts = match ? [match[1], Number(match[2])] : null;
+    compactIdParts.set(id, parts);
+  }
+  return parts;
+}
+// A decision vector's text, as vectorKey writes it (`T-F:T`), where it is a
+// vector of booleans and nulls with a boolean outcome; anything else stays
+// the object it is.
+function compactVector(vector, key) {
+  if (vector === null || typeof vector !== "object" || !Array.isArray(vector.values) || typeof vector.outcome !== "boolean")
+    return vector;
+  for (const value of vector.values) {
+    if (value !== true && value !== false && value !== null)
+      return vector;
+  }
+  const text = key !== void 0 ? key : vectorKey(vector);
+  return text === vectorKey(vector) ? text : vector;
+}
+// A snapshot's ids as numbers: each probe id `<prefix><place>` is
+// `place * P + k`, where `idPrefixes[k]` is its prefix and P how many
+// prefixes the snapshot names; every other id stays text. Decisions and
+// logical selections become arrays of their id and each vector's text (a
+// decision's `T-F:T`, a selection's `SF`, `ST`, `RF` or `RT`), and an
+// event's vector its text. The engine reads it back as exactly the snapshot
+// written out in full (coverage_report.rs, RuntimeSnapshotWire), which on a
+// large Vitest suite was more than twice the size.
+function compactSnapshot(snapshot) {
+  const prefixes = /* @__PURE__ */ new Map();
+  const note = (id) => {
+    const parts = compactIdOf(id);
+    if (parts !== null && !prefixes.has(parts[0]))
+      prefixes.set(parts[0], prefixes.size);
+  };
+  for (const id of snapshot.hits)
+    note(id);
+  for (const decision of state.decisions.values())
+    note(decision.id);
+  for (const id of state.logicals.keys())
+    note(id);
+  const count = prefixes.size;
+  const ref = (id) => {
+    const parts = compactIdOf(id);
+    if (parts === null)
+      return id;
+    const code = parts[1] * count + prefixes.get(parts[0]);
+    return Number.isSafeInteger(code) ? code : id;
+  };
+  const decisions = [];
+  for (const decision of state.decisions.values()) {
+    const entry = [ref(decision.id)];
+    let whole = false;
+    for (const [key, vector] of decision.vectors) {
+      const text = compactVector(vector, key);
+      if (typeof text !== "string") {
+        whole = true;
+        break;
+      }
+      entry.push(text);
+    }
+    decisions.push(whole ? { id: decision.id, vectors: [...decision.vectors.values()] } : entry);
+  }
+  const logicals = [];
+  for (const [id, vectors] of state.logicals) {
+    const entry = [ref(id)];
+    let whole = false;
+    for (const [key, vector] of vectors) {
+      if (vector === null || typeof vector !== "object" || typeof vector.right !== "boolean" || typeof vector.truthy !== "boolean" || key !== (vector.right ? "R" : "S") + (vector.truthy ? "T" : "F")) {
+        whole = true;
+        break;
+      }
+      entry.push(key);
+    }
+    logicals.push(whole ? { id, vectors: [...vectors.values()] } : entry);
+  }
+  // The snapshot's own keys, in its order, after the prefixes.
+  const compacted = { idPrefixes: [...prefixes.keys()] };
+  for (const key of Object.keys(snapshot)) {
+    if (key === "decisions")
+      compacted.decisions = decisions;
+    else if (key === "hits")
+      compacted.hits = snapshot.hits.map(ref);
+    else if (key === "logicals")
+      compacted.logicals = logicals;
+    else if (key === "eventColumns") {
+      const vectors = {};
+      for (const position of Object.keys(snapshot.eventColumns.vector))
+        vectors[position] = compactVector(snapshot.eventColumns.vector[position]);
+      compacted.eventColumns = { ...snapshot.eventColumns, vector: vectors };
+    } else
+      compacted[key] = snapshot[key];
+  }
+  return compacted;
+}
 // coverageSnapshot as snapshots.mjs's columnarEvents gives it, built from the
 // columns the events are kept in rather than from an object per event.
-function coverageSnapshotColumns() {
+// `compact` writes its ids and vectors as compactSnapshot does: what a
+// runner's process writes to the evidence itself (vitest.mjs). A page's
+// snapshot, which the Playwright collector reads and merges, stays whole.
+function coverageSnapshotColumns(compact = false) {
+  const snapshot = wholeSnapshotColumns(compact);
+  return compact ? compactSnapshot(snapshot) : snapshot;
+}
+// `compact` leaves the decisions and logical selections to compactSnapshot,
+// which reads them from the state.
+function wholeSnapshotColumns(compact) {
   const log = state.eventLog;
-  const decisions = decisionSnapshot();
+  const decisions = compact ? [] : decisionSnapshot();
   const hits = [...state.hits];
-  const logicals = logicalSnapshot();
+  const logicals = compact ? [] : logicalSnapshot();
   // The comparisons go with the columns as with the objects: a snapshot
   // without them reads as if no comparison ran.
   const comparisons = state.comparisons.size ? { comparisons: comparisonSnapshot() } : {};

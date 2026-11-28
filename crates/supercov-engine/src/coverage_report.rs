@@ -247,16 +247,20 @@ pub struct RuntimeSnapshot {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeSnapshotWire {
+    /// The prefixes a compact snapshot's numbered ids are made of (see
+    /// [`IdRef`]). A snapshot written out in full has none.
     #[serde(default)]
-    decisions: Vec<DecisionSnapshot>,
+    id_prefixes: Option<Vec<String>>,
     #[serde(default)]
-    hits: Vec<String>,
+    decisions: Vec<DecisionWire>,
+    #[serde(default)]
+    hits: Vec<IdRef>,
     #[serde(default)]
     events: Vec<RuntimeEvent>,
     #[serde(default)]
     event_columns: Option<EventColumns>,
     #[serde(default)]
-    logicals: Vec<LogicalSnapshot>,
+    logicals: Vec<LogicalWire>,
     #[serde(default)]
     comparisons: Vec<ComparisonSnapshot>,
     #[serde(default)]
@@ -284,7 +288,7 @@ struct EventColumns {
     environment: Vec<usize>,
     t: Vec<i64>,
     #[serde(default)]
-    vector: BTreeMap<usize, McdcVector>,
+    vector: BTreeMap<usize, VectorWire>,
 }
 
 /// An event's id as a column holds it: written out, or the position of the
@@ -378,7 +382,7 @@ impl EventColumns {
             events.push(RuntimeEvent {
                 event_type,
                 id,
-                vector: vectors.remove(&index),
+                vector: vectors.remove(&index).map(VectorWire::decode).transpose()?,
                 timestamp_ms: timestamp,
                 phase_id,
                 environment,
@@ -395,17 +399,310 @@ impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
     type Error = String;
 
     fn try_from(wire: RuntimeSnapshotWire) -> Result<Self, Self::Error> {
+        let prefixes = wire.id_prefixes.unwrap_or_default();
+        let id = |reference: IdRef| reference.decode(&prefixes);
+        let hits = wire.hits.into_iter().map(id).collect::<Result<Vec<_>, _>>()?;
+        let decisions = wire
+            .decisions
+            .into_iter()
+            .map(|decision| match decision {
+                DecisionWire::Whole(decision) => Ok(decision),
+                DecisionWire::Compact(reference, codes) => Ok(DecisionSnapshot {
+                    id: id(reference)?,
+                    vectors: codes
+                        .iter()
+                        .map(|code| decode_vector(code.as_str()))
+                        .collect::<Result<_, _>>()?,
+                }),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let logicals = wire
+            .logicals
+            .into_iter()
+            .map(|logical| match logical {
+                LogicalWire::Whole(logical) => Ok(logical),
+                LogicalWire::Compact(reference, codes) => Ok(LogicalSnapshot {
+                    id: id(reference)?,
+                    vectors: codes
+                        .iter()
+                        .map(|code| decode_logical(code.as_str()))
+                        .collect::<Result<_, _>>()?,
+                }),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut events = wire.events;
         if let Some(columns) = wire.event_columns {
-            events.extend(columns.decode(&wire.hits)?);
+            events.extend(columns.decode(&hits)?);
         }
         Ok(Self {
-            decisions: wire.decisions,
-            hits: wire.hits,
+            decisions,
+            hits,
             events,
-            logicals: wire.logicals,
+            logicals,
             comparisons: wire.comparisons,
             phase_id: wire.phase_id,
+        })
+    }
+}
+
+/// An id as a compact snapshot holds it: written out, or the number
+/// `place * P + k` of a probe id `<prefix><place>`, where `idPrefixes[k]` is
+/// its prefix and P how many prefixes the snapshot names. The runtime writes
+/// the place in its decimal form, so the id read back is the id it recorded.
+enum IdRef {
+    Text(String),
+    Code(u64),
+}
+
+impl IdRef {
+    fn decode(self, prefixes: &[String]) -> Result<String, String> {
+        match self {
+            Self::Text(text) => Ok(text),
+            Self::Code(code) => {
+                let count = prefixes.len() as u64;
+                if count == 0 {
+                    return Err("a numbered id in a snapshot that names no id prefix".into());
+                }
+                let prefix = &prefixes[(code % count) as usize];
+                Ok(format!("{prefix}{}", code / count))
+            }
+        }
+    }
+}
+
+/// Written out, or numbered.
+#[cfg(test)]
+impl schemars::JsonSchema for IdRef {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "IdRef".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [generator.subschema_for::<String>(), generator.subschema_for::<u64>()]
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for IdRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = IdRef;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an id or its number")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<IdRef, E> {
+                Ok(IdRef::Text(value.to_owned()))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<IdRef, E> {
+                Ok(IdRef::Text(value))
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<IdRef, E> {
+                Ok(IdRef::Code(value))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// A decision vector as `vectorKey` writes it: a character per condition
+/// (`T` true, `F` false, `-` not evaluated), a colon, and the outcome.
+fn decode_vector(code: &str) -> Result<McdcVector, String> {
+    let invalid = || format!("an invalid decision vector `{code}`");
+    let (values, outcome) = code.rsplit_once(':').ok_or_else(invalid)?;
+    let outcome = match outcome {
+        "T" => true,
+        "F" => false,
+        _ => return Err(invalid()),
+    };
+    let values = values
+        .chars()
+        .map(|value| match value {
+            'T' => Ok(Some(true)),
+            'F' => Ok(Some(false)),
+            '-' => Ok(None),
+            _ => Err(invalid()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(McdcVector { values, outcome })
+}
+
+/// A selection's outcome: which side gave the value (`S` short, `R` right)
+/// and whether it was truthy (`T`, `F`).
+fn decode_logical(code: &str) -> Result<LogicalVector, String> {
+    let right = match code.as_bytes() {
+        [b'S', _] => false,
+        [b'R', _] => true,
+        _ => return Err(format!("an invalid selection outcome `{code}`")),
+    };
+    let truthy = match code.as_bytes()[1] {
+        b'T' => true,
+        b'F' => false,
+        _ => return Err(format!("an invalid selection outcome `{code}`")),
+    };
+    Ok(LogicalVector { right, truthy })
+}
+
+/// A decision as a snapshot holds it: written out, or, in a compact
+/// snapshot, as an array of its id and each vector's text.
+enum DecisionWire {
+    Whole(DecisionSnapshot),
+    Compact(IdRef, Vec<String>),
+}
+
+/// A logical selection as a snapshot holds it: written out, or as an array
+/// of its id and each outcome's text.
+enum LogicalWire {
+    Whole(LogicalSnapshot),
+    Compact(IdRef, Vec<String>),
+}
+
+/// A decision event's vector: written out, or its text.
+enum VectorWire {
+    Whole(McdcVector),
+    Code(String),
+}
+
+impl VectorWire {
+    fn decode(self) -> Result<McdcVector, String> {
+        match self {
+            Self::Whole(vector) => Ok(vector),
+            Self::Code(code) => decode_vector(&code),
+        }
+    }
+}
+
+/// An array of an id and the texts after it, as a compact snapshot writes a
+/// decision or a selection.
+fn compact_entry<'de, A: serde::de::SeqAccess<'de>>(
+    mut sequence: A,
+) -> Result<(IdRef, Vec<String>), A::Error> {
+    let id = sequence
+        .next_element::<IdRef>()?
+        .ok_or_else(|| serde::de::Error::invalid_length(0, &"an id and its vectors"))?;
+    let mut codes = Vec::new();
+    while let Some(code) = sequence.next_element::<String>()? {
+        codes.push(code);
+    }
+    Ok((id, codes))
+}
+
+impl<'de> Deserialize<'de> for DecisionWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = DecisionWire;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a decision, or an array of its id and vectors")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<DecisionWire, A::Error> {
+                DecisionSnapshot::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(DecisionWire::Whole)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                sequence: A,
+            ) -> Result<DecisionWire, A::Error> {
+                compact_entry(sequence).map(|(id, codes)| DecisionWire::Compact(id, codes))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for LogicalWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = LogicalWire;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a selection, or an array of its id and outcomes")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<LogicalWire, A::Error> {
+                LogicalSnapshot::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(LogicalWire::Whole)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                sequence: A,
+            ) -> Result<LogicalWire, A::Error> {
+                compact_entry(sequence).map(|(id, codes)| LogicalWire::Compact(id, codes))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for VectorWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = VectorWire;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a decision vector, or its text")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<VectorWire, A::Error> {
+                McdcVector::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(VectorWire::Whole)
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<VectorWire, E> {
+                Ok(VectorWire::Code(value.to_owned()))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Written out, or as an array of the id and each vector's text.
+#[cfg(test)]
+impl schemars::JsonSchema for DecisionWire {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DecisionWire".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                generator.subschema_for::<DecisionSnapshot>(),
+                {"type": "array", "items": generator.subschema_for::<IdRef>()}
+            ]
+        })
+    }
+}
+
+/// Written out, or as an array of the id and each outcome's text.
+#[cfg(test)]
+impl schemars::JsonSchema for LogicalWire {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LogicalWire".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                generator.subschema_for::<LogicalSnapshot>(),
+                {"type": "array", "items": generator.subschema_for::<IdRef>()}
+            ]
+        })
+    }
+}
+
+/// Written out, or as its text.
+#[cfg(test)]
+impl schemars::JsonSchema for VectorWire {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "VectorWire".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [generator.subschema_for::<McdcVector>(), generator.subschema_for::<String>()]
         })
     }
 }
@@ -4743,6 +5040,39 @@ mod tests {
         assert_eq!(again.comparisons, read.comparisons);
         let plain = serde_json::to_string(&RuntimeSnapshot::default()).unwrap();
         assert!(!plain.contains("comparisons"), "{plain}");
+    }
+
+    /// A compact snapshot (runtime.mjs, compactSnapshot) reads as the
+    /// snapshot written out in full: its numbered ids, its decisions' and
+    /// selections' arrays and its events' vector texts.
+    #[test]
+    fn a_compact_snapshot_reads_as_the_snapshot_written_out() {
+        let whole: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[{"id":"~d00000000000000aa.3","vectors":[{"values":[true,null,false],"outcome":true},{"values":[],"outcome":false}]},{"id":"plain","vectors":[]}],"hits":["~p00000000000000aa.12","~p00000000000000bb.0","x:1:2","~p00000000000000aa.7"],"logicals":[{"id":"~p00000000000000bb.4","vectors":[{"right":false,"truthy":false},{"right":true,"truthy":true},{"right":false,"truthy":true},{"right":true,"truthy":false}]}],"eventColumns":{"types":["hit","decision"],"phases":["p:1"],"environments":["server"],"id":[0,"~d00000000000000aa.3",3],"type":[0,1,0],"phase":[0,0,-1],"environment":[0,0,0],"t":[5,1,1],"vector":{"1":{"values":[true,null,false],"outcome":true}}}}"#).unwrap();
+        // Three prefixes: `aa` points 0, `bb` points 1, `aa` decisions 2.
+        let compact: RuntimeSnapshot = serde_json::from_str(r#"{"idPrefixes":["~p00000000000000aa.","~p00000000000000bb.","~d00000000000000aa."],"decisions":[[11,"T-F:T",":F"],["plain"]],"hits":[36,1,"x:1:2",21],"logicals":[[13,"SF","RT","ST","RF"]],"eventColumns":{"types":["hit","decision"],"phases":["p:1"],"environments":["server"],"id":[0,"~d00000000000000aa.3",3],"type":[0,1,0],"phase":[0,0,-1],"environment":[0,0,0],"t":[5,1,1],"vector":{"1":"T-F:T"}}}"#).unwrap();
+        assert_eq!(compact, whole);
+        // Either form of each may stand beside the other.
+        let mixed: RuntimeSnapshot = serde_json::from_str(r#"{"idPrefixes":["~p00000000000000aa.","~p00000000000000bb.","~d00000000000000aa."],"decisions":[{"id":"~d00000000000000aa.3","vectors":[{"values":[true,null,false],"outcome":true},{"values":[],"outcome":false}]},["plain"]],"hits":["~p00000000000000aa.12",1,"x:1:2",21],"logicals":[{"id":"~p00000000000000bb.4","vectors":[{"right":false,"truthy":false},{"right":true,"truthy":true},{"right":false,"truthy":true},{"right":true,"truthy":false}]}],"eventColumns":{"types":["hit","decision"],"phases":["p:1"],"environments":["server"],"id":[0,"~d00000000000000aa.3",3],"type":[0,1,0],"phase":[0,0,-1],"environment":[0,0,0],"t":[5,1,1],"vector":{"1":{"values":[true,null,false],"outcome":true}}}}"#).unwrap();
+        assert_eq!(mixed, whole);
+        // A number with no prefixes to read it by, and texts that are no
+        // vector or outcome, are refused.
+        for refused in [
+            r#"{"hits":[3]}"#,
+            r#"{"idPrefixes":[],"hits":[0]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"decisions":[[0,"TX:T"]]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"decisions":[[0,"T"]]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"decisions":[[0,"T:"]]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"decisions":[[]]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"logicals":[[0,"XT"]]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"logicals":[[0,"RTT"]]}"#,
+            r#"{"idPrefixes":["~p00000000000000aa."],"hits":[-1]}"#,
+            r#"{"eventColumns":{"types":["decision"],"phases":[],"environments":["server"],"id":["d"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"0":"TT"}}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<RuntimeSnapshot>(refused).is_err(),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

@@ -62,7 +62,7 @@ function writeEvidence(payload) {
 // there at the next test's start, or at the file's end, is that work.
 const fileWork = new Map();
 function writeFileWork(file, testFile, title) {
-    const snapshot = runtime.coverageSnapshotColumns();
+    const snapshot = runtime.coverageSnapshotColumns(true);
     if (!snapshot.hits.length && !snapshot.decisions.length)
         return;
     const nth = (fileWork.get(file.id) ?? 0) + 1;
@@ -117,7 +117,7 @@ beforeEach((context) => {
     if (!emittedSetupFiles.has(testFile)) {
         emittedSetupFiles.add(testFile);
         // The snapshot as its evidence carries it, its events as columns.
-        const setupSnapshot = runtime.coverageSnapshotColumns();
+        const setupSnapshot = runtime.coverageSnapshotColumns(true);
         if (setupSnapshot.hits.length || setupSnapshot.decisions.length) {
             writeEvidence({
                 testId: `vitest:${task.file.id}:setup`,
@@ -191,7 +191,7 @@ afterEach((context) => {
         // Its events as columns, as Playwright's are written: a test's first
         // hits written as objects repeated every key and phase for each, and
         // serializing them was most of what a test's teardown cost.
-        runtime: [runtime.coverageSnapshotColumns()],
+        runtime: [runtime.coverageSnapshotColumns(true)],
         browser: [],
         server: [],
     };

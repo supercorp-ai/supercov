@@ -152,6 +152,31 @@ answers.test = {};
 if (!quick || tests.size <= 300)
   for (const test of [...tests].sort()) answers.test[test] = query(['test', test, '--limit', '0']);
 
+// A snapshot written compact (runtime.mjs, compactSnapshot) as the snapshot
+// written out in full, which is how the engine reads it: a run of either
+// form gives the same records.
+function wholeVector(code) {
+  if (typeof code !== 'string') return code;
+  const at = code.lastIndexOf(':');
+  return { values: [...code.slice(0, at)].map((value) => (value === '-' ? null : value === 'T')), outcome: code.slice(at + 1) === 'T' };
+}
+function wholeSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.idPrefixes)) return snapshot;
+  const { idPrefixes: prefixes, ...rest } = snapshot;
+  const id = (reference) => (typeof reference === 'number' ? `${prefixes[reference % prefixes.length]}${Math.floor(reference / prefixes.length)}` : reference);
+  const whole = { ...rest };
+  if (rest.decisions) whole.decisions = rest.decisions.map((entry) => (Array.isArray(entry) ? { id: id(entry[0]), vectors: entry.slice(1).map(wholeVector) } : entry));
+  if (rest.hits) whole.hits = rest.hits.map(id);
+  if (rest.logicals) whole.logicals = rest.logicals.map((entry) => (Array.isArray(entry) ? { id: id(entry[0]), vectors: entry.slice(1).map((code) => ({ right: code[0] === 'R', truthy: code[1] === 'T' })) } : entry));
+  if (rest.eventColumns?.vector) whole.eventColumns = { ...rest.eventColumns, vector: Object.fromEntries(Object.entries(rest.eventColumns.vector).map(([position, vector]) => [position, wholeVector(vector)])) };
+  return whole;
+}
+function wholeRecord(record) {
+  if (!record || typeof record !== 'object') return record;
+  for (const kind of ['runtime', 'browser']) if (Array.isArray(record[kind])) record[kind] = record[kind].map(wholeSnapshot);
+  return record;
+}
+
 // The evidence, entry by entry: a JSON Lines entry as its set of records.
 answers.evidence = {};
 for (const { path, text } of entries) {
@@ -162,7 +187,7 @@ for (const { path, text } of entries) {
     .replace(/^server\/background\/process-.*\.jsonl$/, 'server/background/process.jsonl')
     .replace(/^playwright-(worker|status)-.*\.mcdc\.jsonl$/, 'playwright-$1.mcdc.jsonl')
     .replace(/^node_test-.*\.mcdc\.jsonl$/, 'node_test.mcdc.jsonl');
-  if (/\.jsonl$/.test(path)) (answers.evidence[name] ??= []).push(...text.split('\n').filter(Boolean).map((line) => JSON.parse(line)));
+  if (/\.jsonl$/.test(path)) (answers.evidence[name] ??= []).push(...text.split('\n').filter(Boolean).map((line) => wholeRecord(JSON.parse(line))));
   else (answers.evidence[name] ??= []).push(/\.json$/.test(path) ? JSON.parse(text) : text);
 }
 writeFileSync(out, `${JSON.stringify(scrub(answers), null, 1)}\n`);

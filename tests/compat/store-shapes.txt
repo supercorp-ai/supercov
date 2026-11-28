@@ -218,6 +218,8 @@ type DecisionSnapshot, read = closed {
   vectors: [McdcVector]
 }
 
+type DecisionWire, read = DecisionSnapshot | [IdRef]
+
 type EntryHeader, written and read = closed {
   path: string
   bytes: uint
@@ -232,7 +234,7 @@ type EventColumns, read = closed {
   phase: [int]
   environment: [uint]
   t: [int]
-  vector?: {uint: McdcVector}
+  vector?: {uint: VectorWire}
 }
 
 type EventId, read = string | uint
@@ -391,6 +393,8 @@ type GitIntegrity, written and read = closed {
   dirty: boolean
 }
 
+type IdRef, read = string | uint
+
 type InputManifest, written and read = closed {
   schemaVersion: uint
   language: string
@@ -434,6 +438,8 @@ type LogicalVector, written and read = closed {
   right: boolean
   truthy: boolean
 }
+
+type LogicalWire, read = LogicalSnapshot | [IdRef]
 
 type ManifestCache, written = closed {
   evidenceDigest: string
@@ -665,11 +671,12 @@ type RuntimeSnapshot, written = closed {
 }
 
 type RuntimeSnapshot, read = closed {
-  decisions?: [DecisionSnapshot]
-  hits?: [string]
+  idPrefixes?: [string] | null
+  decisions?: [DecisionWire]
+  hits?: [IdRef]
   events?: [RuntimeEvent]
   eventColumns?: EventColumns | null
-  logicals?: [LogicalSnapshot]
+  logicals?: [LogicalWire]
   comparisons?: [ComparisonSnapshot]
   phaseId?: string | null
 }
@@ -758,6 +765,8 @@ type Unit, written and read = closed {
   parent?: uint | null
   inert?: boolean
 }
+
+type VectorWire, read = McdcVector | string
 
 type Verdict, written = {
   status: string
