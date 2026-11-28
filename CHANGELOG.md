@@ -18,7 +18,7 @@
 
 **Changed**
 
-- A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass took 68 s where it took 120 s, with every verdict the same.
+- A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass takes 70 s where it took 121 s, with every verdict the same.
 
 ## 4.29.19
 
