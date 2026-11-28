@@ -141,3 +141,16 @@ refuses a switch in, the build again without it), and each shard measures
 and baselines the whole suite. Per shard the JVMs are busy for about 67 s
 of a 145 s strong pass. Survivors every test reaches (22 mutants with 857
 candidates each) are more than half the runs with a mutant.
+
+### 5. Later candidates in batches (rejected)
+
+Past a mutant's first four candidates, the rest ran in batches of up to 64,
+one JUnit Platform request each, the first failing test of a batch
+confirmed alone. It changed a verdict: commons-cli's
+`DefaultParser.java:711` (`VoidMethodCall`) went from `survived` to
+`killed`, a test that passes alone failing in a batch (a class's setup runs
+once for the batch, and the batch's order is the engine's, not the
+candidates'). Nor was it faster: a batch runs every test in it past the one
+that kills, and the runs with a mutant rose from 6,534 to 9,406 on
+commons-cli and from 32,839 to 43,832 on kotlinpoet (run 46096323495).
+Dropped.
