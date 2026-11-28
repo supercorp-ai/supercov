@@ -48,6 +48,11 @@ adapter setup, instrumented build, test command, evidence publication.
 | 1 | Go: test packages write evidence to a path stable across runs | test command gin 2.27→1.07 s and 1.90→0.75 s, cobra 1.16→0.49 s and 1.64→0.71 s; answers identical on cobra; gin differs as much between two base runs | Kept (PR #362) | Each run's path was compiled into every test file, so Go rebuilt every package with tests and relinked every test binary |
 | 2 | Ruby: a decision evaluation already recorded in the context returns at once | rack test command 6.51→6.26 s and 6.68→6.42 s (4%); answers identical | Kept, small | The rest of rack's cost is per test, not per probe |
 | 3 | Go: instrumented copy run by plain `go test` | 0.96 s against 0.86 s plain on gin | Measurement | Probes cost about 12%; the other ~0.8 s is Supercov's phases around the command |
+| 4 | Ruby: batch decision vectors into one record per context and boundary | with 2 and 5: rack test command 6.54→5.75 s, total 2.25×→2.03×; full answers identical | Kept (PR #367) | Each new vector was a record of its own through the pure-Ruby encoder |
+| 5 | Ruby: an open condition evaluation as two integers, not a hash and an array | (in 4) | Kept (PR #367) | Garbage collection was a third of the test process's samples |
+| 6 | Ruby: arrival states by context | not measured apart | Kept (PR #367) | The table grew with every phase and was scanned whole at each phase's end |
+| 7 | JVM: carry each module's build output to the next run; date sources rewritten to the same bytes before it; stable evidence directory | commons-cli 1.48×→1.14× (test command 8.37→6.29 s); answers identical | Kept (PR #368) | Every run compiled every module again |
+| 8 | JVM: the runtime class compiles for Java 7 | gson measurable at all | Kept (PR #364) | Two lambdas, `Map.merge`, and generic calls Java 7 cannot infer in a conditional |
 
 ## Bugs found while measuring
 
