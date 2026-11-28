@@ -14,6 +14,10 @@
 - Jobs of a split strong pass now each run their own mutants, and `supercov merge` holds every verdict they reached between them. Each job dealt its share from its own measurement, by what each mutant's candidates cost and which mutants its plan decided; where a suite covers a little differently from run to run (randomized inputs, timing), the jobs dealt differently, so some mutants ran in two jobs and others in none, and the merged totals came out well under the jobs' totals added up (never a wrong verdict). A mutant's share now follows from its id alone, the same on every machine, decided mutants included.
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
 
+**Changed**
+
+- A Maven or Gradle run compiles only what changed since the last run, as the project's own build does. Each run refreshed its copy of the project and rewrote every source with probes, so Maven compiled every module again. The copy now keeps each module's build output, and a source the instrumentation rewrites to the bytes the last run compiled keeps a time before that output; the run's evidence directory is the same for every run of a copy, so the test configuration that names it is too. apache/commons-cli on an Actions runner: plain `mvn test` 6.1 s, measured 9.0 s before and 6.9 s after.
+
 ## 4.29.19
 
 **Fixed**
