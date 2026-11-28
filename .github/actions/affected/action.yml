@@ -3,7 +3,8 @@ description: >-
   Which of this workflow's jobs a pull request's change can affect, from
   Supercov's own `tests affected` over the Self Coverage run of the newest
   commit the pull request descends from (the map, kept by self-coverage.yml
-  on every push to main and every full run by hand). Every job runs in full on a push,
+  on main every three hours and by every full run by hand; the tests of
+  every file changed since its commit run too). Every job runs in full on a push,
   a run by hand, a release pull request, a change to how CI runs, and
   whenever there is no map or its answer cannot be trusted. Needs a checkout
   with full history and `actions: read`. The reasons go to the step summary;
@@ -57,9 +58,9 @@ runs:
         [ "$mode" = map ] || exit 0
         base="${AFFECTED_BASE:-$(git rev-parse HEAD^1)}"
         # The newest Self Coverage run whose commit the base holds, with its
-        # map kept (every push to main keeps one, and so does a full run by
-        # hand): the commits between are ones the map does not know, and
-        # `tests affected` reads them as changes.
+        # map kept (main's run every three hours keeps one, and so does a
+        # full run by hand): the commits between are ones the map does not
+        # know, and `tests affected` reads them as changes.
         found=""
         while read -r id sha; do
           [ -n "$id" ] || continue
@@ -85,6 +86,14 @@ runs:
         chmod +x "$RUNNER_TEMP/map/supercov"
         echo "run=$(cat "$RUNNER_TEMP/map/merged-id")" >> "$GITHUB_OUTPUT"
         echo "MAP_SHA=$sha" >> "$GITHUB_ENV"
+        # Every file changed since the map's commit, the pull request's
+        # among them: the map, measured on a schedule, can be a few merges
+        # old, and a test written in one of these is in no map
+        # (scripts/ci-affected.mjs unmapped).
+        since="$RUNNER_TEMP/since-map.txt"
+        git diff --name-only "$sha" HEAD > "$since" || rm -f "$since"
+        echo "SINCE_MAP=$since" >> "$GITHUB_ENV"
+        echo "Changed since the map: $(wc -l < "$since" 2>/dev/null || echo '?') file(s)."
     - name: Ask the map
       if: steps.map.outputs.run != ''
       shell: bash

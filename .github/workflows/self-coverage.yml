@@ -6,8 +6,9 @@ name: Self Coverage
 # jobs, each measured on its own, and the runs merged into one per platform.
 # Linux and macOS compile different code, so each platform is merged on its own.
 #
-# Every push to main is measured in full, held to 100% lines, branches and
-# MC/DC, and kept as the map CI's plan reads (`affected-map`): which code each
+# Main is measured in full every three hours (when it changed since its last
+# measurement) and each night, held to 100% lines, branches and MC/DC, and
+# kept as the map CI's plan reads (`affected-map`): which code each
 # test ran, for `tests affected` to say which tests a pull request's change
 # can reach, and with each test's seconds (`test-seconds`), which CI and these
 # slices deal their tests by. A pull request is measured by the slow tier
@@ -48,8 +49,14 @@ on:
         description: "Space-separated path prefixes: the step summary counts the gaps in these files. Most useful with tests."
         type: string
         default: ""
-  push:
-    branches: [main]
+  # Main's measurement, the map: every three hours, not on every merge. On
+  # every merge it was a full measurement (ten slices and a build, about 150
+  # job-minutes) for each pull request the merge queue merged, beside the
+  # queue's own runs on the same runners. A map a few merges old answers as
+  # well: the files changed since its commit have their tests run
+  # (scripts/ci-affected.mjs unmapped).
+  schedule:
+    - cron: "40 */3 * * *"
 
 permissions:
   contents: read
@@ -58,8 +65,8 @@ permissions:
 
 # A newer measurement of a pull request replaces the one before (the slow
 # tier runs one per commit it is asked for). On main a measurement is never
-# cancelled -- a busy day would leave no map -- and only the newest push, or
-# the nightly run, waits behind the one running.
+# cancelled -- a busy day would leave no map -- and only the newest scheduled
+# or nightly run waits behind the one running.
 concurrency:
   group: self-coverage-${{ github.ref }}-measure
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -68,10 +75,34 @@ env:
   SLICES: 10
 
 jobs:
+  # On a schedule, whether main changed since it was last measured: a commit
+  # with a map already is not measured again.
+  due:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      measure: ${{ steps.due.outputs.measure }}
+    steps:
+      - id: due
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          measured=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow self-coverage.yml --commit "$GITHUB_SHA" \
+            --status success --limit 20 --json event --jq '[.[] | select(.event == "schedule" or .event == "push")] | length')
+          if [ "$measured" != 0 ]; then
+            echo "measure=false" >> "$GITHUB_OUTPUT"
+            echo "$GITHUB_SHA has a map already: nothing changed since main was last measured." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "measure=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # Which tests a pull request's change can affect: they alone are measured.
-  # Every test on a push, by hand, on a release pull request, on a change to
+  # Every test on main, by hand, on a release pull request, on a change to
   # CI, or when the map cannot answer (the step summary says why).
   plan:
+    needs: due
+    if: ${{ !cancelled() && needs.due.result != 'failure' && needs.due.outputs.measure != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -87,7 +118,8 @@ jobs:
 
   platforms:
     needs: plan
-    if: fromJSON(needs.plan.outputs.jobs).measure.run
+    # Skipped with the plan (main measured already): no output to read.
+    if: needs.plan.outputs.jobs != '' && fromJSON(needs.plan.outputs.jobs).measure.run
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.os.outputs.os }}
@@ -120,8 +152,8 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@1.95.0
       # The measure build's dependencies kept between runs, saved by main's
-      # run (this workflow runs on a push to main) and only restored by a
-      # pull request's.
+      # run (this workflow measures main on a schedule) and only restored by
+      # a pull request's.
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
