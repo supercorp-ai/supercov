@@ -382,14 +382,18 @@ struct CarriedBuild {
 /// is left out: what is not carried is built again.
 fn carried_build(build: JvmBuild, previous: &Path) -> CarriedBuild {
     let mut carried = CarriedBuild::default();
-    let (output, build_files): (&str, &[&str]) = match build {
-        JvmBuild::Maven => ("target", &["pom.xml"]),
-        JvmBuild::Gradle => ("build", &["build.gradle", "build.gradle.kts"]),
+    // Each module's output, and what the build keeps at the root.
+    let (output, build_files, at_root): (&str, &[&str], &[&str]) = match build {
+        JvmBuild::Maven => ("target", &["pom.xml"], &[]),
+        JvmBuild::Gradle => ("build", &["build.gradle", "build.gradle.kts"], &[".gradle"]),
         JvmBuild::Ant | JvmBuild::Plain => return carried,
     };
-    if build == JvmBuild::Gradle && previous.join(".gradle").is_dir() {
-        carried.outputs.push(PathBuf::from(".gradle"));
-    }
+    carried.outputs.extend(
+        at_root
+            .iter()
+            .filter(|name| previous.join(name).is_dir())
+            .map(PathBuf::from),
+    );
     let mut pending = vec![PathBuf::new()];
     let mut sources = Vec::new();
     while let Some(relative) = pending.pop() {
@@ -401,42 +405,35 @@ fn carried_build(build: JvmBuild, previous: &Path) -> CarriedBuild {
             carried.outputs.push(relative.join(output));
             carried.modules.push(relative.clone());
         }
+        // A directory that cannot be read holds nothing carried.
         // fault-site: jvm-run.carried-build.read-dir
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                // Outputs, dependencies and tools' own directories hold no
-                // source the build compiles from here.
-                if name.starts_with('.') || name == output || name == "node_modules" {
-                    continue;
-                }
-                pending.push(relative.join(&*name));
-            } else if kind.is_file() && (name.ends_with(".java") || name.ends_with(".kt")) {
-                sources.push(relative.join(&*name));
+        for entry in fs::read_dir(&directory).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            // Outputs, dependencies and tools' own directories hold no
+            // source the build compiles from here.
+            let skipped = name.starts_with('.') || name == output || name == "node_modules";
+            let source = name.ends_with(".java") || name.ends_with(".kt");
+            if is_directory && !skipped {
+                pending.push(relative.join(&name));
+            } else if !is_directory && source {
+                sources.push(relative.join(&name));
             }
         }
     }
     for source in sources {
-        let Some(module) = owning_module(&source, previous, build_files) else {
-            continue;
-        };
-        if !carried.modules.contains(&module) {
-            continue;
+        let carried_module = owning_module(&source, previous, build_files)
+            .is_some_and(|module| carried.modules.contains(&module));
+        if carried_module {
+            // A source that cannot be read is not carried, and is compiled.
+            // fault-site: jvm-run.carried-build.read
+            let digest = fs::read(previous.join(&source))
+                .ok()
+                .map(|bytes| <[u8; 32]>::from(Sha256::digest(&bytes)));
+            carried
+                .digests
+                .extend(digest.map(|digest| (source, digest)));
         }
-        // fault-site: jvm-run.carried-build.read
-        let Ok(bytes) = fs::read(previous.join(&source)) else {
-            continue;
-        };
-        carried
-            .digests
-            .insert(source, Sha256::digest(&bytes).into());
     }
     carried
 }
@@ -464,21 +461,16 @@ fn restore_source_times(
     carried: &CarriedBuild,
     copied_at: std::time::SystemTime,
 ) {
-    let Some(before) = copied_at.checked_sub(std::time::Duration::from_secs(2)) else {
-        return;
-    };
+    let before = copied_at - std::time::Duration::from_secs(2);
     for (source, digest) in &carried.digests {
         let path = workspace.join(source);
         // fault-site: jvm-run.restore-source-times.read
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        if <[u8; 32]>::from(Sha256::digest(&bytes)) != *digest {
-            continue;
-        }
-        // fault-site: jvm-run.restore-source-times.open
-        if let Ok(file) = fs::open_with(std::fs::OpenOptions::new().write(true), &path) {
-            let _ = file.set_modified(before);
+        let unchanged = fs::read(&path)
+            .is_ok_and(|bytes| <[u8; 32]>::from(Sha256::digest(&bytes)) == *digest);
+        if unchanged {
+            // fault-site: jvm-run.restore-source-times.open
+            let _ = fs::open_with(std::fs::OpenOptions::new().write(true), &path)
+                .and_then(|file| file.set_modified(before));
         }
     }
 }
@@ -3316,6 +3308,11 @@ mod tests {
         file(&previous, "tool/pom.xml", "<project/>");
         file(&previous, "tool/src/main/java/T.java", "class T {}");
 
+        // Neither a tool's directory nor a dependency's is a module's source.
+        file(&previous, ".git/X.java", "class X {}");
+        file(&previous, "node_modules/p/Y.java", "class Y {}");
+        file(&previous, "src/main/kotlin/K.kt", "class K");
+
         let carried = carried_build(JvmBuild::Maven, &previous);
         assert_eq!(carried.outputs, [PathBuf::from("target")]);
         assert_eq!(
@@ -3323,9 +3320,24 @@ mod tests {
             [
                 PathBuf::from("src/main/java/A.java"),
                 PathBuf::from("src/main/java/B.java"),
+                PathBuf::from("src/main/kotlin/K.kt"),
             ]
         );
         assert!(carried_build(JvmBuild::Ant, &previous).outputs.is_empty());
+        assert!(carried_build(JvmBuild::Plain, &previous).outputs.is_empty());
+
+        // Gradle's project output and its root directory.
+        let gradle = base.join("gradle");
+        file(&gradle, "build.gradle.kts", "");
+        file(&gradle, "build/classes/G.class", "class");
+        file(&gradle, ".gradle/state", "");
+        file(&gradle, "src/main/java/G.java", "class G {}");
+        let carried_gradle = carried_build(JvmBuild::Gradle, &gradle);
+        assert_eq!(
+            carried_gradle.outputs,
+            [PathBuf::from(".gradle"), PathBuf::from("build")]
+        );
+        assert_eq!(carried_gradle.digests.len(), 1);
 
         let workspace = base.join("workspace");
         file(&workspace, "src/main/java/A.java", "class A {}");
