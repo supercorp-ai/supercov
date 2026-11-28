@@ -1799,14 +1799,17 @@ module Supercov
       hit(context, target["shortCircuit"]) if state[0] > state[1]
     end
 
+    # Arrival states by context, then by probe: a phase's end settles its own
+    # without reading every phase's before it.
     def arrival_state(context, key)
-      @arrivals[[context, key]] || @settle_lock.synchronize { @arrivals[[context, key]] ||= [0, 0] }
+      by_key = @arrivals[context]
+      (by_key && by_key[key]) || @settle_lock.synchronize { (@arrivals[context] ||= {})[key] ||= [0, 0] }
     end
 
     def settle_arrivals(context)
-      arrivals = @settle_lock.synchronize { @arrivals.select { |(ctx, _), _| ctx == context } }
-      arrivals.each do |(ctx, key), state|
-        settle_arrival(ctx, @probes[key], state)
+      arrivals = @settle_lock.synchronize { @arrivals[context]&.dup }
+      arrivals&.each do |key, state|
+        settle_arrival(context, @probes[key], state)
       end
     end
 
