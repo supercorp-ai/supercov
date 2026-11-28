@@ -72,6 +72,18 @@ the group changes since main, or in full for a release pull request or
 pull request leaves the queue and main is untouched: fix it, push, and queue
 it again.
 
+Queue only once `Fast tier` is success on the pull request's head commit:
+before then `gh pr merge` can exit without queuing anything (the queue
+refuses with "Required status check 'Fast tier' is expected", and `gh` does
+not always say so). Then check that it is queued:
+
+```sh
+gh api graphql -f query='query { repository(owner: "supercorp-ai", name: "supercov") {
+  pullRequest(number: <number>) { mergeQueueEntry { state position } } } }'
+```
+
+A `null` entry means it is not in the queue.
+
 There is no need to keep a pull request up to date with main by hand: the
 queue tests it on the newest main, so a merge never waits on a rebase and a
 second run of both tiers.
@@ -86,11 +98,13 @@ tests="<names>"` measures named tests alone, to see what they cover.
 `scripts/wait-ci.sh <pull request number or URL | run id or URL>` waits for a
 pull request's checks, or for one run. A number means the repository of the
 current directory, and the first line names the repository it waits on. On a
-pull request, the required checks (`Fast tier` and `Slow tier`) decide. It
+pull request, the checks its base requires (`Fast tier` and `Slow tier`)
+decide, and one not posted yet is waited for: right after a push, the
+deferred `Slow tier` alone has passed nothing. It
 sends one GraphQL query every three minutes (one per hundred checks) and
 prints a line only when something finished, failed or stalled (nothing
-finished for ten minutes). It exits 0 when they passed and 1 when anything
-failed. Use it instead of `gh run
+finished for ten minutes). It exits 0 when they passed, 1 when anything
+failed, and 3 when nothing was decided in four hours. Use it instead of `gh run
 watch` or a `gh run view` loop: those use the REST API, which allows 5,000
 requests an hour shared by everyone using the token, and several agents
 polling that way used it up in minutes.
