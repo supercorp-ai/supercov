@@ -745,8 +745,12 @@ def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
 
 
 def _import_aliases(tree: ast.Module, names: dict[str, str]) -> int:
-    # The aliases are imported from this module so the probes resolve in
-    # whatever namespace the file is executed in. After the docstring and
+    # The aliases are read from `__supercov_probes__`, which the runtime
+    # puts in builtins, so the probes resolve in whatever namespace the file
+    # is executed in. Not an import: a module's import statements are what
+    # the program itself can observe (a hooked `__import__`, an import
+    # tracker in a child process), and a measured module must not be seen
+    # importing anything it does not import itself. After the docstring and
     # any `from __future__` imports, which nothing may precede.
     position = 0
     while position < len(tree.body) and (
@@ -758,9 +762,11 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> int:
     line, column = (anchor.lineno, anchor.col_offset) if anchor is not None else (1, 0)
     # Fail-safe: probed bytecode can outlive the run in a cache Supercov does
     # not own -- pytest's rewriter caches what it compiles -- and a plain run
-    # loading it must still import. Without the runtime the aliases become
-    # sinks that accept every probe and record nothing.
-    imports = ", ".join(f"{attribute} as {alias}" for attribute, alias in names.items())
+    # loading it must still import. Without the runtime the name is not in
+    # builtins and the aliases become sinks that accept every probe and
+    # record nothing.
+    targets = ", ".join(names.values())
+    values = ", ".join(f"__supercov_probes__.{attribute}" for attribute in names)
     # Conditions take an inversion flag *after* the value. One generic
     # last-argument sink changes program behavior when cached code outlives
     # the runtime. Keep the callable signatures' value positions explicit.
@@ -784,7 +790,7 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> int:
         for attribute, alias in names.items()
     )
     fallback = ast.parse(
-        f"try:\n    from supercov_probes import {imports}\nexcept ImportError:\n"
+        f"try:\n    {targets}, = {values},\nexcept NameError:\n"
         f"    class _scv_sink:\n        def __setitem__(self, key, value):\n            pass\n"
         f"        def __call__(self, *arguments):\n            return arguments[-1] if arguments else self\n"
         f"    _scv_sink = _scv_sink()\n{sinks}\n"

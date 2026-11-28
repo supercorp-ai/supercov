@@ -16871,6 +16871,60 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
     assert!(project.root.join(".supercov/python-debug").is_dir());
 }
 
+/// A measured module imports only what it imports itself. Its probes were
+/// bound by an import statement placed at its top, `from supercov_probes
+/// import ...`, so a program that watches its modules' imports saw one more:
+/// click's `test_light_imports`, which runs a child interpreter with a
+/// tracking `__import__` and allows a fixed set, failed only under Supercov.
+#[test]
+fn a_measured_module_is_seen_importing_only_its_own_imports() {
+    let project = Project::empty("python-own-imports");
+    project.write("pkg/__init__.py", "");
+    project.write(
+        "pkg/w.py",
+        "import os\n\n\ndef double(n):\n    return n * 2 if n else 0\n",
+    );
+    project.write("tests/__init__.py", "");
+    project.write(
+        "tests/test_w.py",
+        r#"import json
+import subprocess
+import sys
+import unittest
+
+TRACK = """
+import builtins, json
+seen = set()
+real = builtins.__import__
+def tracking(name, globals=None, locals=None, fromlist=(), level=0):
+    if globals and globals.get("__name__", "").startswith("pkg") and level == 0:
+        seen.add(name)
+    return real(name, globals, locals, fromlist, level)
+builtins.__import__ = tracking
+import pkg.w
+assert pkg.w.double(2) == 4
+print(json.dumps(sorted(seen)))
+"""
+
+
+class W(unittest.TestCase):
+    def test_imports_only_its_own(self):
+        out = subprocess.run(
+            [sys.executable, "-c", TRACK], capture_output=True, text=True, check=True
+        ).stdout
+        self.assertEqual(json.loads(out), ["os"])
+"#,
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let output = project
+        .supercov(&[
+            "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+        ])
+        .succeeds();
+    assert!(!output.contains("supercov_probes"), "{output}");
+}
+
 #[test]
 fn a_go_run_whose_own_step_fails_says_so() {
     let Some(go) = go() else {
