@@ -19,7 +19,7 @@
 **Changed**
 
 - A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass takes 70 s where it took 121 s, with every verdict the same.
-- Rust doctests before edition 2024 run a file's worth at a time. Each ran in a rustdoc of its own, so the crate was read once per doctest (168 times for tokio-rs/bytes). The doctests of one file now run in one rustdoc, one after another, each still in a process of its own and named by the line libtest prints as it starts it; a file with one doctest, or a harness the user gives a thread count or uncaptured output, runs each alone as before.
+- Rust doctests before edition 2024 run a file's worth at a time. Each ran in a rustdoc of its own, so the crate was read once per doctest (168 times for tokio-rs/bytes). The doctests of one file now run in one rustdoc, one after another, each still in a process of its own and named by the line libtest prints as it starts it; a file with one doctest, or a harness the user gives a thread count or uncaptured output, runs each alone as before. tokio-rs/bytes' `cargo test` on an Actions runner: 15.3 s measured before, 10.4 s after (3.4 s plain), every answer the same.
 
 ## 4.29.19
 
