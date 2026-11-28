@@ -302,7 +302,12 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   order, and each copy is a module graph of its own. A mutant that one
   file times out and another kills can be a kill where it was a `timeout`,
   as whichever runs first decides; the benchmark's comparison counts such
-  changes apart.
+  changes apart. Measured on 4-CPU runners, two runs each way in turns:
+  the files a killed mutant ran fell from 1.37 to 1.18 a mutant on ufo,
+  1.19 to 1.01 on pathe and 1.11 to 1.01 on cookie-es (the copies before
+  a kill by about half, 95% and 87%), and each strong pass took 5 to 6%
+  less (ufo 115.8 s to 109.4 s), every verdict the same; survivors run
+  every file either way, and they hold most of what is left.
   Parallelism comes from many mutants at once; of the mutants ready, the
   cheapest goes first (see "The order of a pass, its shares and its
   budget"). A worker no ready mutant takes goes to the one with the most

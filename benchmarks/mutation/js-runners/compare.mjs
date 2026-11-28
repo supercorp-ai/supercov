@@ -71,7 +71,15 @@ function diff(before, after) {
 const olds = oldDirs.map((directory) => ({ verdicts: verdicts(directory), summary: summary(directory) }));
 const news = (newDirs ?? []).map((directory) => ({ verdicts: verdicts(directory), summary: summary(directory) }));
 const seconds = (run) => run.summary.seconds?.supercovStrong;
-const driver = (run) => (run.summary.driver ?? []).find((entry) => entry?.driver === "jobs") ?? (run.summary.driver ?? [])[0] ?? null;
+// The jobs driver's summary, or the Vitest pass's (its counts in `profile`).
+const driver = (run) => {
+    const entries = run.summary.driver ?? [];
+    const jobs = entries.find((entry) => entry?.driver === "jobs");
+    if (jobs)
+        return jobs;
+    const first = entries[0];
+    return first ? { ...first, ...(first.profile ?? {}) } : null;
+};
 const mean = (values) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined);
 const project = news[0]?.summary.project ?? olds[0]?.summary.project ?? "?";
 const ran = news[0]?.summary.supercovSummary?.ran ?? olds[0]?.summary.supercovSummary?.ran;
