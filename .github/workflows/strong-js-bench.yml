@@ -1,0 +1,175 @@
+name: Strong pass speed (JavaScript)
+
+# Seconds per decided mutant of the JavaScript strong pass, for the pull
+# request's base and its head, on the projects of
+# benchmarks/mutation/js-runners/corpus.json: each project's measured run and
+# strong pass under each binary, then every mutant's two verdicts compared
+# (benchmarks/mutation/js-runners/compare.mjs; a decided verdict that changed
+# fails the job). Add the `strong-bench` label to a pull request; each push to
+# a labelled pull request measures again.
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: "Space-separated project names of the corpus"
+        required: false
+        default: "mini-throttle"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: strong-js-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'strong-bench')
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - variant: old
+            ref: ${{ github.event.pull_request.base.sha || 'main' }}
+          - variant: new
+            ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: strong-js-bench
+          save-if: ${{ matrix.variant == 'old' }}
+      # Release code without the whole-program optimisation (Cargo.toml).
+      - run: cargo build --profile measure --bin supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  # Both binaries on one runner, taking turns (old, new, new, old): runners
+  # differ by more than the change measured, and the second run of a pair
+  # finds a warmer machine. The two old runs also show how much a verdict
+  # moves with no change at all.
+  measure:
+    needs: build
+    name: ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [mini-throttle, ms, dot-prop]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: supercov-*
+          path: bin
+      - run: chmod +x bin/*/supercov && nproc
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx -y playwright@1.60.0 install-deps chromium
+          key: apt-chromium-strong-bench-${{ runner.os }}-${{ runner.arch }}-1.60.0
+          prefix: apt-chromium-strong-bench-${{ runner.os }}-${{ runner.arch }}-
+      - name: Measure and strong pass, old and new in turn
+        run: |
+          for turn in old-1 new-1 new-2 old-2; do
+            node benchmarks/mutation/js-runners/run.mjs --project ${{ matrix.project }} \
+              --supercov "bin/supercov-${turn%-*}/supercov" --out "$RUNNER_TEMP/out/$turn" --work "$RUNNER_TEMP/work" --skip-stryker 1
+          done
+      - name: Where a browser job's time goes
+        if: matrix.project == 'mini-throttle'
+        run: node benchmarks/mutation/js-runners/diag-browser.mjs "$RUNNER_TEMP/work/${{ matrix.project }}" 5 | tee "$RUNNER_TEMP/out/diag-browser.txt"
+      - name: Old against new
+        run: |
+          node benchmarks/mutation/js-runners/compare.mjs "$RUNNER_TEMP/out/old-1,$RUNNER_TEMP/out/old-2" "$RUNNER_TEMP/out/new-1,$RUNNER_TEMP/out/new-2" --markdown \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.project }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
+  # A real Playwright suite (benchmarks/mutation/playwright-rallly.mjs): add
+  # the `strong-bench-e2e` label as well.
+  e2e:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'strong-bench-e2e')
+    name: rallly ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [old, new]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rallly
+        ports:
+          - 5450:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      mailpit:
+        image: axllent/mailpit
+        ports:
+          - 1025:1025
+          - 8025:8025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: bin
+      - run: chmod +x bin/supercov && nproc
+      - uses: ./.github/actions/system-packages
+        with:
+          command: npx -y playwright@1.49.1 install-deps chromium
+          key: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-1.49.1
+          prefix: apt-chromium-speed-${{ runner.os }}-${{ runner.arch }}-
+      - name: Measure and strong pass
+        run: node benchmarks/mutation/playwright-rallly.mjs --supercov bin/supercov --out "$RUNNER_TEMP/out" --work "$RUNNER_TEMP/work" --budget 420
+      - name: Where the pass's time went
+        if: ${{ !cancelled() }}
+        run: node benchmarks/mutation/playwright-breakdown.mjs "$RUNNER_TEMP/out/strong" --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-rallly-${{ matrix.variant }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
+  compare:
+    needs: e2e
+    if: ${{ !cancelled() && needs.e2e.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-rallly-*
+          path: bench
+      - name: Old against new
+        run: node benchmarks/mutation/js-runners/compare.mjs bench/bench-rallly-old bench/bench-rallly-new --markdown | tee -a "$GITHUB_STEP_SUMMARY"
