@@ -31228,6 +31228,90 @@ fn an_interrupted_ruby_pass_stops_at_once_and_judges_nothing_it_cut_short() {
     }
 }
 
+/// A Ruby test that calls a mutated method a few million times, and finishes
+/// well within its time, judges the mutant: the pass sets no limit on how
+/// often a mutant may run unless one is asked for, as cargo-mutants does.
+#[cfg(unix)]
+#[test]
+fn a_ruby_mutant_a_test_calls_millions_of_times_is_judged_not_timed_out() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong-hot");
+    project.write(
+        "lib/step.rb",
+        "class Step\n  def next(x)\n    x + 1\n  end\nend\n",
+    );
+    project.write(
+        "test/step_test.rb",
+        "require 'minitest/autorun'\nrequire 'step'\n\nclass StepTest < Minitest::Test\n  def test_counts\n    step = Step.new\n    x = 0\n    2_000_000.times { x = step.next(x) }\n    assert_equal 2_000_000, x\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/step_test.rb"])
+        .succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let strong = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    let judged = strong["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "lib/step.rb:3:5-3:10:Send:x - 1")
+        .unwrap_or_else(|| panic!("{strong}"))
+        .clone();
+    assert_eq!(judged["strong"]["status"], "killed", "{judged}\n{said}");
+}
+
+/// A Ruby mutant whose tests ran past their time only because other
+/// mutants' tests ran beside them is run again alone before it is a
+/// timeout. Here each mutant's test waits on a lock the others hold for
+/// six seconds: two at a time, the second waits past its limit.
+#[cfg(unix)]
+#[test]
+fn a_ruby_mutant_slow_only_beside_others_is_run_again_alone() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong-alone");
+    project.write(
+        "lib/pair.rb",
+        "class Pair\n  def left\n    1\n  end\n\n  def right\n    2\n  end\nend\n",
+    );
+    project.write(
+        "test/pair_test.rb",
+        "require 'minitest/autorun'\nrequire 'pair'\n\nclass PairTest < Minitest::Test\n  def hold\n    mutant = ENV['SUPERCOV_ACTIVE_MUTANT'].to_s\n    return if mutant.empty? || mutant == '-'\n\n    File.open(File.join(__dir__, 'lock'), File::RDWR | File::CREAT) do |file|\n      file.flock(File::LOCK_EX)\n      sleep 6\n    end\n  end\n\n  def test_left\n    hold\n    assert_equal 1, Pair.new.left\n  end\n\n  def test_right\n    hold\n    assert_equal 2, Pair.new.right\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/pair_test.rb"])
+        .succeeds();
+    let ran = project
+        .supercov_command(&["runs", "latest", "mutants", "test", "--json"])
+        .env("SUPERCOV_STRONG_JOBS", "2")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&ran.stderr);
+    let strong = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    for mutant in strong["data"]["mutants"].as_array().unwrap() {
+        assert_ne!(mutant["strong"]["status"], "timeout", "{mutant}\n{said}");
+    }
+    assert!(
+        strong["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mutant| mutant["strong"]["status"] == "killed"),
+        "{strong}\n{said}"
+    );
+}
+
 /// Go's strong pass: every Gremlins mutant of a module, run in test
 /// binaries built once, each mutant against the tests that ran its code.
 /// A mutant that does not compile is `unviable`; a constant Go needs as a
