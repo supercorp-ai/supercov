@@ -19,6 +19,10 @@ on:
         description: "Run each shard's suite once without Supercov first, to time what measuring adds"
         type: boolean
         default: false
+      profile:
+        description: "Start Gradle builds with --profile, their reports kept with the results, for where a build's time goes"
+        type: boolean
+        default: false
       handchecks:
         description: "Disagreements to check by hand, separated by `;`: project|file:line:from:to|test. Each applies the mutant (the line's text `from` made `to`), runs the test alone and the whole suite."
         required: false
@@ -180,6 +184,8 @@ jobs:
           BUDGET: 420
           # The suite once without Supercov first, for what measuring adds.
           PLAIN: ${{ inputs.plain && '1' || '' }}
+          # Gradle's profile of each build, for where its time goes.
+          PROFILE: ${{ inputs.profile && '1' || '' }}
         run: |
           out="out/${{ matrix.project }}/${{ matrix.shard }}"
           /usr/bin/time -v -o time.txt timeout 540 \

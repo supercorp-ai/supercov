@@ -153,7 +153,10 @@ tests_command() {
     local task="test"
     [ -n "$module" ] && task=":$module:test"
     # shellcheck disable=SC2086
-    echo ./gradlew --no-daemon -q $flags "$task"
+    # PROFILE=1: each build writes Gradle's profile of where its time went.
+    local profile=""
+    [ "${PROFILE:-}" = 1 ] && profile="--profile"
+    echo ./gradlew --no-daemon -q $flags $profile "$task"
   fi
 }
 
@@ -283,6 +286,10 @@ case "$scenario" in
     cp .supercov/runs/*/strong-mutation.json "$results/" 2>/dev/null || true
     mkdir -p "$results/strong"
     cp -r .supercov/strong/* "$results/strong/" 2>/dev/null || true
+    if [ "${PROFILE:-}" = 1 ]; then
+      mkdir -p "$results/profile"
+      cp build/reports/profile/*.html "$results/profile/" 2>/dev/null || true
+    fi
     # PIT's full matrix where it ran, else its report as a team runs it:
     # both say which mutants PIT detects.
     pit_report="$results/pit-matrix.xml"
