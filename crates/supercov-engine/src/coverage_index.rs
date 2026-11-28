@@ -2790,8 +2790,7 @@ where
                 .zip(per_view!(lengths))
                 .collect::<Vec<_>>();
             per_view!(copy_whole_as_passed, whole);
-            let [lines, hits, decisions] =
-                test_starts.expect("the whole view's starts are known");
+            let [lines, hits, decisions] = test_starts.expect("the whole view's starts are known");
             let lines = (lines, test_lines.len());
             let hits = (hits, test_hits.len());
             let decisions = (decisions, test_decisions.len());
@@ -7024,8 +7023,14 @@ mod tests {
                 }),
             ),
             ("another line", Box::new(|test| test.lines[0].line = 9)),
-            ("a hit more", Box::new(|test| test.hits.push("elsewhere".into()))),
-            ("another hit", Box::new(|test| test.hits[0] = "elsewhere".into())),
+            (
+                "a hit more",
+                Box::new(|test| test.hits.push("elsewhere".into())),
+            ),
+            (
+                "another hit",
+                Box::new(|test| test.hits[0] = "elsewhere".into()),
+            ),
             (
                 "a decision more",
                 Box::new(|test| {
@@ -7035,7 +7040,10 @@ mod tests {
                     })
                 }),
             ),
-            ("another decision", Box::new(|test| test.decisions[0].id = "other".into())),
+            (
+                "another decision",
+                Box::new(|test| test.decisions[0].id = "other".into()),
+            ),
             (
                 "a vector more",
                 Box::new(|test| {
@@ -7147,7 +7155,14 @@ mod tests {
         // view's, or marked otherwise, is refused.
         let marked = |record: usize, mark: u8| {
             let (_root, container) = index_of(&run, &move |s: &mut Vec<QueryIndexSection>| {
-                patch(s, SECTION_TEST_LINES, record, TEST_LINE_RECORD_SIZE, 1, &[mark]);
+                patch(
+                    s,
+                    SECTION_TEST_LINES,
+                    record,
+                    TEST_LINE_RECORD_SIZE,
+                    1,
+                    &[mark],
+                );
             });
             let index = CoverageIndex::new(&container).unwrap();
             index
@@ -7167,7 +7182,11 @@ mod tests {
                 })
                 .unwrap()
         };
-        assert!(marked(passed_record, ALSO_PASSED).unwrap_err().contains("shared test record"));
+        assert!(
+            marked(passed_record, ALSO_PASSED)
+                .unwrap_err()
+                .contains("shared test record")
+        );
         assert!(marked(0, 2).unwrap_err().contains("shared test record"));
     }
 
