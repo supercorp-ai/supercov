@@ -99,13 +99,21 @@ shards start the build twice, the first ending after about 20 s when the
 compiler refuses a switch (a Kotlin mutant that does not compile is
 `unviable`); that is 180 s of kotlinpoet's strong pass.
 
-### 3. The tests that killed the file's other mutants first
+### 3. The tests that killed the file's other mutants first (dropped)
 
 A JVM keeps, for each source file, the tests that killed its mutants and
 how many, and runs a mutant's candidates that did first, the most kills
 first, the rest in the plan's order. The first kill ends a mutant's run, so
 the order decides only which candidate kills it. Before, kotlinpoet's 54
 mutants killed after more than 100 candidates ran 13,256 tests between them.
+
+Dropped after its result below: the first timeout ends a mutant's run as
+the first kill does, so where one candidate fails with the mutant and
+another runs past its limit, the order decides `killed` against `timeout`.
+No verdict in the run changed that way, but an order made from earlier
+kills can, as kill-history orders did for Python and Rust
+(`performance-experiments.md`). Its 12 to 14% fewer runs are left for an
+order that cannot change a verdict.
 
 ### 4. The pass's own JVMs, with C1 alone
 

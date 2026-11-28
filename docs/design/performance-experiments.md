@@ -144,8 +144,8 @@ Native Rust mutants are already cheap: 0.4–1.4 s each once testing starts.
 | Tried | Result | Kept? |
 |---|---|---|
 | Profile, and baselines shared across JVMs and rounds (#365) | commons-cli 5,712 → 2,744 baseline runs; strong pass 144 → 88 s | Kept |
-| Retry rounds started from the test JVM | kotlinpoet: five retry builds (242 s) gone | Kept |
-| Tests that killed the same file's mutants first | 12–14% fewer test runs | Kept |
+| Retry rounds started from the test JVM (#387) | kotlinpoet: five retry builds (242 s) gone | Kept |
+| Tests that killed the same file's mutants first | 12–14% fewer test runs | Dropped: the first timeout ends a mutant as the first kill does, so the order decides killed vs timeout |
 | C1-only JIT in mutant JVMs | JIT time 266 → 14 s (commons-cli), 2,485 → 108 s (kotlinpoet) | Kept |
 | Skip re-verifying classes | First test per mutant about 17% cheaper | Kept |
 | Kotlin reach probes for expression bodies | 35% fewer tests per mutant; changed mutants are ones PIT reports NO_COVERAGE | In progress |
