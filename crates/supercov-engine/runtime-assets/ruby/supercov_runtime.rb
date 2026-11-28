@@ -1081,6 +1081,21 @@ module Supercov
       # exit for whatever remains.
       return unless final || @stdlib_every_phase || features_without_probes?
 
+      # Another tool may have stopped Coverage first: SimpleCov takes
+      # `Coverage.result` as the tests end, which stops it, and reading it
+      # then raised and lost the whole run. Only files measured through
+      # Coverage alone, without probes, lose what ran after that.
+      if Coverage.respond_to?(:running?) && !Coverage.running?
+        if @stdlib_every_phase || features_without_probes?
+          limitation(
+            "ruby-coverage-stopped",
+            "another tool stopped Ruby's Coverage before the run ended (SimpleCov does as the tests finish); " \
+            "what files measured through Coverage alone, without probes, ran after that is not recorded",
+          )
+        end
+        return
+      end
+
       result = Coverage.result(stop: false, clear: true)
       result.each do |path, data|
         lines = @lines_by_file[path]
