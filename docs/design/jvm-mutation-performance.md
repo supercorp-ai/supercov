@@ -199,7 +199,9 @@ and verifying classes the project's compiler wrote, again for every mutant,
 was part of what each mutant's first test cost. Where none of the pass's
 JVMs starts (a JVM that refuses an option, as the first try of this did
 until the diagnostic options were unlocked), the build's test JVM runs the
-pass itself.
+pass itself. As with C1 (experiment 4), the generous round's JVMs run
+without the options, as the build's own does: a mutant's verdict there can
+turn on the JVM's speed.
 
 Result (run 46103054380 against 46091426206): every verdict the same
 (commons-cli 882, kotlinpoet 1,238). Each mutant's first run took 81 s of
