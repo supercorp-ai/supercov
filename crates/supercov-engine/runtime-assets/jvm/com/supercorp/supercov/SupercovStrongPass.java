@@ -274,7 +274,11 @@ public final class SupercovStrongPass {
   static void runEverywhere(Executor executor, String framework) {
     List<Process> minions = startMinions(framework, null, false);
     try {
-      new SupercovStrongPass(executor, module()).run();
+      // Where the pass has JVMs of its own, they run every mutant and this
+      // one waits: theirs is the JIT the pass sets (see startMinions).
+      if (minions.isEmpty()) {
+        new SupercovStrongPass(executor, module()).run();
+      }
     } catch (Throwable error) {
       System.err.println("supercov: the strong pass stopped: " + error);
       error.printStackTrace();
@@ -459,7 +463,7 @@ public final class SupercovStrongPass {
    */
   private static List<Process> startMinions(String framework, String claims, boolean retry) {
     List<Process> started = new ArrayList<>();
-    // A round of its own: every JVM of it is a minion.
+    // A round of its own, after the first.
     boolean round = claims != null;
     int jvms = 1;
     try {
@@ -491,10 +495,15 @@ public final class SupercovStrongPass {
     if (assertionsOn()) {
       command.add("-ea");
     }
+    // C1 alone: each mutant's classes are loaded afresh, so code the JIT
+    // compiles is thrown away with its loader, and C2's compilations of it
+    // took as much processor time as the tests did, beside them, on as many
+    // processors as there are JVMs.
+    command.add("-XX:TieredStopAtLevel=1");
     command.add("-D" + MINION + "=true");
     File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
     File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
-    for (int i = round ? 0 : 1; i < jvms; i++) {
+    for (int i = 0; i < jvms; i++) {
       List<String> own = new ArrayList<>(command);
       ProcessBuilder builder = new ProcessBuilder(own).inheritIO();
       if (round) {
