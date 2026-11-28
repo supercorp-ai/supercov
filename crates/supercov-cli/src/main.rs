@@ -2036,36 +2036,21 @@ fn run_view_of(
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
     let comparison = checkout_comparison(root, run);
-    // The whole run's view is kept beside it; only some of its tests' is
-    // built from the evidence each time.
-    if filter.is_none() {
-        let mut view = supercov_engine::run_store::open_or_build_run_view(run, |run| {
-            analyze_stored_run_filtered(run, None)
-        })?;
-        view.stale = comparison.stale;
-        view.stale_reasons = comparison.reasons;
-        return Ok(view);
-    }
-    let report = analyze_stored_run_filtered(run, filter)?;
-    let passed = run.metadata.test_exit_code == Some(0);
     // A passing run is read whole, as its summary reads it: what passing
     // tests ran alone leaves out what ran outside any test -- a module's top
     // level as it was imported, and all of a run no runner attributes -- so
     // a passing `supercov -- node script.js` read 100% in its summary and 0%
-    // in `runs check`. A failed run keeps to what its passing tests ran.
-    let view = if passed {
-        &report.view
-    } else {
-        &report.filters.passed
-    };
-    Ok(supercov_engine::run_view::build(
-        &run.id,
-        &run.metadata.started_at,
-        view,
-        passed,
-        comparison.stale,
-        comparison.reasons,
-    ))
+    // in `runs check`. A failed run keeps to what its passing tests ran
+    // (`run_view_from_report`). The whole run's view is kept beside it; some
+    // of its tests' is built from the evidence each time.
+    let mut view = supercov_engine::run_store::open_or_build_run_view(
+        run,
+        filter,
+        analyze_stored_run_filtered,
+    )?;
+    view.stale = comparison.stale;
+    view.stale_reasons = comparison.reasons;
+    Ok(view)
 }
 
 /// The view of the run `selector` picks in the project at `root` and, for a

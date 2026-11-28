@@ -469,19 +469,28 @@ type InstrumentedBuildCache, written and read = closed {
   reused: boolean
 }
 
-type KeptRunView, written and read = closed {
-  version: uint
-  analysis: string
-  evidenceSha256: string
-  evidenceBytes: uint
-  view: RunView
-  sites: [KeptSites]
-}
-
-type KeptSites, written and read = closed {
+type KeptFile, written and read = closed {
+  file: FileView
   conditions: [ConditionRecord]
   points: [PointSite]
   branchSites: [BranchSite]
+}
+
+type KeptIdentity, written and read = closed {
+  version: uint
+  viewSchema: uint
+  analysis: string
+  evidenceSha256: string
+  evidenceBytes: uint
+  run: string
+  generatedAt: string
+  suitePassed: boolean
+}
+
+type KeptRunView, written and read = closed {
+  identity: KeptIdentity
+  view: RunView
+  files: [KeptFile]
 }
 
 type Location, written and read = {

@@ -18,7 +18,8 @@ use crate::query_index::{QUERY_INDEX_SCHEMA_VERSION, QueryIndexIdentity};
 use crate::{
     coverage_index::{CoverageIndex, CoverageIndexError},
     coverage_report::{
-        ArchiveReportRequest, CoverageReport, ExitCodeInput, ReportError, analyze_coverage_archive,
+        ArchiveReportRequest, CoverageReport, ExitCodeInput, ReportError, TestFilter,
+        analyze_coverage_archive,
     },
     evidence_archive::read_archive_schema_version,
     query_index::{QueryIndex, QueryIndexError, write_query_index},
@@ -1424,29 +1425,57 @@ pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -
 
 /// The view of a whole run as every export, report and gate reads it, kept
 /// beside the run: building it meant analysing all of the run's evidence
-/// again, on a 1,700-test suite 9 s and 10 GB for each report. It is the view
-/// `run_view_of` builds -- what passing tests ran, for a failed run -- as
-/// the run was recorded; whether the checkout still matches it is worked out
-/// each time it is read.
+/// again, on a 1,700-test suite 11 s and 10 GB for each report. It is the
+/// view of all of a run's tests (`run_view_from_report`) as the run was
+/// recorded; whether the checkout still matches it is worked out each time.
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeptRunView {
+    identity: KeptIdentity,
+    /// The view, its files left out: they are in `files`.
+    view: crate::run_view::RunView,
+    files: Vec<KeptFile>,
+}
+
+/// What a kept view is of: it is read only when all of it is what the run
+/// and this build give now.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeptIdentity {
     version: u32,
-    /// The analysis it is of (`analysis_digest`) and the evidence it was
-    /// analysed from: a view of anything else is not read.
+    view_schema: u32,
+    /// The analysis that made it (`analysis_digest`).
     analysis: String,
     evidence_sha256: String,
     evidence_bytes: u64,
-    view: crate::run_view::RunView,
-    /// Each file's sites, which the view's own JSON leaves out, in its order.
-    sites: Vec<KeptSites>,
+    run: String,
+    generated_at: String,
+    suite_passed: bool,
 }
 
+impl KeptIdentity {
+    fn of(run: &StoredRun, (evidence_sha256, evidence_bytes): ([u8; 32], u64)) -> Self {
+        Self {
+            version: RUN_VIEW_FILE_VERSION,
+            view_schema: crate::run_view::RUN_VIEW_SCHEMA_VERSION,
+            analysis: hex(&analysis_digest()),
+            evidence_sha256: hex(&evidence_sha256),
+            evidence_bytes,
+            run: run.id.clone(),
+            generated_at: run.metadata.started_at.clone(),
+            suite_passed: run.metadata.test_exit_code == Some(0),
+        }
+    }
+}
+
+/// A file of the view with the sites its JSON leaves out.
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct KeptSites {
+struct KeptFile {
+    file: crate::run_view::FileView,
     conditions: Vec<crate::run_view::ConditionRecord>,
     points: Vec<crate::run_view::PointSite>,
     branch_sites: Vec<crate::run_view::BranchSite>,
@@ -1482,30 +1511,26 @@ pub fn run_view_from_report(run: &StoredRun, report: &CoverageReport) -> crate::
 pub fn write_run_view(
     run: &StoredRun,
     mut view: crate::run_view::RunView,
-    (evidence_sha256, evidence_bytes): ([u8; 32], u64),
+    evidence: ([u8; 32], u64),
 ) -> io::Result<()> {
-    let sites = view
-        .files
-        .iter_mut()
-        .map(|file| KeptSites {
+    let files = std::mem::take(&mut view.files)
+        .into_iter()
+        .map(|mut file| KeptFile {
             conditions: std::mem::take(&mut file.conditions),
             points: std::mem::take(&mut file.points),
             branch_sites: std::mem::take(&mut file.branch_sites),
+            file,
         })
         .collect();
     let kept = KeptRunView {
-        version: RUN_VIEW_FILE_VERSION,
-        analysis: hex(&analysis_digest()),
-        evidence_sha256: hex(&evidence_sha256),
-        evidence_bytes,
+        identity: KeptIdentity::of(run, evidence),
         view,
-        sites,
+        files,
     };
     let bytes = serde_json::to_vec(&kept).expect("plain data serializes");
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&bytes)?;
-    let compressed = encoder.finish()?;
-    let destination = run.directory.join(RUN_VIEW_FILE);
+    encoder.write_all(&bytes).expect("writing to memory");
+    let compressed = encoder.finish().expect("writing to memory");
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temporary = run.directory.join(format!(
         ".{RUN_VIEW_FILE}.{}.{}.tmp",
@@ -1514,11 +1539,20 @@ pub fn write_run_view(
     ));
     // fault-site: run-store.write-run-view
     let written = fs::write(&temporary, compressed);
-    let written = written.and_then(|()| fs::rename(&temporary, &destination));
+    let written = written.and_then(|()| fs::rename(&temporary, run.directory.join(RUN_VIEW_FILE)));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// The decompressed bytes of a gzip member, or `None` when it is not one.
+fn gunzipped(compressed: &[u8]) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    flate2::read::GzDecoder::new(compressed)
+        .read_to_end(&mut bytes)
+        .ok()
+        .map(|_| bytes)
 }
 
 /// The view kept beside `run`, when it is of the run's evidence as it is now,
@@ -1526,55 +1560,53 @@ pub fn write_run_view(
 /// evidence.
 pub fn read_run_view(run: &StoredRun) -> Option<crate::run_view::RunView> {
     // fault-site: run-store.read-run-view
-    let compressed = fs::read(run.directory.join(RUN_VIEW_FILE)).ok()?;
-    let mut bytes = Vec::new();
-    flate2::read::GzDecoder::new(compressed.as_slice())
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let kept = serde_json::from_slice::<KeptRunView>(&bytes).ok()?;
-    if kept.version != RUN_VIEW_FILE_VERSION
-        || kept.analysis != hex(&analysis_digest())
-        || kept.view.schema_version != crate::run_view::RUN_VIEW_SCHEMA_VERSION
-        || kept.view.run != run.id
-        || kept.view.generated_at != run.metadata.started_at
-        || kept.view.suite_passed != (run.metadata.test_exit_code == Some(0))
-        || kept.sites.len() != kept.view.files.len()
-    {
-        return None;
-    }
-    let (evidence_sha256, evidence_bytes) = file_sha256(&run.evidence_path).ok()?;
-    if kept.evidence_sha256 != hex(&evidence_sha256) || kept.evidence_bytes != evidence_bytes {
+    let kept = fs::read(run.directory.join(RUN_VIEW_FILE))
+        .ok()
+        .and_then(|compressed| gunzipped(&compressed))
+        .and_then(|bytes| serde_json::from_slice::<KeptRunView>(&bytes).ok())?;
+    let evidence = file_sha256(&run.evidence_path).ok()?;
+    if kept.identity != KeptIdentity::of(run, evidence) {
         return None;
     }
     let mut view = kept.view;
-    for (file, sites) in view.files.iter_mut().zip(kept.sites) {
-        file.conditions = sites.conditions;
-        file.points = sites.points;
-        file.branch_sites = sites.branch_sites;
-    }
+    view.files = kept
+        .files
+        .into_iter()
+        .map(|kept| crate::run_view::FileView {
+            conditions: kept.conditions,
+            points: kept.points,
+            branch_sites: kept.branch_sites,
+            ..kept.file
+        })
+        .collect();
     Some(view)
 }
 
-/// The view of `run` its reports read: the one kept beside it, or built
-/// from the analysis `analyze` makes of its evidence, and kept. Its checkout
-/// is not compared here.
+/// The view of `run` its reports read, of the tests `filter` picks: the
+/// whole run's is the one kept beside it, or built from the analysis
+/// `analyze` makes of its evidence and kept; some of its tests' is built
+/// each time. Its checkout is not compared here.
 pub fn open_or_build_run_view<E>(
     run: &StoredRun,
-    analyze: impl FnOnce(&StoredRun) -> Result<CoverageReport, E>,
+    filter: Option<&TestFilter>,
+    analyze: impl FnOnce(&StoredRun, Option<&TestFilter>) -> Result<CoverageReport, E>,
 ) -> Result<crate::run_view::RunView, E> {
+    if filter.is_some() {
+        let report = analyze(run, filter)?;
+        return Ok(run_view_from_report(run, &report));
+    }
     if let Some(view) = read_run_view(run) {
         return Ok(view);
     }
     // Kept only when the evidence it was built from is the evidence there
     // before and after: the analysis does not say which bytes it read.
     let before = file_sha256(&run.evidence_path).ok();
-    let report = analyze(run)?;
+    let report = analyze(run, None)?;
     let view = run_view_from_report(run, &report);
     std::thread::spawn(move || drop(report));
-    if let Some(digest) = before
-        && file_sha256(&run.evidence_path).ok() == Some(digest)
-    {
-        let _ = write_run_view(run, view.clone(), digest);
+    let after = file_sha256(&run.evidence_path).ok();
+    if let Some(evidence) = before.filter(|_| after == before) {
+        let _ = write_run_view(run, view.clone(), evidence);
     }
     Ok(view)
 }
@@ -1769,37 +1801,93 @@ mod tests {
     }
 
     /// A run's view is kept beside it and read back as its evidence gives it,
-    /// every site of every file included; a view of other evidence, or of
-    /// another run, is not read.
+    /// every site of every file included; a view of other evidence, of
+    /// another run, or that does not read, is not read, and the view is built
+    /// from the evidence again.
     #[test]
     fn a_kept_run_view_is_the_view_its_evidence_gives() {
         let root = temporary_directory("kept-view");
         create_analyzable_test_run(&root, "run-a");
         let run = discover_runs(&root).unwrap().runs.remove(0);
+        let analyze = |run: &StoredRun, filter: Option<&TestFilter>| {
+            analyze_stored_run_filtered(run, filter)
+        };
         let built = run_view_from_report(&run, &analyze_stored_run(&run).unwrap());
         assert!(built.files.iter().any(|file| !file.points.is_empty()));
-        let _ = fs::remove_file(run.directory.join(RUN_VIEW_FILE));
+        let kept = run.directory.join(RUN_VIEW_FILE);
+        let _ = fs::remove_file(&kept);
         assert!(read_run_view(&run).is_none());
-        assert_eq!(
-            open_or_build_run_view(&run, analyze_stored_run).unwrap(),
-            built
-        );
+        assert_eq!(open_or_build_run_view(&run, None, analyze).unwrap(), built);
         assert_eq!(read_run_view(&run).as_ref(), Some(&built));
         // Read again, the kept view is used, and is the same.
-        assert_eq!(
-            open_or_build_run_view(&run, |_| -> Result<CoverageReport, RunIndexError> {
-                panic!("a kept view is read, not built")
-            })
-            .unwrap(),
-            built
-        );
+        let unasked = |_: &StoredRun, _: Option<&TestFilter>| -> Result<CoverageReport, String> {
+            panic!("a kept view is read, not built")
+        };
+        assert_eq!(open_or_build_run_view(&run, None, unasked).unwrap(), built);
         let mut other = run.clone();
         other.id = "run-b".into();
         assert!(read_run_view(&other).is_none());
-        let mut evidence = fs::read(&run.evidence_path).unwrap();
-        evidence.push(0);
-        fs::write(&run.evidence_path, evidence).unwrap();
+        // A kept view that is no gzip, or no view, is not read.
+        let bytes = fs::read(&kept).unwrap();
+        fs::write(&kept, b"not gzip").unwrap();
         assert!(read_run_view(&run).is_none());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(b"{}").unwrap();
+        fs::write(&kept, encoder.finish().unwrap()).unwrap();
+        assert!(read_run_view(&run).is_none());
+        fs::write(&kept, &bytes).unwrap();
+        assert!(read_run_view(&run).is_some());
+        // Nor is one whose evidence changed, or is gone.
+        let evidence = fs::read(&run.evidence_path).unwrap();
+        fs::write(&run.evidence_path, [evidence.as_slice(), &[0]].concat()).unwrap();
+        assert!(read_run_view(&run).is_none());
+        fs::remove_file(&run.evidence_path).unwrap();
+        assert!(read_run_view(&run).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Some of a run's tests' view is built each time and not kept; an
+    /// analysis that fails is the error; and a view whose evidence changed
+    /// while it was built, or that cannot be written, is not kept.
+    #[test]
+    fn a_run_view_is_kept_only_of_the_whole_run_as_its_evidence_stands() {
+        let root = temporary_directory("kept-view-not");
+        create_analyzable_test_run(&root, "run-a");
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+        let kept = run.directory.join(RUN_VIEW_FILE);
+        let _ = fs::remove_file(&kept);
+        let filter = TestFilter {
+            kind: Some("unit".into()),
+            ..TestFilter::default()
+        };
+        let asked = std::cell::Cell::new(false);
+        let whole = run_view_from_report(&run, &analyze_stored_run(&run).unwrap());
+        let picked = open_or_build_run_view(&run, Some(&filter), |run, given| {
+            asked.set(given == Some(&filter));
+            analyze_stored_run(run)
+        })
+        .unwrap();
+        assert!(asked.get());
+        assert_eq!(picked, whole);
+        assert!(!kept.exists());
+        let failing = |_: &StoredRun, _: Option<&TestFilter>| Err::<CoverageReport, _>("refused");
+        assert_eq!(open_or_build_run_view(&run, Some(&filter), failing), Err("refused"));
+        assert_eq!(open_or_build_run_view(&run, None, failing), Err("refused"));
+        assert!(!kept.exists());
+        // The evidence changes while the view is built: it is not kept.
+        let changing = |run: &StoredRun, _: Option<&TestFilter>| {
+            let report = analyze_stored_run(run);
+            let evidence = fs::read(&run.evidence_path).unwrap();
+            fs::write(&run.evidence_path, [evidence.as_slice(), &[0]].concat()).unwrap();
+            report
+        };
+        assert_eq!(open_or_build_run_view(&run, None, changing).unwrap(), whole);
+        assert!(!kept.exists());
+        // A view that cannot be written leaves nothing behind.
+        let mut gone = run.clone();
+        gone.directory = root.join("no-such-run");
+        assert!(write_run_view(&gone, whole, ([0; 32], 0)).is_err());
+        assert!(!gone.directory.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
