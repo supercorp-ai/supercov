@@ -3,7 +3,8 @@ name: Release native builds
 # A pull request that changes the version Supercov carries is a release: its
 # native target matrix is built and verified here while the pull request's CI
 # runs, instead of after the merge. publish.yml then finds this run by the
-# tree it built -- a squash merge leaves main with the pull request's tree --
+# tree it built -- the merge queue's commit of a release queued up to date
+# with main, and alone, leaves main with the pull request's tree --
 # and publishes its artifacts without building them again.
 on:
   pull_request:
