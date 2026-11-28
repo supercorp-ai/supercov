@@ -43,7 +43,7 @@ setup, instrumented build, test command, evidence publication.
 | Project | Plain | main | After | Where the rest goes |
 | --- | --- | --- | --- | --- |
 | dtolnay/semver 1.0.23 (38 tests) | 0.17 | 0.75 (4.4×) | same | a process per test and per doctest |
-| tokio-rs/bytes 1.7.2 (168 doctests) | 3.44–5.41 | 15.9–24.5 (4.5×) | same | doctests: one rustdoc per doctest, so the crate's analysis runs 168 times |
+| tokio-rs/bytes 1.7.2 (168 doctests) | 3.45 | 15.64 (4.53×) | 10.75 (3.11×) with #388 | doctests: one rustdoc per doctest read the crate 168 times |
 | serde-rs/json 1.0.128 | 3.57 | every run after the first failed | fixed by #363 | a `match` arm behind a `#[cfg]` no build compiles |
 
 ### Python
@@ -96,6 +96,11 @@ garbage collection is still a third of the samples, and the final
 | 7 | Ruby: a decision vector's record built directly, the same bytes as the encoder's, still written at once | (in 5) | Kept (#367) | The encoder's walk was most of a vector's cost; replaces 4 |
 | 8 | JVM: carry each module's build output to the next run; date sources rewritten to the same bytes before it; stable evidence directory | commons-cli 1.48×→1.14× (test command 8.37→6.29 s); answers identical | Kept (#368) | Every run compiled every module again |
 | 9 | JVM: the runtime class compiles for Java 7 | gson measurable at all | Kept (#364) | Two lambdas, `Map.merge`, and generic calls Java 7 does not infer in a conditional |
+| 10 | Rust: a file's doctests in one rustdoc with `--test-threads 1`, each named by the `test NAME ... ` line its harness printed as it started it | bytes 4.53×→3.11× (test command 15.28→10.39 s); semver 0.67→0.72 s (four doctests now one after another); answers identical but for a multithreaded test's event count, which differs as much between two runs of main | Kept (#388) | The crate was read once per doctest |
+| 11 | Rust: a large file's batch in parts across the cores, each part filtered by its doctests' own words | bytes 10.39→10.56 s | Dropped | No gain: one file on one core was not what held bytes back |
+| 12 | Python: slot hits named, checked and ordered once per run | jinja evidence 1.76→1.69 s | Kept (#389) | Two hash lookups and an ordered set per hit per phase |
+| 13 | Rust: a match guard holding a `let` was read as never evaluated | accuracy | #377 declares it, #379 measures it | No probe could be placed in it |
+| 14 | Python: a measured module was seen importing `supercov_probes` | accuracy (click's `test_light_imports`) | #378 | Probes are read from builtins |
 
 ## Bugs found while measuring
 
