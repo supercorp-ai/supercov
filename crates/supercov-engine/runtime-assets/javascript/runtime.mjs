@@ -844,7 +844,8 @@ function persistBrowser() {
     return;
   persistBrowserListenersInstalled = true;
   try {
-    addEventListener("beforeunload", handOverBrowser);
+    if (!diagSkipList.includes("handover"))
+      addEventListener("beforeunload", handOverBrowser);
     // An iframe the page removes (a client-side navigation away from the
     // page that held it, an embed closed) gets no `beforeunload`: what it ran
     // went with it, though the test clicked in it. Its `pagehide` reaches the

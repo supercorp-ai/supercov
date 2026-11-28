@@ -45,14 +45,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 7/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 9/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 11/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
-          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude' }
+          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 7/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 9/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 11/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -118,7 +118,7 @@ jobs:
           SPEED_DIAGNOSE_PASS: '0'
           SPEED_RUN_TIMEOUT_MS: '480000'
           SUPERCOV_DIAG_TIMING_FILE: ${{ runner.temp }}/speed/logs/diag-timing.txt
-          SPEED_PLAIN: ${{ matrix.only == 'plain' && 'only' || '0' }}
+          SPEED_PLAIN: ${{ matrix.plain || '1' }}
           SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs
       - if: always()

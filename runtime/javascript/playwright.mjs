@@ -1121,7 +1121,7 @@ class CoveragePhaseController {
         if (diagSkip.has("activate"))
             return;
         await Promise.all([
-            timed("activate.contextHeaders", () => Promise.all([...this.contexts]
+            diagSkip.has("cookies") ? undefined : timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context) && !this.closedContexts.has(context))
                 .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
             this.activateFrames(phaseId),
