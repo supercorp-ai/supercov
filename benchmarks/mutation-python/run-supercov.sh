@@ -4,6 +4,10 @@
 # the run records its mutants' values (SUPERCOV_MUTANTS=1), and the plan
 # decides more of them without running anything.
 #   run-supercov.sh <project> <dir> <runner: pytest|unittest> <supercov> <out> [values]
+# LAUNCHER starts pytest another way than `python -m pytest`: `script` (the
+# environment's `pytest` script), `uv` (`uv run --active --no-sync pytest`)
+# or `poetry` (`poetry run pytest`, in the environment as Poetry finds it
+# active).
 set -uo pipefail
 project=$1
 dir=$(cd "$2" && pwd)
@@ -21,17 +25,35 @@ case "$project" in
   cachetools) export SUPERCOV_SOURCE_ROOTS=src/cachetools ;;
   parse) export SUPERCOV_SOURCE_ROOTS=parse ;;
   humanize) export SUPERCOV_SOURCE_ROOTS=src/humanize ;;
+  markupsafe) export SUPERCOV_SOURCE_ROOTS=src/markupsafe ;;
+  semver) export SUPERCOV_SOURCE_ROOTS=src/semver ;;
 esac
-case "$runner" in
-  pytest) command=(python -m pytest -p no:cacheprovider) ;;
-  unittest) command=(python -m unittest discover -s tests -t .) ;;
+export VIRTUAL_ENV="$dir/.venv"
+case "$runner:${LAUNCHER:-}" in
+  pytest:) command=(python -m pytest -p no:cacheprovider) ;;
+  pytest:script) command=(pytest -p no:cacheprovider) ;;
+  pytest:uv) command=(uv run --active --no-sync pytest -p no:cacheprovider) ;;
+  pytest:poetry)
+    command=(poetry run pytest -p no:cacheprovider)
+    # semver's version is dynamic (setuptools-scm), which Poetry 2 refuses
+    # in package mode: Poetry runs from a project of its own that only
+    # names no package, in the same active environment, from the same
+    # directory.
+    if [ "$project" = semver ]; then
+      shim="$dir/poetry-shim"
+      mkdir -p "$shim"
+      printf '[project]\nname = "shim"\nversion = "0"\n\n[tool.poetry]\npackage-mode = false\n' > "$shim/pyproject.toml"
+      command=(poetry --project "$shim" run pytest -p no:cacheprovider)
+    fi
+    ;;
+  unittest:*) command=(python -m unittest discover -s tests -t .) ;;
 esac
 now() { date +%s.%N; }
 started=$(now)
 if [ "${6:-}" = values ]; then export SUPERCOV_MUTANTS=1; fi
 "$supercov" -- "${command[@]}" > "$out/measure.log" 2>&1
-unset SUPERCOV_MUTANTS
 measure_exit=$?
+unset SUPERCOV_MUTANTS
 measured=$(now)
 "$supercov" runs latest mutants test --json > "$out/strong.json" 2> "$out/strong.log"
 strong_exit=$?

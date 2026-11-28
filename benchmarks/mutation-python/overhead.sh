@@ -14,6 +14,8 @@ case "$project" in
   cachetools) export SUPERCOV_SOURCE_ROOTS=src/cachetools ;;
   parse) export SUPERCOV_SOURCE_ROOTS=parse ;;
   humanize) export SUPERCOV_SOURCE_ROOTS=src/humanize ;;
+  markupsafe) export SUPERCOV_SOURCE_ROOTS=src/markupsafe ;;
+  semver) export SUPERCOV_SOURCE_ROOTS=src/semver ;;
 esac
 command=(python -m pytest -q -p no:cacheprovider)
 # humanize's pytest-benchmark tests size their rounds to the speed they

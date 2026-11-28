@@ -18,12 +18,14 @@ roots() {
     cachetools) echo "src/cachetools src/cachetools src" ;;
     parse) echo "parse parse ." ;;
     humanize) echo "src/humanize src/humanize src" ;;
+    markupsafe) echo "src/markupsafe src/markupsafe src" ;;
+    semver) echo "src/semver src/semver src" ;;
   esac
 }
 
 echo "| Project | Pass | Mutants | Both detect | Both leave | Matrix detects, Supercov not | Supercov detects, matrix not | Errors | Weak not-infected or not-reached the matrix detects |"
 echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-for project in python-slugify cachetools parse humanize; do
+for project in python-slugify cachetools parse humanize markupsafe semver; do
   dir="$corpus/$project"
   "$here/setup.sh" "$project" "$dir" > /dev/null
   read -r sources _ module_root <<< "$(roots "$project")"
@@ -54,7 +56,7 @@ done
 echo
 echo "| Project | mutmut | per mutant | Supercov pass | measured run | strong pass | per mutant |"
 echo "| --- | --- | --- | --- | --- | --- | --- |"
-for project in python-slugify cachetools parse humanize; do
+for project in python-slugify cachetools parse humanize markupsafe semver; do
   for pass in "$results"/supercov-"$project"-*; do
     python3 - "$results/mutmut-$project/mutmut-timing.json" "$pass/timing.json" "$project" "$(basename "$pass")" <<'PY'
 import json, sys
@@ -75,7 +77,7 @@ done
 echo
 echo "| Project | tests alone | measured | measured with values |"
 echo "| --- | --- | --- | --- |"
-for project in python-slugify cachetools parse humanize; do
+for project in python-slugify cachetools parse humanize markupsafe semver; do
   python3 - "$results/overhead-$project/overhead.json" <<'PY'
 import json, sys
 try:
@@ -84,4 +86,42 @@ except (OSError, ValueError):
     sys.exit(0)
 print(f"| {o['project']} | {o['plain']:.2f} s | {o['measured']:.2f} s ({o['measured'] / o['plain']:.2f}×) | {o['values']:.2f} s ({o['values'] / o['plain']:.2f}×) |")
 PY
+done
+echo
+echo "Each pass under another interpreter or launcher against the same project's pass under Python 3.12 and \`python -m pytest\`:"
+echo
+echo "| Project | Pass | Mutants | Same verdict | Detected by one only | Other differences |"
+echo "| --- | --- | --- | --- | --- | --- |"
+for project in python-slugify cachetools parse humanize markupsafe semver; do
+  base="$results/supercov-$project-pytest/strong-mutation.json"
+  [ -f "$base" ] || continue
+  for pass in "$results"/supercov-"$project"-pytest-*; do
+    [ -d "$pass" ] || continue
+    python3 - "$base" "$pass/strong-mutation.json" "$project" "${pass##*/supercov-$project-pytest-}" "$out/variant-$project-${pass##*/supercov-$project-pytest-}.json" <<'PY'
+import json, sys
+base_path, path, project, label, out = sys.argv[1:]
+try:
+    ours = json.load(open(path))["mutants"]
+except (OSError, ValueError):
+    print(f"| {project} | {label} | no result | | | |")
+    sys.exit(0)
+base = json.load(open(base_path))["mutants"]
+detected = {"killed", "timeout"}
+same = one = other = 0
+differences = []
+for mutant in sorted(set(base) | set(ours)):
+    a = base.get(mutant, {}).get("status")
+    b = ours.get(mutant, {}).get("status")
+    if a == b:
+        same += 1
+        continue
+    if (a in detected) != (b in detected) and a is not None and b is not None and "error" not in (a, b):
+        one += 1
+    else:
+        other += 1
+    differences.append({"mutant": mutant, "base": a, "variant": b})
+json.dump(differences, open(out, "w"), indent=1)
+print(f"| {project} | {label} | {len(set(base) | set(ours))} | {same} | {one} | {other} |")
+PY
+  done
 done

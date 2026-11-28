@@ -88,7 +88,7 @@ const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line
 
 Weak mutation: for each mutant the language's established tool would make
 (StrykerJS for JavaScript and TypeScript, cargo-mutants for Rust, PIT for
-Java and Kotlin; in preview, mutmut for Python, Gremlins for Go and mutant for Ruby), whether a test
+Java and Kotlin, mutmut for Python; in preview, Gremlins for Go and mutant for Ruby), whether a test
 ran the mutated code (reach) and whether its value differed there
 (infection), read from the run without running anything. A run lists its
 mutants from its sources the first time they are asked for.
