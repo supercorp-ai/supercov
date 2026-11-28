@@ -3470,6 +3470,7 @@ pub fn coverage_views(
             CoverageViewId::Passed => passing_coverage_results(&request.raw_results),
             CoverageViewId::Failed => failed_coverage_results(&request.raw_results),
         };
+        let __t = std::time::Instant::now();
         let mut view = create_coverage_view_with_model(
             &request.manifest,
             &results,
@@ -3477,6 +3478,7 @@ pub fn coverage_views(
             &coverage_model,
             &mut Interner::default(),
         )?;
+        if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] view {:?} {:.3}s", id, __t.elapsed().as_secs_f64()); }
         view.integrity.clone_from(&request.integrity);
         view.transport.clone_from(&transport);
         Ok((id, view))
@@ -4050,6 +4052,7 @@ fn archive_request_from<D>(
     // bytes dropped: holding the decompressed archive whole beside what was
     // parsed from it was a gigabyte of a 1,100-test run's 3.6 GB.
     const BATCH: usize = 256;
+    let __t = std::time::Instant::now();
     let mut entries = Vec::new();
     let mut raw_results = Vec::new();
     let mut journal_results = Vec::new();
@@ -4109,6 +4112,7 @@ fn archive_request_from<D>(
     })
     .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     flush(&mut results, &mut journals, &mut failure);
+    if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] read+parse {:.3}s", __t.elapsed().as_secs_f64()); }
     if let Some(error) = failure {
         return Err(error);
     }
@@ -4293,7 +4297,9 @@ fn archive_request_from<D>(
             frontend.language, coverage_model.language
         )));
     }
+if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] server-join+background {:.3}s", __t.elapsed().as_secs_f64()); }
     resolve_probe_places(&mut raw_results, &manifest.probe_tables);
+    if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] resolve-probe-places {:.3}s", __t.elapsed().as_secs_f64()); }
     separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
     // After server work was credited to its tests by time, so a picked test

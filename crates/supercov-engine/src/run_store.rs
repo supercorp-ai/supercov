@@ -1049,7 +1049,10 @@ fn open_or_build_query_index(
         Err(_) => {
             let (sections, read) = index_sections(run, filter)?;
             let identity = identity_with(run, (read.sha256, read.bytes), analysis);
+            let __t = std::time::Instant::now();
             write_query_index(&sections, &identity, path)?;
+    if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] write-index {:.3}s", __t.elapsed().as_secs_f64()); }
+
             std::thread::spawn(move || drop(sections));
             if used {
                 prune_filtered_indexes(path);
@@ -1200,6 +1203,7 @@ fn index_sections(
     RunIndexError,
 > {
     use crate::coverage_index::CoverageViewId;
+    let __t = std::time::Instant::now();
     let (_, normalized, transport, read, mutation) =
         crate::coverage_report::archive_request(&ArchiveReportRequest {
             archive_path: run.evidence_path.clone(),
@@ -1214,6 +1218,7 @@ fn index_sections(
     // The passed view of a run whose every result passed is the whole view:
     // its records are the whole view's, as publication writes them, and it
     // is not built.
+    if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] archive-request {:.3}s", __t.elapsed().as_secs_f64()); }
     let passed_is_whole = crate::coverage_report::passing_is_every_result(&normalized.raw_results);
     let views: &[CoverageViewId] = if passed_is_whole {
         &[CoverageViewId::All, CoverageViewId::Failed]
@@ -1230,6 +1235,7 @@ fn index_sections(
         passed_is_whole,
     )?;
     sections.extend(mutation_index_sections(mutation.as_ref()));
+    if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] views+sections total {:.3}s", __t.elapsed().as_secs_f64()); }
     std::thread::spawn(move || drop(normalized)); // every test's records, freed by nobody's wait
     Ok((sections, read))
 }

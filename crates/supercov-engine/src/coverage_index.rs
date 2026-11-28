@@ -2205,6 +2205,7 @@ where
     let mut blocks: Option<WholeBlocks> = None;
     for item in views {
         let (id, owned) = item?;
+        let __t = std::time::Instant::now();
         // Written with the whole view's, below.
         if id == CoverageViewId::Passed && passed_is_whole {
             continue;
@@ -2684,6 +2685,7 @@ where
         if id == CoverageViewId::All && whole_view.is_some() {
             blocks = Some(recorded);
         }
+        if std::env::var_os("SUPERCOV_POST_TIMING").is_some() { eprintln!("[timing] sections {:?} {:.3}s", id, __t.elapsed().as_secs_f64()); }
         if let Some(starts) = starts
             && passed_is_whole
         {
