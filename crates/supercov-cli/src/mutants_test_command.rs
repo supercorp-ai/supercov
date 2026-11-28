@@ -641,15 +641,16 @@ fn python_selections(commands: &[Vec<String>]) -> Option<Vec<String>> {
         return None;
     }
     // Each word once, where the parts first select it.
-    let selected = middles
-        .into_iter()
-        .flatten()
-        .fold(Vec::<String>::new(), |mut selected, word| {
-            if !selected.contains(word) {
-                selected.push(word.clone());
-            }
-            selected
-        });
+    let selected =
+        middles
+            .into_iter()
+            .flatten()
+            .fold(Vec::<String>::new(), |mut selected, word| {
+                if !selected.contains(word) {
+                    selected.push(word.clone());
+                }
+                selected
+            });
     let mut united = first[..prefix].to_vec();
     united.extend(selected);
     united.extend_from_slice(&first[first.len() - suffix..]);
