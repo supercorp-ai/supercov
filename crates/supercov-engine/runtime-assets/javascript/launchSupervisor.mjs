@@ -817,7 +817,9 @@ export function installLaunchSupervisor() {
         // any project-owned module ever crossing the SDK boundary. Inspect all
         // newly loaded export graphs (deduplicated by `exportedValues`) so
         // capability discovery remains provider- and runner-neutral.
-        inspectExports(exports);
+        // DIAGNOSTIC ONLY (never merged): SUPERCOV_DIAG_SKIP=inspect.
+        if (!(process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").includes("inspect"))
+            inspectExports(exports);
         return exports;
     };
     record({

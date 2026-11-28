@@ -45,14 +45,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 7/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 9/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 11/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
-          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, plain: '0', variants: 'new,inspect' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, plain: '0', variants: 'new,inspect' }
+          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 7/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 9/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 11/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 13/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
+          - { app: large, shard: 15/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,minprelude,cookies,handover,inspect' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
