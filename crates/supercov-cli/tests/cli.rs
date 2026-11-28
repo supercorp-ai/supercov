@@ -2138,6 +2138,43 @@ fn a_match_guard_holding_a_let_is_measured_both_ways() {
     );
 }
 
+/// A match arm behind a `#[cfg]` no build compiled stays in the match's
+/// table, and selecting a later arm passed over it. The first run counted
+/// that and then left the arm out of the denominator; the next run, which
+/// reuses the build, refused the record ("Rust runtime emitted an unknown
+/// obligation") and published nothing. Both runs now answer alike.
+#[test]
+fn a_match_arm_no_build_compiled_does_not_stop_the_next_run() {
+    let project = Project::empty("cfg-arm");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"arms\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn kind(n: u32) -> &'static str {\n    match n {\n        #[cfg(feature = \"extra\")]\n        0 => \"extra\",\n        1 => \"one\",\n        _ => \"other\",\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {\n        assert_eq!(super::kind(1), \"one\");\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    let gaps = || {
+        project
+            .supercov(&["runs", "latest", "file", "src/lib.rs", "--json"])
+            .json()["data"]["gapLines"]
+            .clone()
+    };
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let first = gaps();
+    let again = project.supercov(&["--", "cargo", "test"]);
+    again.succeeds();
+    assert!(
+        again
+            .stderr()
+            .contains("reusing authenticated instrumented workspace"),
+        "{}",
+        again.stderr()
+    );
+    assert_eq!(gaps(), first);
+}
+
 #[test]
 fn a_closure_in_a_static_is_measured_and_a_const_block_is_declined_in_a_counted_file() {
     let project = Project::empty("const-contexts");
