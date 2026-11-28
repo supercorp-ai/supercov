@@ -4924,7 +4924,8 @@ mod tests {
             std::fs::write(
                 root.join("build.sh"),
                 format!(
-                    "echo worker-build >/dev/null\nmkdir -p build/worker\necho shim > build/worker/shim.mjs\necho \"$CARGO_TARGET_DIR\" > build/target\nexit {exit}\n"
+                    "echo worker-build >/dev/null\nmkdir -p build/worker\necho shim > build/worker/shim.mjs\necho \"$CARGO_TARGET_DIR\" >> '{log}'\nexit {exit}\n",
+                    log = root.join("built.log").display()
                 ),
             )
             .unwrap();
@@ -4955,7 +4956,6 @@ mod tests {
             assert_eq!(run_strong_rust(&request, &mut said), Ok(0));
             (String::from_utf8(said).unwrap(), verdicts(&request))
         };
-        let switched = root.join(".supercov/strong/rust/switched");
         // Mutant 0 does not compile for wasm: built on its own; the Worker
         // is built once, in the check's target, for the switched build.
         build(0);
@@ -4965,23 +4965,10 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains("served as their tests build them"), "{said}");
-        let built_in =
-            std::fs::read_to_string(switched.join("build/target")).unwrap_or_else(|error| {
-                let listed = std::fs::read_dir(&switched)
-                    .map(|entries| {
-                        entries
-                            .flatten()
-                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                panic!("{error}: {listed:?}\n{said}")
-            });
-        assert!(
-            built_in.trim().ends_with("switched-target/wasm"),
-            "{built_in}"
-        );
-        assert!(switched.join(".supercov-strong-worker-built").is_file());
+        // Built once, in the check's target (the copy goes with the pass).
+        let built = std::fs::read_to_string(root.join("built.log")).unwrap_or_default();
+        assert_eq!(built.lines().count(), 1, "{built}\n{said}");
+        assert!(built.trim().ends_with("switched-target/wasm"), "{built}");
         assert!(!found.is_empty(), "{found:?}\n{said}");
         assert!(
             found.values().all(|verdict| verdict["status"] != "error"),
