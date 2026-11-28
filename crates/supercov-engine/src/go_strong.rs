@@ -15,6 +15,11 @@
 //! switch. A switch the compiler still refuses is found by building, at the
 //! site the error is in, and its mutants are built one each, from the file
 //! with only that mutant in place.
+//!
+//! A pass told to stop (its budget, a signal: `stopped-at` beside its
+//! results) starts no test binary more and judges nothing: a binary the
+//! stop ended said nothing about its mutant, and every mutant without a
+//! verdict is left for the next pass.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
@@ -644,7 +649,18 @@ impl Pass<'_> {
         })
     }
 
+    /// Whether the pass was told to stop: from then on it judges nothing.
+    fn stopped(&self) -> bool {
+        self.request
+            .results
+            .with_file_name(crate::strong_driver::STOPPED_AT)
+            .exists()
+    }
+
     fn record(&self, id: &str, verdict: &Verdict) {
+        if self.stopped() {
+            return;
+        }
         let line = json!({
             "id": id,
             "status": verdict.status,
@@ -668,6 +684,17 @@ impl Pass<'_> {
         limit: Duration,
     ) -> RunOutcome {
         let started = Instant::now();
+        if self.stopped() {
+            // Told to stop: nothing more starts, and nothing it says is read.
+            return RunOutcome {
+                passed: false,
+                timed_out: false,
+                hit_limit: false,
+                failures: Vec::new(),
+                started: 0,
+                elapsed_ms: 0,
+            };
+        }
         let mut command = Command::new(binary);
         command
             .current_dir(self.workspace.join(directory))

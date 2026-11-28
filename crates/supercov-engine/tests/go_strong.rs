@@ -324,6 +324,31 @@ fn a_go_pass_runs_what_its_command_and_its_copy_allow() {
     assert!(pass.run("").is_err());
 }
 
+/// A pass told to stop (`stopped-at` beside its results, as its budget or a
+/// signal leaves it) starts no test binary and judges nothing: a binary the
+/// stop ended would read as failing, and its mutant as killed. Every mutant
+/// is left for the next pass.
+#[test]
+fn a_go_pass_told_to_stop_judges_nothing() {
+    let Some(go) = go_binary() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let (boundary, boundary_index) = mutant("if n > Limit", ">", "EqualityOperator", "<=");
+    let (strings, strings_index) = mutant("return a + b", "+", "ArithmeticOperator", "-");
+    let pass = Pass::new(
+        "stopped",
+        &go,
+        vec![
+            planned(&boundary, boundary_index, &[(0, "infected")]),
+            planned(&strings, strings_index, &[(2, "infected")]),
+        ],
+    );
+    std::fs::write(pass.results.with_file_name("stopped-at"), "0").unwrap();
+    pass.run("").unwrap();
+    assert!(pass.verdicts().is_empty(), "{:?}", pass.verdicts());
+}
+
 /// Each step of the pass that can fail ends it, and says where.
 #[test]
 fn each_step_of_the_go_pass_that_fails_ends_it() {
