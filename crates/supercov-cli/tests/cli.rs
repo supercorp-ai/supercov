@@ -31228,6 +31228,82 @@ fn an_interrupted_ruby_pass_stops_at_once_and_judges_nothing_it_cut_short() {
     }
 }
 
+/// A Ruby mutant none of whose candidate tests the pass's command runs is an
+/// error, never a survivor: no test ran against it. Here the strong pass is
+/// given a command that loads one of the two test files the run measured.
+#[cfg(unix)]
+#[test]
+fn a_ruby_mutant_whose_tests_the_command_does_not_run_is_an_error() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong-unloaded");
+    // calc.rb loads half.rb, so the pass under calc_test.rb switches it on,
+    // but only half_test.rb's test reaches it.
+    project.write(
+        "lib/calc.rb",
+        "require_relative 'half'\n\nclass Calc\n  def big?(n)\n    n > 10\n  end\nend\n",
+    );
+    project.write(
+        "lib/half.rb",
+        "class Half\n  def of(n)\n    n / 2\n  end\nend\n",
+    );
+    project.write(
+        "test/calc_test.rb",
+        "require 'minitest/autorun'\nrequire 'calc'\n\nclass CalcTest < Minitest::Test\n  def test_big\n    assert Calc.new.big?(20)\n    refute Calc.new.big?(3)\n  end\nend\n",
+    );
+    project.write(
+        "test/half_test.rb",
+        "require 'minitest/autorun'\nrequire 'half'\n\nclass HalfTest < Minitest::Test\n  def test_half\n    assert_equal 4, Half.new.of(8)\n  end\nend\n",
+    );
+    project.write(
+        "test/all_test.rb",
+        "require 'minitest/autorun'\nrequire_relative 'calc_test'\nrequire_relative 'half_test'\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/all_test.rb"])
+        .succeeds();
+    let ran = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--json",
+        "--",
+        ruby.as_str(),
+        "-Ilib",
+        "test/calc_test.rb",
+    ]);
+    let said = ran.stderr();
+    let strong = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    let mutants = strong["data"]["mutants"].as_array().unwrap();
+    let half = mutants
+        .iter()
+        .filter(|mutant| mutant["id"].as_str().unwrap().starts_with("lib/half.rb"))
+        .filter(|mutant| mutant["strong"]["status"].is_string())
+        .collect::<Vec<_>>();
+    assert!(!half.is_empty(), "{strong}\n{said}");
+    for mutant in half {
+        assert_eq!(mutant["strong"]["status"], "error", "{mutant}\n{said}");
+        assert_eq!(
+            mutant["strong"]["reason"], "none of its candidate tests is in what the command runs",
+            "{mutant}"
+        );
+    }
+    // The tests the command runs still judge their own mutants.
+    assert!(
+        mutants.iter().any(
+            |mutant| mutant["id"].as_str().unwrap().starts_with("lib/calc.rb")
+                && mutant["strong"]["status"] == "killed"
+        ),
+        "{strong}"
+    );
+}
+
 /// Go's strong pass: every Gremlins mutant of a module, run in test
 /// binaries built once, each mutant against the tests that ran its code.
 /// A mutant that does not compile is `unviable`; a constant Go needs as a

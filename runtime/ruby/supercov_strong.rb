@@ -403,7 +403,15 @@ module Supercov
         mutant = job[:mutant]
         ids = candidates(mutant, tests)
         if ids.empty?
-          write(mutant, "survived", nil, 0, 0, "no candidate test passes without the mutant")
+          # No test ran against it says nothing of it: an error, never a
+          # survivor.
+          wanted = mutant_tests(mutant)
+          reason = if wanted.none? { |id| tests.key?(id) }
+                     "none of its candidate tests is in what the command runs"
+                   else
+                     "its candidate tests did not pass without a mutant"
+                   end
+          write(mutant, "error", nil, 0, 0, reason)
           return nil
         end
         job.merge(key: mutant["key"], ids: ids, all: false, limit: limit(ids))
