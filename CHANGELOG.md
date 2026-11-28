@@ -28,6 +28,10 @@
 - A strong pass over AVA tests runs its jobs in a resident AVA, one per worker, instead of starting AVA's command for every mutant and test file. AVA's options are worked out once, from the command's own arguments and configuration, and each job is the command's run again, as AVA's watch mode reruns it: every test file in a new worker, with the job's mutant on from the worker's start. A job that starts an AVA shared worker is its host's last, and a command that watches or debugs starts for each job, as before. On dot-prop (590 mutants, 4 CPUs) the pass takes 116 s where it took 185 s, with every verdict the same.
 - `docs/performance.md` says where a measured unit suite's time goes (the evidence each test writes, and reading and publishing it after the tests) and, for a browser suite with a new context per test, which processes the rest of the overhead is in, with each part switched off in turn. The speed benchmark (`scripts/speed-benchmark.mjs`) runs plain in turns with the binaries it compares, in an order that turns and reverses each round, and can run one suite, leave out plain or the answers, or stop a run that hangs with its log kept; `scripts/speed/evidence-composition.mjs` says what a run's evidence is made of.
 
+**Changed**
+
+- A run's query index holds a passed test's lines, hits and decisions once. A failed run's index wrote them twice, for the whole run and again for its passing tests, most of a large run's store: on Excalidraw's 1,700-test Vitest run the index was 941 MB and is now 554 MB, and the run's store 1,122 MB and now 735 MB, every answer the same. The index's format is version 7; a run's older index is built again from its evidence the first time the run is read.
+
 ## 4.29.19
 
 **Fixed**
