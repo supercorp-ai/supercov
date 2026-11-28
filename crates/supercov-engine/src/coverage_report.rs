@@ -5072,7 +5072,10 @@ mod tests {
             r#"{"idPrefixes":["~p00000000000000aa."],"hits":[-1]}"#,
             r#"{"eventColumns":{"types":["decision"],"phases":[],"environments":["server"],"id":["d"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"0":"TT"}}}"#,
         ] {
-            assert!(serde_json::from_str::<RuntimeSnapshot>(refused).is_err(), "{refused}");
+            assert!(
+                serde_json::from_str::<RuntimeSnapshot>(refused).is_err(),
+                "{refused}"
+            );
         }
     }
 
