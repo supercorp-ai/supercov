@@ -525,7 +525,9 @@ struct Baseline<'a> {
 /// itself; pytest and unittest commands that differ only in pytest-split's
 /// group give it without the split, and those that differ only in the test
 /// files or names they select give one that selects them all
-/// (`python_selections`). Parts that differ in anything else name no one
+/// (`python_selections`); `go test` commands that differ only in their
+/// packages and `-run` give it without them, since the pass picks each
+/// package it runs itself. Parts that differ in anything else name no one
 /// command, and the caller is told to give it.
 fn test_command_of(run: &StoredRun) -> Result<Vec<String>, String> {
     if run.metadata.merged != Some(true) {
@@ -660,8 +662,15 @@ fn python_selections(commands: &[Vec<String>]) -> Option<Vec<String>> {
 /// A Cargo test command without the test names libtest takes after `--`
 /// (`cargo test -- --exact a b` is `cargo test -- --exact`); a pytest
 /// command without pytest-split's `--splits` and `--group`, which choose a
-/// part of the suite; any other command as it is.
+/// part of the suite; a `go test` command without its packages and `-run`
+/// (`go test -race ./a/...` is `go test -race`); any other command as it is.
 fn without_test_names(command: &[String]) -> Vec<String> {
+    if let Some(test) = command
+        .windows(2)
+        .position(|pair| pair[1] == "test" && pair[0].rsplit('/').next() == Some("go"))
+    {
+        return go_without_packages(command, test + 2);
+    }
     if let Some((runner, true)) = python_runner_at(command)
         && command
             .iter()
@@ -707,6 +716,71 @@ fn without_test_names(command: &[String]) -> Vec<String> {
             value = !value && VALUED.contains(&word.as_str());
             kept.push(word.clone());
         }
+    }
+    kept
+}
+
+/// `command` (a `go test` whose arguments start at `from`) without its
+/// packages and its `-run`: what parts of one Go suite measured package by
+/// package differ in. Flags and their values stay, as does everything after
+/// `-args`, which is the test binary's.
+fn go_without_packages(command: &[String], from: usize) -> Vec<String> {
+    // `go test`'s and `go build`'s flags that take their value as the next
+    // word; a boolean flag takes it only after `=`.
+    const VALUED: [&str; 29] = [
+        "run",
+        "skip",
+        "bench",
+        "benchtime",
+        "blockprofile",
+        "count",
+        "coverpkg",
+        "covermode",
+        "coverprofile",
+        "cpu",
+        "cpuprofile",
+        "exec",
+        "fuzz",
+        "fuzztime",
+        "list",
+        "memprofile",
+        "mutexprofile",
+        "o",
+        "outputdir",
+        "p",
+        "parallel",
+        "timeout",
+        "trace",
+        "tags",
+        "mod",
+        "ldflags",
+        "gcflags",
+        "asmflags",
+        "vet",
+    ];
+    let mut kept = command[..from].to_vec();
+    let mut words = command[from..].iter();
+    while let Some(word) = words.next() {
+        if word == "-args" || word == "--args" {
+            kept.push(word.clone());
+            kept.extend(words.by_ref().cloned());
+            break;
+        }
+        let Some(flag) = word.strip_prefix('-') else {
+            // A package.
+            continue;
+        };
+        let name = flag.trim_start_matches('-');
+        let (name, inline) = match name.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (name, false),
+        };
+        let value = (!inline && VALUED.contains(&name)).then(|| words.next().cloned());
+        if name == "run" {
+            continue;
+        }
+        kept.push(word.clone());
+        kept.extend(value.flatten());
     }
     kept
 }
@@ -4298,6 +4372,38 @@ mod tests {
         assert_eq!(united(&["pytest", "python -m pytest"]), None);
         assert_eq!(united(&[]), None);
         assert_eq!(united(&["python -m tox a/b", "python -m tox a/c"]), None);
+    }
+
+    /// A `go test` command's packages and `-run` are what parts of one Go
+    /// suite differ in; its other flags, their values and what follows
+    /// `-args` stay.
+    #[test]
+    fn a_go_test_command_without_its_packages_keeps_its_flags() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            without_test_names(&words(
+                "go test -race -tags integration ./a/... -run TestA -count=1 ./b"
+            )),
+            words("go test -race -tags integration -count=1")
+        );
+        assert_eq!(
+            without_test_names(&words(
+                "/usr/local/go/bin/go test --run=TestB -p 2 ./... -args -flag value"
+            )),
+            words("/usr/local/go/bin/go test -p 2 -args -flag value")
+        );
+        assert_eq!(
+            without_test_names(&words("go test ./a/... --args ./b")),
+            words("go test --args ./b")
+        );
+        assert_eq!(
+            without_test_names(&words("go test ./a/...")),
+            without_test_names(&words("go test ./b/..."))
+        );
+        assert_eq!(
+            without_test_names(&words("go vet ./...")),
+            words("go vet ./...")
+        );
     }
 
     /// A failed command is said with the tests that did not pass, the first

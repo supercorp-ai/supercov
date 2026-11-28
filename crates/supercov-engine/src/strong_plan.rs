@@ -429,15 +429,20 @@ fn failed(raw: &RawTestResult) -> bool {
     }
 }
 
-/// A Python test the measured run skipped: it still runs in a strong pass,
-/// as mutmut runs it, since a mutant can turn a skip into a failure (a
-/// subtest skipped before an assertion that fails). Its baseline in the pass
-/// says whether it passes without the mutant.
-fn skipped_python(raw: &RawTestResult) -> bool {
+/// A Python or Go test the measured run skipped: it still runs in a strong
+/// pass, as mutmut and `go test` run it, since a mutant can turn a skip into
+/// a failure (a subtest skipped before an assertion that fails, a Go test
+/// whose `t.Skip` depends on what the code under test says). Its baseline in
+/// the pass says whether it passes without the mutant.
+fn skipped_but_runs(raw: &RawTestResult) -> bool {
+    let runner = raw.provenance.runner.as_str();
     raw.status.as_deref() == Some("skipped")
         && !raw.flaky
-        && crate::python_strong::RUNNERS.contains(&raw.provenance.runner.as_str())
+        && (crate::python_strong::RUNNERS.contains(&runner) || runner == GO_TEST_RUNNER)
 }
+
+/// The runner a `go test` run's tests are recorded under.
+const GO_TEST_RUNNER: &str = "go-test";
 
 fn exact(raw: &RawTestResult) -> bool {
     raw.attribution == ATTRIBUTION_EXACT || raw.attribution == ATTRIBUTION_BY_TIME
@@ -798,7 +803,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         if raw.status.as_deref() == Some("unknown") && !raw.flaky {
             // Its evidence alone: the outcome is another record's.
         } else {
-            runnable[index] &= passed(raw) || skipped_python(raw);
+            runnable[index] &= passed(raw) || skipped_but_runs(raw);
             // Skipped until an attempt says otherwise.
             tests[index].skipped = raw.status.as_deref() == Some("skipped")
                 && (!stated[index] || tests[index].skipped);
