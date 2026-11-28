@@ -31982,6 +31982,136 @@ fn a_go_file_behind_a_build_tag_gets_value_probes() {
     assert_eq!(mutant["status"], "infected", "{listed}");
 }
 
+/// A Go test the measured run skipped still runs in the strong pass, as
+/// `go test` runs it: its `t.Skip` depends on what the code says, and a
+/// mutant that changes that makes it fail. It was the mutant's only test,
+/// and the plan called the mutant survived without running it.
+#[cfg(unix)]
+#[test]
+fn a_go_test_the_run_skipped_can_kill_a_mutant() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-skipped");
+    project.write("go.mod", "module example.com/gate\n\ngo 1.22\n");
+    project.write(
+        "gate.go",
+        "package gate\n\nfunc Big(n int) bool { return n > 9 }\n",
+    );
+    project.write(
+        "gate_test.go",
+        "package gate\n\nimport \"testing\"\n\nfunc TestGate(t *testing.T) {\n\tif Big(10) {\n\t\tt.Skip(\"big enough\")\n\t}\n\tt.Fatal(\"ten is big\")\n}\n",
+    );
+    let ran = project.supercov(&["mutants", "--json", "--", go, "test", "./..."]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    let statuses = strong_statuses(&project);
+    // `n > 9` made `n <= 9`: Big(10) is false, and the test fails.
+    assert_eq!(
+        statuses
+            .get("gate.go:3:33-3:34:EqualityOperator:<=")
+            .map(String::as_str),
+        Some("killed"),
+        "{statuses:?}\n{said}"
+    );
+}
+
+/// A Go suite measured package by package (`go test ./a/...`, `go test
+/// ./b/...`), merged, and its mutants run in shards of the merged run: the
+/// shards run under the parts' `go test` (they differ only in their
+/// packages), each takes its share, and their verdicts, a mutant that does
+/// not compile among them, are those of one pass over the whole suite.
+#[cfg(unix)]
+#[test]
+fn a_merged_go_run_s_shards_decide_what_one_pass_does() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let files = [
+        ("go.mod", "module example.com/parts\n\ngo 1.22\n"),
+        (
+            "a/a.go",
+            "package a\n\nfunc Join(x, y string) string { return x + y }\n\nfunc Add(x, y int) int { return x + y }\n",
+        ),
+        (
+            "a/a_test.go",
+            "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tif Join(\"a\", \"b\") != \"ab\" || Add(2, 3) != 5 {\n\t\tt.Fatal(\"a\")\n\t}\n}\n",
+        ),
+        (
+            "b/b.go",
+            "package b\n\nfunc Big(n int) bool { return n > 9 }\n",
+        ),
+        (
+            "b/b_test.go",
+            "package b\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) {\n\tif !Big(10) || Big(9) {\n\t\tt.Fatal(\"b\")\n\t}\n}\n",
+        ),
+        (".gitignore", ".supercov\n"),
+    ];
+    let fixture = |name: &str| {
+        let project = Project::empty(name);
+        for (file, contents) in files {
+            project.write(file, contents);
+        }
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project
+    };
+    let statuses = |project: &Project, run: &str| {
+        let saved = serde_json::from_str::<serde_json::Value>(
+            &project.read(&format!(".supercov/runs/{run}/strong-mutation.json")),
+        )
+        .unwrap();
+        saved["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, verdict)| (id.clone(), verdict["status"].as_str().unwrap().to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let project = fixture("go-strong-merged");
+    let part = |packages: &str| {
+        project
+            .supercov_with(&["--", go, "test", packages], &[("SUPERCOV_MUTANTS", "1")])
+            .succeeds();
+        project.latest()
+    };
+    let first = part("./a/...");
+    let second = part("./b/...");
+    project.supercov(&["merge", &first, &second]).succeeds();
+    let mut last = serde_json::Value::Null;
+    for shard in ["1/2", "2/2"] {
+        let ran = project.supercov(&[
+            "runs", "latest", "mutants", "test", "--shard", shard, "--json",
+        ]);
+        let said = ran.stderr();
+        let reply = ran.json();
+        assert_eq!(ran.code(), 0, "{reply}\n{said}");
+        assert!(!said.contains("do not share one test command"), "{said}");
+        assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+        assert!(
+            reply["summary"]["ran"].as_u64() > Some(0),
+            "{reply}\n{said}"
+        );
+        last = reply;
+    }
+    let sharded = statuses(&project, last["run"].as_str().unwrap());
+    // One pass over the whole suite, from nothing.
+    let whole = fixture("go-strong-merged-whole");
+    let reply = whole
+        .supercov(&["mutants", "--json", "--", go, "test", "./..."])
+        .json();
+    let fresh = statuses(&whole, reply["run"].as_str().unwrap());
+    assert_eq!(sharded, fresh);
+    assert!(fresh.values().any(|status| status == "killed"), "{fresh:?}");
+    assert!(
+        fresh.values().any(|status| status == "unviable"),
+        "{fresh:?}"
+    );
+}
+
 /// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
 /// terminal sends it, stops every test binary the pass started and what
 /// they started, though each runs in a process group of its own.
@@ -32047,6 +32177,20 @@ fn an_interrupted_go_pass_leaves_no_process_running() {
         }
     }
     assert!(gone, "{pids:?} outlived the interrupted pass");
+    // The mutant whose test the interrupt ended (`n > 9` made `n >= 9`:
+    // Big(10) still holds, and the test waits) was judged nothing: a binary
+    // the stop ended reads as failing, and its mutant as killed.
+    let run = project.latest();
+    let saved = std::fs::read_to_string(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+    )
+    .unwrap_or_default();
+    assert!(
+        !saved.contains("slow.go:3:33-3:34:EqualityOperator:>="),
+        "{saved}"
+    );
 }
 
 /// A mutant `go vet` rejects fails `go test` before any test runs, as one
