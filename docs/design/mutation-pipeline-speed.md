@@ -156,8 +156,42 @@ arguments). Low value; not pursued.
 
 ### Sharding by measured cost
 
-Exact only when every job plans from the same measured run, which is why
-the hash split replaced it. Not pursued.
+`--shard k/n` deals mutants by a hash of their id, so each share has about
+as many mutants, not about the same cost. With each mutant's measured test
+time from the baseline, the busiest share against an even split of the
+total (and never under the costliest mutant):
+
+| project | 2 shares | 4 shares | 8 shares |
+| --- | ---: | ---: | ---: |
+| go/btree | +9% | +42% | +61% |
+| go/golang-lru | +9% | +15% | +34% |
+| go/uuid | +29% | +90% | +206% |
+| js/cookie-es | +5% | +15% | +34% |
+| js/pathe | +8% | +16% | +32% |
+| js/ufo | +5% | +19% | +45% |
+| python/cachetools | +10% | +41% | +92% |
+| python/parse | +0% | +24% | +74% |
+| python/python-slugify | +3% | +21% | +40% |
+| python/humanize | +7% | +13% | +50% |
+
+The heavy tail (Go's timeouts, a few slow mutants) is most of it. A split by
+cost is exact only when every job plans from the same measured run. In the
+documented CI flow, each job runs `supercov mutants --shard k/n -- <command>`.
+That command measures in the job itself, unless the checkout is unchanged
+since a run it restored. A job cannot tell whether the others planned from
+the run it did. Where they did not, a split by cost puts some mutants in two
+shares and others in none, which is the bug 4.29.20 fixed with the hash. Two
+variants look exact but are not:
+
+- Cost from a restored run only: jobs of one round restore the latest save
+  for the commit, almost always the same one, but nothing guarantees it.
+- Hashing into many small buckets and dealing the buckets by cost: the cost
+  is still each job's own.
+
+Exact would need the jobs to agree on one plan, for example one job that
+measures and plans and the others that download its plan. That changes the
+documented workflow; it is not automatic. Not pursued without that
+decision.
 
 ### JavaScript: the first file a mutant runs
 
@@ -193,9 +227,11 @@ sorts them cheapest first, by the baseline's times. It keeps the verdicts
 exact another way: a kill that came after other tests than the baseline ran
 before the killer is confirmed by running the same tests, and then the
 killer, without the mutant (`_confirmed`, cached by prefix and killer). The
-kill stands only if the killer passes there. So the order is already free,
-and a different one changes when a verdict comes, not what it is. One fork
-per test (dropped above) is not needed for that.
+kill stands only if the killer passes there. That makes a kill exact
+whatever test comes before it. It does not make the order free: where a
+mutant both fails one test and hangs another, the order decides whether it
+is `killed` or a `timeout` (measured below). One fork per test would not
+change that either.
 
 The lever, then: run first the tests that killed the most of the mutant's
 function's (then its file's) other mutants so far in the pass, then the
@@ -232,7 +268,10 @@ machine otherwise idle. Running the retries side by side, one per idle
 core, would bring back the contention the round alone rules out. A lower
 hit limit (a billion evaluations) moves verdicts: btree passes a test that
 evaluates one comparison over a million times. Both are choices about what
-a timeout means, not exact changes. Open: for the coordinator to decide.
+a timeout means, not exact changes, and both are declined: no accuracy
+loss. The exact variant runs the retries side by side and takes a timeout
+there only as "retry alone". It saves nothing where the mutant really hangs,
+and every corpus timeout did. Not pursued.
 
 ### Already in place
 
