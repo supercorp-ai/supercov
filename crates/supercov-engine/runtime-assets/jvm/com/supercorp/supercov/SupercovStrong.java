@@ -250,6 +250,47 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
      * the engine registers it during the run: the class's other tests run
      * too, and their outcomes say nothing of this one.
      */
+    /** A test found by its unique id runs with others in one request. */
+    @Override
+    public boolean batchable(SupercovStrongPass.Test test) {
+      return test.handle instanceof String;
+    }
+
+    @Override
+    public void executeAll(
+        java.util.List<SupercovStrongPass.Test> tests,
+        final Map<SupercovStrongPass.Test, SupercovStrongPass.Outcome> outcomes) {
+      final Map<String, SupercovStrongPass.Outcome> byId = new HashMap<>();
+      LauncherDiscoveryRequestBuilder builder = LauncherDiscoveryRequestBuilder.request();
+      java.util.List<org.junit.platform.engine.DiscoverySelector> selectors =
+          new java.util.ArrayList<>();
+      for (SupercovStrongPass.Test test : tests) {
+        byId.put((String) test.handle, outcomes.get(test));
+        selectors.add(DiscoverySelectors.selectUniqueId((String) test.handle));
+      }
+      launcher.execute(
+          builder.selectors(selectors).build(),
+          new TestExecutionListener() {
+            @Override
+            public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
+              if (result.getStatus() != TestExecutionResult.Status.FAILED) {
+                return;
+              }
+              SupercovStrongPass.Outcome outcome = byId.get(identifier.getUniqueId());
+              if (outcome == null) {
+                // A container's failure (a class's setup) fails its tests.
+                for (Map.Entry<String, SupercovStrongPass.Outcome> entry : byId.entrySet()) {
+                  if (entry.getKey().startsWith(identifier.getUniqueId() + "/")) {
+                    entry.getValue().fail(result.getThrowable().orElse(null));
+                  }
+                }
+                return;
+              }
+              outcome.fail(result.getThrowable().orElse(null));
+            }
+          });
+    }
+
     private void executeByClass(
         SupercovStrongPass.Test test, final SupercovStrongPass.Outcome outcome) {
       Object[] handle = (Object[]) test.handle;

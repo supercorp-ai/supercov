@@ -69,6 +69,21 @@ public final class SupercovStrongPass {
 
     /** Runs the test, recording how it ended in {@code outcome}. */
     void execute(Test test, Outcome outcome) throws Throwable;
+
+    /** Whether the test can run in one request with others (see {@link #executeAll}). */
+    default boolean batchable(Test test) {
+      return false;
+    }
+
+    /**
+     * Runs the tests in one request, in their order, recording how each
+     * ended in its own outcome.
+     */
+    default void executeAll(List<Test> tests, Map<Test, Outcome> outcomes) throws Throwable {
+      for (Test test : tests) {
+        execute(test, outcomes.get(test));
+      }
+    }
   }
 
   public static final class Test {
@@ -696,38 +711,62 @@ public final class SupercovStrongPass {
     ClassLoader mutated = fresh();
     int ran = 0;
     String unrepeatable = null;
-    for (Test test : killersFirst(mutant, candidates)) {
-      if (test.baseline == null && sharedBaseline(test)) {
-        profile.sharedBaselines++;
-      }
-      if (test.baseline == null) {
-        long before = System.nanoTime();
-        Outcome baseline = execute(test, false, -1, -1);
-        test.baselineMillis = (System.nanoTime() - before) / 1_000_000L;
-        profile.baselines++;
-        profile.baselineNanos += System.nanoTime() - before;
-        if (baseline.timedOut) {
-          write(mutant, "error", null, ran, started,
-              "its test " + test.name + " ran past its time without a mutant");
-          return false;
-        }
-        test.baseline = !baseline.failed;
-        if (test.baseline) {
-          // Once more: a test that leaves what fails it the next time (a
-          // file it makes and never deletes) cannot tell a mutant from its
-          // own leftovers. It is no candidate, and says so.
-          long second = System.nanoTime();
-          Outcome again = execute(test, false, -1, -1);
-          profile.baselines++;
-          profile.baselineNanos += System.nanoTime() - second;
-          if (again.failed || again.timedOut) {
-            test.baseline = false;
-            test.unrepeatable = true;
-            System.err.println(
-                "supercov: " + test.name + " fails when run a second time: " + again.reason);
+    List<Test> ordered = killersFirst(mutant, candidates);
+    int next = 0;
+    while (next < ordered.size()) {
+      // Past the first few candidates (the likeliest killers), the rest run
+      // in batches, one request each: the first kill still ends the mutant's
+      // run, at its batch.
+      if (next >= ALONE && !retry && slow != null && executor.batchable(ordered.get(next))) {
+        List<Test> batch = new ArrayList<>();
+        while (next < ordered.size() && batch.size() < BATCH
+            && executor.batchable(ordered.get(next))) {
+          Test test = ordered.get(next++);
+          if (!baselined(mutant, test, ran, started)) {
+            return false;
           }
+          if (!test.baseline) {
+            if (test.unrepeatable && unrepeatable == null) {
+              unrepeatable = test.name;
+            }
+            continue;
+          }
+          batch.add(test);
         }
-        shareBaseline(test);
+        if (batch.isEmpty()) {
+          continue;
+        }
+        ran += batch.size();
+        Map<Test, Outcome> outcomes = executeAll(batch, mutant, mutated);
+        Outcome whole = outcomes.get(null);
+        if (whole.timedOut) {
+          // Past the batch's limit: tried again in the generous round,
+          // where each test runs alone.
+          markSlow(mutant);
+          boolean another = abandoned != null && abandoned.isAlive();
+          abandoned = whole.worker;
+          return !another;
+        }
+        if (whole.mutantTimeout) {
+          markSlow(mutant);
+          return true;
+        }
+        for (Test test : batch) {
+          Outcome outcome = outcomes.get(test);
+          if (!outcome.failed) {
+            continue;
+          }
+          Boolean confirmed = confirmKill(mutant, test, outcome, ran, started);
+          if (confirmed == null) {
+            return false;
+          }
+          return true;
+        }
+        continue;
+      }
+      Test test = ordered.get(next++);
+      if (!baselined(mutant, test, ran, started)) {
+        return false;
       }
       if (!test.baseline) {
         if (test.unrepeatable && unrepeatable == null) {
@@ -769,21 +808,7 @@ public final class SupercovStrongPass {
         return true;
       }
       if (outcome.failed) {
-        long confirm = System.nanoTime();
-        Outcome confirmation = execute(test, false, -1, -1);
-        profile.confirmations++;
-        profile.confirmNanos += System.nanoTime() - confirm;
-        if (confirmation.failed || confirmation.timedOut) {
-          // The mutant left the JVM so that the test fails without it: no
-          // verdict here, and a fresh JVM for the rest.
-          System.err.println(
-              "supercov: " + test.name + " fails without the mutant too after it ran: "
-                  + confirmation.reason);
-          return false;
-        }
-        write(mutant, "killed", test.name, ran, started, outcome.reason);
-        killers.computeIfAbsent(mutant.file, file -> new HashMap<>()).merge(test.index, 1, Integer::sum);
-        return true;
+        return confirmKill(mutant, test, outcome, ran, started) != null;
       }
     }
     if (!missing.isEmpty()) {
@@ -813,6 +838,7 @@ public final class SupercovStrongPass {
     long classesAtBegin;
     long compileAtBegin;
     int mutants;
+    int batches;
     int baselines;
     int sharedBaselines;
     long baselineNanos;
@@ -864,6 +890,7 @@ public final class SupercovStrongPass {
       line.append(",\"jvmStartMs\":").append(uptimeAtBegin);
       line.append(",\"passMs\":").append((System.nanoTime() - began) / 1_000_000L);
       line.append(",\"mutants\":").append(mutants);
+      line.append(",\"batches\":").append(batches);
       line.append(",\"baselines\":").append(baselines);
       line.append(",\"baselineMs\":").append(baselineNanos / 1_000_000L);
       line.append(",\"sharedBaselines\":").append(sharedBaselines);
@@ -939,6 +966,137 @@ public final class SupercovStrongPass {
     } catch (IOException e) {
       // The others run it themselves.
     }
+  }
+
+  /**
+   * Runs {@code test}'s baseline where none is known, here or from another
+   * JVM: false where the JVM must stop (its baseline ran past its time),
+   * the error written.
+   */
+  private boolean baselined(Mutant mutant, Test test, int ran, long started) throws IOException {
+    if (test.baseline == null && sharedBaseline(test)) {
+      profile.sharedBaselines++;
+    }
+    if (test.baseline == null) {
+      long before = System.nanoTime();
+      Outcome baseline = execute(test, false, -1, -1);
+      test.baselineMillis = (System.nanoTime() - before) / 1_000_000L;
+      profile.baselines++;
+      profile.baselineNanos += System.nanoTime() - before;
+      if (baseline.timedOut) {
+        write(mutant, "error", null, ran, started,
+            "its test " + test.name + " ran past its time without a mutant");
+        return false;
+      }
+      test.baseline = !baseline.failed;
+      if (test.baseline) {
+        // Once more: a test that leaves what fails it the next time (a
+        // file it makes and never deletes) cannot tell a mutant from its
+        // own leftovers. It is no candidate, and says so.
+        long second = System.nanoTime();
+        Outcome again = execute(test, false, -1, -1);
+        profile.baselines++;
+        profile.baselineNanos += System.nanoTime() - second;
+        if (again.failed || again.timedOut) {
+          test.baseline = false;
+          test.unrepeatable = true;
+          System.err.println(
+              "supercov: " + test.name + " fails when run a second time: " + again.reason);
+        }
+      }
+      shareBaseline(test);
+    }
+    return true;
+  }
+
+  /**
+   * A kill {@code test} reported: confirmed by running it again without the
+   * mutant. True where it is written as killed; null where the JVM must
+   * stop (the test fails without the mutant too after it ran).
+   */
+  private Boolean confirmKill(Mutant mutant, Test test, Outcome outcome, int ran, long started)
+      throws IOException {
+    long confirm = System.nanoTime();
+    Outcome confirmation = execute(test, false, -1, -1);
+    profile.confirmations++;
+    profile.confirmNanos += System.nanoTime() - confirm;
+    if (confirmation.failed || confirmation.timedOut) {
+      // The mutant left the JVM so that the test fails without it: no
+      // verdict here, and a fresh JVM for the rest.
+      System.err.println(
+          "supercov: " + test.name + " fails without the mutant too after it ran: "
+              + confirmation.reason);
+      return null;
+    }
+    write(mutant, "killed", test.name, ran, started, outcome.reason);
+    killers.computeIfAbsent(mutant.file, file -> new HashMap<>()).merge(test.index, 1, Integer::sum);
+    return true;
+  }
+
+  /** How many of a mutant's candidates run alone before the rest run in batches. */
+  static final int ALONE = 4;
+
+  /** How many tests a batch holds at most. */
+  static final int BATCH = 64;
+
+  /**
+   * Runs {@code batch} with the mutant on, in one request, in its own
+   * thread, with the sum of its tests' limits: each test's outcome, and
+   * the whole batch's under {@code null}.
+   */
+  private Map<Test, Outcome> executeAll(
+      final List<Test> batch, Mutant mutant, final ClassLoader loader) {
+    final Map<Test, Outcome> outcomes = new HashMap<>();
+    for (Test test : batch) {
+      outcomes.put(test, new Outcome());
+    }
+    final Outcome whole = new Outcome();
+    outcomes.put(null, whole);
+    long limit = 0;
+    for (Test test : batch) {
+      limit += test.limitMillis(false);
+    }
+    long run = System.nanoTime();
+    Switches switches = Switches.of(loader);
+    switches.on(mutant.file, mutant.index, (int) Math.min(Integer.MAX_VALUE, limit));
+    Thread worker =
+        new Thread(
+            () -> {
+              try {
+                executor.executeAll(batch, outcomes);
+              } catch (Throwable error) {
+                whole.fail(error);
+              }
+            },
+            "supercov-strong-batch");
+    worker.setDaemon(true);
+    worker.setContextClassLoader(loader);
+    worker.start();
+    try {
+      worker.join(limit);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+    if (worker.isAlive()) {
+      whole.timedOut = true;
+      whole.worker = worker;
+    }
+    if (switches.limitReached()) {
+      whole.mutantTimeout = true;
+    }
+    switches.off();
+    // An error outside every test (the request itself) fails the batch's
+    // first test, which confirmation then decides.
+    if (whole.failed && !whole.timedOut) {
+      outcomes.get(batch.get(0)).fail(null);
+      if (outcomes.get(batch.get(0)).reason == null) {
+        outcomes.get(batch.get(0)).reason = whole.reason;
+      }
+    }
+    profile.batches++;
+    profile.runs += batch.size();
+    profile.runNanos += System.nanoTime() - run;
+    return outcomes;
   }
 
   /** Lists the mutant for the retry round. */
