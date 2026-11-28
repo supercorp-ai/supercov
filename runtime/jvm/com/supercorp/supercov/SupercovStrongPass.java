@@ -175,14 +175,6 @@ public final class SupercovStrongPass {
   private final java.util.Set<String> listedSlow;
   private final String module;
   private final Executor executor;
-  /**
-   * The tests that killed mutants of each file in this JVM, and how many:
-   * a mutant's candidates that killed its file's other mutants run first.
-   * Mutants of one file are killed by the same few tests (the file's own
-   * test class, the ones that exercise it), and the first kill ends a
-   * mutant's run; the order decides nothing but which candidate kills it.
-   */
-  private final Map<Integer, Map<Integer, Integer>> killers = new HashMap<>();
   /** Where this JVM's time went, written as the pass's summary line. */
   private final Profile profile = new Profile();
 
@@ -704,7 +696,7 @@ public final class SupercovStrongPass {
     ClassLoader mutated = fresh();
     int ran = 0;
     String unrepeatable = null;
-    for (Test test : killersFirst(mutant, candidates)) {
+    for (Test test : candidates) {
       if (test.baseline == null && sharedBaseline(test)) {
         profile.sharedBaselines++;
       }
@@ -790,7 +782,6 @@ public final class SupercovStrongPass {
           return false;
         }
         write(mutant, "killed", test.name, ran, started, outcome.reason);
-        killers.computeIfAbsent(mutant.file, file -> new HashMap<>()).merge(test.index, 1, Integer::sum);
         return true;
       }
     }
@@ -890,21 +881,6 @@ public final class SupercovStrongPass {
         // The profile is for reading, not for verdicts.
       }
     }
-  }
-
-  /**
-   * {@code candidates} with the tests that killed this file's mutants first,
-   * the most kills first, and the rest in the plan's order.
-   */
-  private List<Test> killersFirst(Mutant mutant, List<Test> candidates) {
-    final Map<Integer, Integer> kills = killers.get(mutant.file);
-    if (kills == null) {
-      return candidates;
-    }
-    List<Test> ordered = new ArrayList<>(candidates);
-    // Stable: candidates with the same count keep the plan's order.
-    ordered.sort((a, b) -> kills.getOrDefault(b.index, 0) - kills.getOrDefault(a.index, 0));
-    return ordered;
   }
 
   /** Takes another JVM's baseline of {@code test}, where one ran: whether it did. */
