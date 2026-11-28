@@ -14,6 +14,10 @@
 - Jobs of a split strong pass now each run their own mutants, and `supercov merge` holds every verdict they reached between them. Each job dealt its share from its own measurement, by what each mutant's candidates cost and which mutants its plan decided; where a suite covers a little differently from run to run (randomized inputs, timing), the jobs dealt differently, so some mutants ran in two jobs and others in none, and the merged totals came out well under the jobs' totals added up (never a wrong verdict). A mutant's share now follows from its id alone, the same on every machine, decided mutants included.
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
 
+**Changed**
+
+- `supercov merge` decompresses each run's evidence once, on a core of its own. It read every run's archive one after another, then read each again to keep what the run answers with. On Excalidraw's Vitest suite split into 16 shards, the merge took 7.8 s; it now takes 5.2 s, about 0.3 GB more at its peak, the merged run byte for byte the same.
+
 ## 4.29.19
 
 **Fixed**
