@@ -267,6 +267,20 @@ if (process.env.BENCH_PERF === '1') {
   }
 }
 
+// The suite itself once under one binary, for where its evidence and
+// publication go (`BENCH_RUN_SUITE` names the binary).
+if (process.env.BENCH_RUN_SUITE) {
+  const binary = binaries.find(({ name }) => name === process.env.BENCH_RUN_SUITE);
+  try {
+    rmSync(join(project, '.supercov'), { recursive: true, force: true });
+    run(project, 'npx', ['-y', 'yarn@1.22.22', 'install', '--frozen-lockfile', '--non-interactive'], 'suite-install');
+    const suite = run(project, binary.path, ['--', 'npx', 'vitest', 'run'], `suite-${binary.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
+    console.log(`[bench] suite under ${binary.name}: ${suite.seconds.toFixed(1)} s, peak ${suite.rssMb.toFixed(0)} MB`);
+  } catch (error) {
+    console.log(`[bench] no suite run: ${error.message}`);
+  }
+}
+
 // Agreement: every output of every binary as the first binary's.
 const disagreements = [];
 const reference = binaries[0].name;
