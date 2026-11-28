@@ -53,6 +53,9 @@ function titlePath(task) {
 function writeEvidence(payload) {
     if (!evidenceDirectory)
         return;
+    // DIAGNOSTIC ONLY (never merged).
+    if ((process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").includes("write"))
+        return;
     appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "vitest-worker", payload);
 }
 // Work a test file did while none of its tests ran: a `beforeAll` of a

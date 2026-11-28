@@ -1424,6 +1424,7 @@ fn run_javascript(
     .map_err(|error| error.to_string())?;
 
     let publication_started = Instant::now();
+    let mut diag_clock = Instant::now();
     // Read before the evidence is archived and removed.
     servers
         .iter_mut()
@@ -1434,6 +1435,7 @@ fn run_javascript(
         crate::served_tests::read(&evidence_directory)
     };
     let mut support = crate::support_reach::read(&support_directory, &workspace, &served);
+    diag_mark(&mut diag_clock, "servers-served-support");
     // What the servers read that the command wrote itself is no input.
     if let Some(support) = &mut support {
         let generated = support.leave_out_generated(&root, &written_by_command);
@@ -1640,8 +1642,10 @@ fn run_javascript(
         },
     ])
     .map_err(|error| error.to_string())?;
+    diag_mark(&mut diag_clock, "collect-sources");
     let (mut entries, parsed) =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
+    diag_mark(&mut diag_clock, "archive-entries");
     // The relay, and so what it gave settings to, is Unix's alone.
     #[cfg(unix)]
     for warning in nothing_came_back(&in_containers, !servers.is_empty(), &entries) {
@@ -1681,9 +1685,12 @@ fn run_javascript(
             recorded_inputs.files.entry(file).or_insert(text);
         });
     }
+    diag_mark(&mut diag_clock, "support-capture");
     let entries = crate::source_capture::append(entries, &recorded_inputs);
+    diag_mark(&mut diag_clock, "source-append");
     let entries = crate::evidence_archive::canonicalize_entries(entries)
         .map_err(|error| error.to_string())?;
+    diag_mark(&mut diag_clock, "canonicalize");
     // The evidence is analysed as publication would analyse the archive --
     // the same entries in its order, with the run's integrity record -- while
     // the archive is compressed: publication read a gigabyte of it back and
@@ -1698,16 +1705,24 @@ fn run_javascript(
     };
     let (raw, analysed) = std::thread::scope(|scope| {
         let analysis = scope.spawn(|| {
-            crate::coverage_report::analyze_coverage_entries(
+            let started = Instant::now();
+            let analysed = crate::coverage_report::analyze_coverage_entries(
                 &analysis_request,
                 &entries,
                 Some(parsed),
             )
-            .ok()
+            .ok();
+            let mut clock = started;
+            diag_mark(&mut clock, "analysis(thread)");
+            analysed
         });
+        let started = Instant::now();
         let raw = crate::evidence_archive::write_canonical_archive(&entries, &archive_path);
+        let mut clock = started;
+        diag_mark(&mut clock, "archive-write(thread)");
         (raw, analysis.join().unwrap_or_else(crate::threads::rethrow))
     });
+    diag_mark(&mut diag_clock, "analysis+write");
     std::thread::spawn(move || drop(entries));
     let raw = raw.map_err(|error| error.to_string())?;
     // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-3
@@ -1715,6 +1730,7 @@ fn run_javascript(
         .map_err(|error| error.to_string())?;
     // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-4
     remove_stored_tree_deferred(&root, &server_evidence_root).map_err(|error| error.to_string())?;
+    diag_mark(&mut diag_clock, "remove-trees");
     let evidence_publication_ms = elapsed_ms(publication_started);
     let timings = RunTimings {
         initialization_ms: rounded_millisecond(initialization_ms),
@@ -1801,6 +1817,7 @@ fn run_javascript(
         companions: (!companions.is_empty()).then_some(companions),
         ..metadata
     };
+    diag_mark(&mut diag_clock, "server-runs");
     let run_directory = crate::lifecycle::publish_archived_run(
         &root,
         &metadata,
@@ -1812,6 +1829,7 @@ fn run_javascript(
         },
     )
     .map_err(|error| error.to_string())?;
+    diag_mark(&mut diag_clock, "publish-archived-run");
     let terminal_status = if execution.exit_code == 0 {
         RunStateStatus::Complete
     } else {
@@ -3241,4 +3259,13 @@ impl Drop for StrongModeGuard {
             crate::js_instrumenter::set_strong_files(None);
         }
     }
+}
+
+/// DIAGNOSTIC ONLY (never merged): how long since the last mark, with
+/// `SUPERCOV_DIAG_TIMING=1`.
+fn diag_mark(clock: &mut Instant, label: &str) {
+    if std::env::var("SUPERCOV_DIAG_TIMING").as_deref() == Ok("1") {
+        eprintln!("[supercov-diag] {label} {:.1}ms", clock.elapsed().as_secs_f64() * 1000.0);
+    }
+    *clock = Instant::now();
 }

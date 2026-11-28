@@ -1970,6 +1970,8 @@ var inertAssertionPhase = { close: (value) => value, fail: (error) => error };
 // and an `asserts` signature all failed to typecheck once wrapped in one.
 function openNodeAssertionPhase(operation, source) {
   var _a8;
+  if (diagSkipList.includes("phases"))
+    return inertAssertionPhase;
   const context = currentRequestContext();
   const scope = context.scope;
   if (!scope)
@@ -2477,6 +2479,8 @@ function recordEvent(into, type, id, vector, timestampMs, phaseId, environment) 
   return true;
 }
 function recordBrowserEvent(type, id, vector, timestampMs, phaseId, environment) {
+  if (diagSkipList.includes("events"))
+    return false;
   if (!recordEvent(state, type, id, vector, timestampMs, phaseId, environment))
     return false;
   workerEvidenceChanged();

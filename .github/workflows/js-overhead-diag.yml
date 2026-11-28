@@ -47,14 +47,12 @@ jobs:
         include:
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'noinstr' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'noinstr' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'maps-none' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'maps-none' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'record-s' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'record-s' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 0, diagnose: 1, profile: 'plain', variants: 'new' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 0, diagnose: 1, profile: 'new', variants: 'new' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'events' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'events' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'write' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'write' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'phases' }
+          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'phases' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -112,6 +110,7 @@ jobs:
           SPEED_SHARD: ${{ matrix.shard }}
           SPEED_SUITES: ${{ matrix.suites }}
           SPEED_DIAGNOSE_PASS: '0'
+          SUPERCOV_DIAG_TIMING: '1'
           SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs
       - if: always()
