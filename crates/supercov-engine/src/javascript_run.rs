@@ -820,7 +820,13 @@ fn run_javascript(
     }
     // A Rust Worker is instrumented in the copy too, and `wrangler dev`
     // builds it there when the suite starts it.
-    if serves_rust_worker {
+    // A strong pass switches the Workers' mutants in instead, each request
+    // with the mutant its test attempt names.
+    let mut worker_strong = false;
+    if serves_rust_worker && let Some(strong) = &request.strong {
+        crate::rust_worker::switch_for_strong_pass(&root, &workspace, strong, diagnostics)?;
+        worker_strong = true;
+    } else if serves_rust_worker {
         servers.extend(
             crate::rust_worker::RustWorkerServer::prepare(
                 &root,
@@ -856,7 +862,11 @@ fn run_javascript(
             .map(Server::RustWasm),
         );
     }
-    if project.source_files.is_empty() && servers.is_empty() && wasm_strong.is_none() {
+    if project.source_files.is_empty()
+        && servers.is_empty()
+        && wasm_strong.is_none()
+        && !worker_strong
+    {
         return Err(
             crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()

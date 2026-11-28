@@ -150,6 +150,7 @@ gates! {
     rust_worker_cargo_test => "scripts/rust-worker-cargo-test.mjs",
     rust_worker_durable_objects => "scripts/rust-worker-durable-objects.mjs",
     rust_worker_mutants => "scripts/rust-worker-mutants.mjs",
+    rust_worker_playwright_mutants => "scripts/rust-worker-playwright-mutants.mjs",
     rust_wasm_hosts => "scripts/rust-wasm-hosts.mjs",
     rust_wasm_js => "scripts/rust-wasm-js.mjs",
     react_native => "scripts/react-native-compatibility.mjs",

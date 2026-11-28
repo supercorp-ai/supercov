@@ -272,6 +272,16 @@ build does:
 A mutant built on its own is served by the real `wrangler`, which builds the
 plain copy's mutated source itself.
 
+**Rust Workers under a browser suite.** A JavaScript strong pass over a
+suite whose `wrangler dev` serves a Rust Worker switches the Worker's mutants
+into its crate in the copy (`rust_strong::switch_wasm_workspace`, which also
+takes out those that do not compile for wasm) and points the copy's
+configuration at an entry that wraps the Worker's default export. `wrangler
+dev` builds the switched copy once, as it starts. Each request names its test
+attempt's mutant in `x-supercov-scope` (`m`, `-` for none), and the entry
+switches it on in each wasm instance before the request runs; requests that
+name different mutants never run at once, as the switch is one per instance.
+
 A mutant in a `const fn` is linked to no statement: the instrumenter
 declares a `const fn`'s body (`unmeasured`) and cannot probe it, so its
 points are in the run's record and never hit. Linked to one, the mutant read
