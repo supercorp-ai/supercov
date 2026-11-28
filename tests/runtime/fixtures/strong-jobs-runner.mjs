@@ -57,26 +57,47 @@ for (const [file, chosen] of Object.entries(job.files)) {
             const lock = join(dirname(process.env.FAKE_SUITE), "build.lock");
             const mine = `${lock}.${process.pid}`;
             writeFileSync(mine, String(process.pid));
+            //
+            // A lock is taken away only from a holder that ended (a job
+            // stopped at its limit while it held it), and only while it is
+            // still that holder's. Taking it away whenever its holder could
+            // not be read (it had just released it) removed the next
+            // holder's lock under it: that holder's own release then found
+            // no lock and threw, its job ended without reporting its test,
+            // and a survivor was `killed` ("the test file did not finish").
+            const holderOf = () => {
+                try {
+                    return readFileSync(lock, "utf8");
+                }
+                catch {
+                    return undefined;
+                }
+            };
             for (;;) {
                 try {
                     linkSync(mine, lock);
                     break;
                 }
                 catch {
-                    try {
-                        process.kill(Number(readFileSync(lock, "utf8")), 0);
+                    const holder = holderOf();
+                    let ended = false;
+                    if (holder !== undefined) {
+                        try {
+                            process.kill(Number(holder), 0);
+                        }
+                        catch (error) {
+                            ended = error.code === "ESRCH";
+                        }
                     }
-                    catch (error) {
-                        // Gone, or held by a process that ended.
-                        if (error.code !== "EPERM")
-                            rmSync(lock, { force: true });
-                    }
+                    if (ended && holderOf() === holder)
+                        rmSync(lock, { force: true });
                     await new Promise((done) => setTimeout(done, 10));
                 }
             }
             rmSync(mine);
             await new Promise((done) => setTimeout(done, 800));
-            rmSync(lock);
+            if (holderOf() === String(process.pid))
+                rmSync(lock, { force: true });
         }
         if (rule === "hang")
             await new Promise(() => setInterval(() => { }, 1000));
