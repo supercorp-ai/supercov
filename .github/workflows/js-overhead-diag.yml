@@ -112,7 +112,8 @@ jobs:
           SPEED_SHARD: ${{ matrix.shard }}
           SPEED_SUITES: ${{ matrix.suites }}
           SPEED_DIAGNOSE_PASS: '0'
-          SUPERCOV_DIAG_TIMING: '1'
+          SPEED_RUN_TIMEOUT_MS: '480000'
+          SUPERCOV_DIAG_TIMING_FILE: ${{ runner.temp }}/speed/logs/diag-timing.txt
           SPEED_PLAIN: ${{ matrix.only == 'plain' && 'only' || '0' }}
           SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs

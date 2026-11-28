@@ -3264,8 +3264,11 @@ impl Drop for StrongModeGuard {
 /// DIAGNOSTIC ONLY (never merged): how long since the last mark, with
 /// `SUPERCOV_DIAG_TIMING=1`.
 fn diag_mark(clock: &mut Instant, label: &str) {
-    if std::env::var("SUPERCOV_DIAG_TIMING").as_deref() == Ok("1") {
-        eprintln!("[supercov-diag] {label} {:.1}ms", clock.elapsed().as_secs_f64() * 1000.0);
+    if let Some(file) = std::env::var_os("SUPERCOV_DIAG_TIMING_FILE") {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+            let _ = writeln!(file, "{label} {:.1}ms", clock.elapsed().as_secs_f64() * 1000.0);
+        }
     }
     *clock = Instant::now();
 }

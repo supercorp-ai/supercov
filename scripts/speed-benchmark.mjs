@@ -47,7 +47,7 @@ function run(cwd, command, args, label, extra = {}, mayFail = false) {
     cwd,
     env: { ...process.env, CI: 'true', ...extra },
     encoding: 'utf8',
-    timeout: 1_800_000,
+    timeout: Number(process.env.SPEED_RUN_TIMEOUT_MS ?? 1_800_000),
     maxBuffer: 256 * 1024 * 1024,
   });
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
