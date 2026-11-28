@@ -454,7 +454,7 @@ fn facts_key(root: &Path, sources: &[(String, String)], tags: &str) -> String {
 }
 
 /// The type checker's helper, built from the embedded source into the
-/// project's `.supercov`, once per version of it.
+/// project's `.supercov`, once per version of it and per toolchain.
 const HELPER_SOURCE: &str = include_str!("../runtime-assets/go/mutants/main.go");
 const HELPER_MODULE: &str = include_str!("../runtime-assets/go/mutants/go.mod");
 
@@ -465,8 +465,7 @@ const HELPER_NAME: &str = "supercov-mutants.exe";
 const HELPER_NAME: &str = "supercov-mutants";
 
 pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
-    let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE]);
-    let directory = root.join(".supercov/cache/go-mutants").join(&digest[..16]);
+    let directory = helper_directory(root, go)?;
     let binary = directory.join(HELPER_NAME);
     if binary.is_file() {
         return Ok(binary);
@@ -498,6 +497,28 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(binary)
+}
+
+/// Where `go`'s build of the helper is kept. The helper reads the export
+/// data `go list -export` writes with the standard library of the toolchain
+/// that built it, so a helper another toolchain built (one from before an
+/// upgrade, or for another target) is not reused: the directory is the
+/// helper's source and the toolchain's version, target and flags.
+fn helper_directory(root: &Path, go: &str) -> Result<PathBuf, String> {
+    let output = Command::new(go)
+        .args(["env", "GOVERSION", "GOOS", "GOARCH", "GOFLAGS"])
+        // fault-site: go-strong.helper.toolchain
+        .launch_registered()
+        .map_err(failed(Path::new(go)))?;
+    if !output.status.success() {
+        return Err(format!(
+            "could not build the Go type-check helper: `{go} env` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let toolchain = String::from_utf8_lossy(&output.stdout);
+    let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE, &toolchain]);
+    Ok(root.join(".supercov/cache/go-mutants").join(&digest[..16]))
 }
 
 /// The helper's answer for one mutant.
@@ -1983,8 +2004,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("supercov-go-helper-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE]);
-        let directory = root.join(".supercov/cache/go-mutants").join(&digest[..16]);
+        let directory = helper_directory(&root, "go").unwrap();
         std::fs::create_dir_all(&directory).unwrap();
         std::os::unix::fs::symlink(program, directory.join(HELPER_NAME)).unwrap();
         root
@@ -2000,6 +2020,22 @@ mod tests {
             helper(&root, "false")
                 .unwrap_err()
                 .contains("could not build")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        // A toolchain whose `env` answers and whose build fails: what it
+        // said is the error.
+        std::fs::create_dir_all(&root).unwrap();
+        let go = root.join("go");
+        std::fs::write(
+            &go,
+            "#!/bin/sh\nif [ \"$1\" = env ]; then echo go1.0; exit 0; fi\necho the build broke >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&go, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let error = helper(&root, go.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.starts_with("could not build the Go type-check helper: the build broke"),
+            "{error}"
         );
         let _ = std::fs::remove_dir_all(&root);
         // `sh` reads the request as a script, and fails.
@@ -2028,6 +2064,68 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// A helper is built once per toolchain: the same one keeps it, another
+    /// (an upgrade, another target) builds its own.
+    #[cfg(unix)]
+    #[test]
+    fn the_type_checker_s_helper_is_built_again_for_another_toolchain() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-go-helper-toolchain-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let builds = root.join("builds");
+        // A `go` that says what it is, and builds by writing its `-o` file.
+        let go = |name: &str, answer: &str| {
+            let path = root.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = env ]; then printf '{answer}'; exit 0; fi\n\
+                     echo built >> '{}'\n: > \"$5\"\n",
+                    builds.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_str().unwrap().to_owned()
+        };
+        let built = || {
+            std::fs::read_to_string(&builds)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let old = go("go-old", "go1.22.0\\nlinux\\namd64\\n\\n");
+        let first = helper(&root, &old).unwrap();
+        assert!(first.is_file());
+        assert_eq!(helper(&root, &old).unwrap(), first);
+        assert_eq!(built(), 1);
+        for (name, answer) in [
+            ("go-new", "go1.25.4\\nlinux\\namd64\\n\\n"),
+            ("go-arm", "go1.22.0\\nlinux\\narm64\\n\\n"),
+            ("go-flags", "go1.22.0\\nlinux\\namd64\\n-tags=x\\n"),
+        ] {
+            let other = helper(&root, &go(name, answer)).unwrap();
+            assert_ne!(other, first, "{name}");
+            assert!(other.is_file(), "{name}");
+        }
+        assert_eq!(built(), 4);
+        // The same toolchain under another path keeps its build.
+        let again = go("go-again", "go1.22.0\\nlinux\\namd64\\n\\n");
+        assert_eq!(helper(&root, &again).unwrap(), first);
+        assert_eq!(built(), 4);
+        // A toolchain that cannot say what it is builds nothing.
+        assert!(
+            helper(&root, "false")
+                .unwrap_err()
+                .contains("`false env` failed")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]

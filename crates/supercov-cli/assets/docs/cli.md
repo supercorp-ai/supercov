@@ -581,7 +581,11 @@ phpunit`). See `docs/design/strong-mutation.md`,
 - `--budget <seconds>` stops the pass once it is spent, counted from the
   command's start (with `supercov mutants`, measuring included): it ends as a
   finished pass, its verdicts saved, and says how many mutants it left for the
-  next, and what measuring took where that was half the budget or more. The
+  next, and what measuring took where that was half the budget or more. A
+  pass still running 8 s after its budget's stop is ended with exit `0` (`2`
+  with `--fail-on` or `--critical`, whose gate it could not judge), not 143:
+  every process a mutant's test started is ended with it, those in groups or
+  sessions of their own too. The
   cheapest mutants run first, by their tests' recorded times.
 - `--timeout-factor <x>`: a Playwright test that runs with a mutant is
   stopped past x times its baseline + 5 s (default 1.5, StrykerJS's), and the

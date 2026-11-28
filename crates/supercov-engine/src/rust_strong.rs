@@ -2066,18 +2066,8 @@ fn supervised(
         // fault-site: rust-strong.supervised
         .launch()?;
     let _registered = crate::child_signal_guard::register_group(&child);
-    let mut stdout = child.stdout.take().expect("piped");
-    let mut stderr = child.stderr.take().expect("piped");
-    let out = std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let _ = stdout.read_to_end(&mut text);
-        text
-    });
-    let err = std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let _ = stderr.read_to_end(&mut text);
-        text
-    });
+    let out = Drained::start(child.stdout.take().expect("piped"));
+    let err = Drained::start(child.stderr.take().expect("piped"));
     // The stop is a file: looked for every 50 ms, not at every poll.
     let mut looked = Instant::now();
     let mut stopped = false;
@@ -2092,7 +2082,7 @@ fn supervised(
             stopped = stop.now();
         }
         if stopped || limit.is_some_and(|limit| started.elapsed() > limit) {
-            kill_group(&mut child);
+            kill_tree(&mut child);
             let _ = child.wait();
             break None;
         }
@@ -2114,13 +2104,59 @@ fn supervised(
             std::thread::sleep(STOP_POLL);
         }
     }
+    // What the process wrote is all there once it ended; a process it left
+    // behind that holds its output open (a `wrangler dev` daemon, in a
+    // group of its own) must not hold the pass past its stop or its limit.
+    let drained_by = Instant::now() + DRAIN_GRACE;
     Ok(Supervised {
         status,
         stopped,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
+        stdout: out.finish(drained_by),
+        stderr: err.finish(drained_by),
         duration,
     })
+}
+
+/// How long a process's output is read past its end, for a descendant that
+/// still holds it open.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// A pipe read to its end on a thread of its own, into a buffer the
+/// supervisor can take whole or as far as it came.
+struct Drained {
+    text: std::sync::Arc<Mutex<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl Drained {
+    fn start(mut pipe: impl Read + Send + 'static) -> Self {
+        let text = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (sender, done) = std::sync::mpsc::channel();
+        let filled = text.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => filled
+                        .lock()
+                        .expect("no reader panics holding it")
+                        .extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = sender.send(());
+        });
+        Self { text, done }
+    }
+
+    /// The text read by its end, or by `by` where a process the child left
+    /// keeps the pipe open: its reader goes on alone and ends with it.
+    fn finish(self, by: Instant) -> Vec<u8> {
+        let _ = self
+            .done
+            .recv_timeout(by.saturating_duration_since(Instant::now()));
+        std::mem::take(&mut *self.text.lock().expect("no reader panics holding it"))
+    }
 }
 
 /// How often a running process's pass looks for its stop.
@@ -2158,6 +2194,29 @@ fn process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn process_group(_command: &mut Command) {}
+
+/// Ends `child`, every process of its group, and every process descended
+/// from it in a group of its own (a test's `wrangler dev` and its
+/// `workerd`), listed before any is ended, while they are still its.
+#[cfg(unix)]
+fn kill_tree(child: &mut std::process::Child) {
+    let descendants = crate::process_supervision::descendant_process_tree(child.id());
+    kill_group(child);
+    // The child is among them, ended again with its group: harmless.
+    descendants.iter().for_each(|process| {
+        // SAFETY: kill(2) of a pid and of the group it may lead; a process
+        // gone since the listing makes it fail harmlessly.
+        unsafe {
+            libc::kill(-(process.pid as i32), libc::SIGKILL);
+            libc::kill(process.pid as i32, libc::SIGKILL);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn kill_tree(child: &mut std::process::Child) {
+    kill_group(child);
+}
 
 /// Ends `child` and every process of its group.
 #[cfg(unix)]
@@ -3527,6 +3586,93 @@ mod tests {
         let cut = terminated(&stop);
         writer.join().unwrap();
         assert!(cut.stopped);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A test that leaves a process behind in a session of its own, holding
+    /// its output open (as a test's `wrangler dev` daemon can), holds the
+    /// pass neither when the test ends nor at the stop: its output is read
+    /// as far as it came, and the stop ends the whole tree, the daemon too.
+    // `setsid(1)` is util-linux's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_daemon_holding_a_test_s_output_holds_neither_its_end_nor_the_stop() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-daemon-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let stop = Stop::beside(&root.join("results.jsonl"));
+        let pid_file = root.join("daemon.pid");
+        // setsid: the daemon leaves the test's process group, as a process
+        // that makes itself a session leader does.
+        let daemon = |wait: &str| {
+            format!(
+                "echo before; setsid sh -c 'echo $$ > {}; exec sleep 120' & {wait}",
+                pid_file.display()
+            )
+        };
+        let started = Instant::now();
+        let ended = supervised(
+            Command::new("sh").args(["-c", &daemon("sleep 0.5; echo after")]),
+            Some(Duration::from_secs(60)),
+            &stop,
+        )
+        .unwrap();
+        assert!(ended.status.is_some_and(|status| status.success()));
+        assert_eq!(String::from_utf8_lossy(&ended.stdout), "before\nafter\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let first: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: cleaning up the daemon a finished test left, by its pid.
+        unsafe { libc::kill(first, libc::SIGKILL) };
+        // The stop, while the test and its daemon run: both end, in time.
+        let marker = root.join(crate::strong_driver::STOPPED_AT);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            std::fs::write(marker, "0").unwrap();
+        });
+        let started = Instant::now();
+        let cut = supervised(
+            Command::new("sh").args(["-c", &daemon("sleep 120")]),
+            None,
+            &stop,
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert!(cut.stopped && cut.status.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        let second: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_ne!(first, second);
+        // SAFETY: signal 0 only asks whether the process is there.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            unsafe { libc::kill(second, 0) != 0 }
+        });
+        if !gone {
+            // SAFETY: cleaning up what the stop left.
+            unsafe { libc::kill(second, libc::SIGKILL) };
+        }
+        assert!(gone, "the daemon outlived the stop");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -31300,7 +31300,7 @@ fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
         "{took:?}\n{said}"
     );
     assert!(
-        said.contains("[supercov] the strong pass did not end within 8 s of being told to stop (sent SIGINT), so it is ended: the verdicts it reached are saved into the run"),
+        said.contains("[supercov] the strong pass did not end within 8 s of being told to stop (sent SIGINT), so it is ended (exit 130): the verdicts it reached are saved into the run"),
         "{said}"
     );
 }
@@ -31308,7 +31308,9 @@ fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
 /// A command still running past its budget is ended by the budget's own
 /// deadline, whatever holds it up: here the progress loop that stops a pass
 /// at its budget never gets to (it stalls), and the pass would never end on
-/// its own. It ends about 45 s after the budget, and says why.
+/// its own. It ends about 45 s after the budget, and says why, as a
+/// finished pass (exit 0), not as a crash; a pass that gates on its
+/// verdicts, which it could not judge, exits 2.
 #[cfg(unix)]
 #[test]
 fn a_command_held_up_past_its_budget_is_ended_by_the_budget_s_deadline() {
@@ -31323,14 +31325,14 @@ fn a_command_held_up_past_its_budget_is_ended_by_the_budget_s_deadline() {
     );
     let took = started.elapsed();
     let said = held.stderr();
-    assert_eq!(held.code(), 143, "{said}");
+    assert_eq!(held.code(), 0, "{said}");
     assert!(
         took >= std::time::Duration::from_secs(3 + 45)
             && took < std::time::Duration::from_secs(3 + 45 + 15),
         "{took:?}\n{said}"
     );
     assert!(
-        said.contains("[supercov] still running 45 s after its budget was spent, so it is ended"),
+        said.contains("[supercov] still running 45 s after its budget was spent, so it is ended as a finished pass (exit 0)"),
         "{said}"
     );
 }
@@ -31416,13 +31418,44 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
         &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
     );
     let said = lingering.stderr();
-    assert_eq!(lingering.code(), 143, "{said}");
+    // It ends as a finished pass, not as a termination a CI job reads as a
+    // crash; one that gates on its verdicts, which it could not judge, as a
+    // request it could not complete.
+    assert_eq!(lingering.code(), 0, "{said}");
     assert!(
         said.contains(
-            "did not end within 8 s of being told to stop (its budget spent), so it is ended"
+            "did not end within 8 s of being told to stop (its budget spent), so it is ended (exit 0)"
         ) && said.contains("[supercov] budget spent, "),
         "{said}"
     );
+    let gated = project.supercov_with(
+        &[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--budget",
+            "1",
+            "--fail-on",
+            "survived",
+        ],
+        &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
+    );
+    assert_eq!(gated.code(), 2, "{}", gated.stderr());
+    let critical = project.supercov_with(
+        &[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--budget",
+            "1",
+            "--critical",
+            "src/**",
+        ],
+        &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
+    );
+    assert_eq!(critical.code(), 2, "{}", critical.stderr());
     // Measured first, as the latest run recorded no values for its
     // mutants: measuring, which takes two seconds here, spends the budget,
     // and the pass runs nothing.
