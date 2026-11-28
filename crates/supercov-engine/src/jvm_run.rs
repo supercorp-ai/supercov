@@ -434,7 +434,9 @@ fn carried_build(build: JvmBuild, previous: &Path) -> CarriedBuild {
         let Ok(bytes) = fs::read(previous.join(&source)) else {
             continue;
         };
-        carried.digests.insert(source, Sha256::digest(&bytes).into());
+        carried
+            .digests
+            .insert(source, Sha256::digest(&bytes).into());
     }
     carried
 }
