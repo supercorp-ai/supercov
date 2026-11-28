@@ -508,6 +508,11 @@ public final class SupercovStrongPass {
     // took as much processor time as the tests did, beside them, on as many
     // processors as there are JVMs.
     command.add("-XX:TieredStopAtLevel=1");
+    // Each mutant's classes are loaded, and so verified, afresh: the
+    // project's compiler wrote them, and verifying them again for every
+    // mutant was much of what a mutant's first test cost.
+    command.add("-XX:+UnlockDiagnosticVMOptions");
+    command.add("-XX:-BytecodeVerificationRemote");
     command.add("-D" + MINION + "=true");
     File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
     File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
