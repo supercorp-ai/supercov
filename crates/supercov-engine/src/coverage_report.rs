@@ -1997,28 +1997,17 @@ pub fn blocking_limitation(limitation: &Value) -> bool {
 /// The observation a snapshot or a server record made of `vector` for
 /// decision `id`, if one did: `vector_indexes` numbers each decision's
 /// observations as `vectors_by_decision` holds them.
+/// The observation of `vector` of the decision `id`, by the decision's slot
+/// (`decision_indexes`) and the index of each slot's vectors.
 fn observation_of<'o>(
-    vector_indexes: &FastMap<String, FastMap<String, usize>>,
-    vectors_by_decision: &'o mut FastMap<String, Vec<MutableObservation>>,
+    (decision_indexes, vector_indexes): (&FastMap<String, usize>, &[FastMap<String, usize>]),
+    vectors_by_decision: &'o mut [Vec<MutableObservation>],
     id: &str,
     vector: &McdcVector,
 ) -> Option<&'o mut MutableObservation> {
-    let index = *vector_indexes.get(id)?.get(&vector_key(vector))?;
-    // Indexed only where the decision's observations are.
-    vectors_by_decision
-        .get_mut(id)
-        .expect("a decision with an index has its observations")
-        .get_mut(index)
-}
-
-fn hash_slot<'m, V: Default, S: std::hash::BuildHasher>(
-    map: &'m mut HashMap<String, V, S>,
-    key: &str,
-) -> &'m mut V {
-    if !map.contains_key(key) {
-        map.insert(key.to_owned(), V::default());
-    }
-    map.get_mut(key).expect("slot was inserted")
+    let slot = *decision_indexes.get(id)?;
+    let index = *vector_indexes[slot].get(&vector_key(vector))?;
+    vectors_by_decision[slot].get_mut(index)
 }
 
 fn tree_slot<'m, V: Default>(map: &'m mut BTreeMap<String, V>, key: &str) -> &'m mut V {
@@ -2451,11 +2440,16 @@ fn create_coverage_view_with_model(
         .iter()
         .enumerate()
         .map(|(index, meta)| (meta.id.clone(), index))
-        .collect::<HashMap<_, _>>();
-    let mut vectors_by_decision = FastMap::<String, Vec<MutableObservation>>::default();
-    let mut vector_indexes = FastMap::<String, FastMap<String, usize>>::default();
-    // Numbers of `tests_by_hit`'s tests, as they arrive.
-    let mut tests_by_decision = FastMap::<String, Vec<u32>>::default();
+        .collect::<FastMap<_, _>>();
+    // Each measured decision's observations, the index of each of its
+    // vectors among them, and the numbers of `tests_by_hit`'s tests that
+    // observed it, as they arrive, in the decision's slot
+    // (`decision_indexes`): looked up by its id once for each vector, where
+    // three maps by id were each looked up again.
+    let slots = decision_metadata.len();
+    let mut vectors_by_decision = vec![Vec::<MutableObservation>::new(); slots];
+    let mut vector_indexes = vec![FastMap::<String, usize>::default(); slots];
+    let mut tests_by_decision = vec![Vec::<u32>::new(); slots];
     let mut tests_by_hit = References::default();
     let mut hit_ids = HitIds::default();
     let mut tests_by_id = FastMap::<Id, MutableTest>::default();
@@ -2530,13 +2524,13 @@ fn create_coverage_view_with_model(
         for (snapshot, browser) in snapshots {
             for decision in &snapshot.decisions {
                 // Code the manifest does not measure, as a hit of it is.
-                if !decision_indexes.contains_key(&decision.id) {
+                let Some(&slot) = decision_indexes.get(decision.id.as_str()) else {
                     continue;
-                }
+                };
                 for vector in &decision.vectors {
                     let key = vector_key(vector);
-                    let indexes = hash_slot(&mut vector_indexes, &decision.id);
-                    let observations = hash_slot(&mut vectors_by_decision, &decision.id);
+                    let indexes = &mut vector_indexes[slot];
+                    let observations = &mut vectors_by_decision[slot];
                     let observation_index = *indexes.entry(key).or_insert_with(|| {
                         observations.push(MutableObservation {
                             vector: vector.clone(),
@@ -2556,8 +2550,7 @@ fn create_coverage_view_with_model(
                     .insert(vector);
                 }
                 if !decision.vectors.is_empty() {
-                    hash_slot(&mut tests_by_decision, &decision.id)
-                        .push(tests_by_hit.number(&id, ids));
+                    tests_by_decision[slot].push(tests_by_hit.number(&id, ids));
                 }
             }
             let test_hits = &mut tests_by_id.get_mut(&id).expect("registered test").hits;
@@ -2607,9 +2600,13 @@ fn create_coverage_view_with_model(
                         .as_ref()
                         .ok_or_else(|| ReportError::InvalidEvent(event.id.clone()))?;
                     tree_slot(&mut phase.decisions, &event.id).insert(vector);
-                    if let Some(observation) =
-                        observation_of(&vector_indexes, &mut vectors_by_decision, &event.id, vector)
-                    {
+                    let observation = observation_of(
+                        (&decision_indexes, vector_indexes.as_slice()),
+                        &mut vectors_by_decision,
+                        &event.id,
+                        vector,
+                    );
+                    if let Some(observation) = observation {
                         observation.phases.push(phases_by_hit.number(phase_id, ids));
                         if explicit {
                             observation
@@ -2651,9 +2648,13 @@ fn create_coverage_view_with_model(
                     let id = &decision.id;
                     for vector in &decision.vectors {
                         tree_slot(&mut phase.decisions, id).insert(vector);
-                        if let Some(observation) =
-                            observation_of(&vector_indexes, &mut vectors_by_decision, id, vector)
-                        {
+                        let observation = observation_of(
+                            (&decision_indexes, vector_indexes.as_slice()),
+                            &mut vectors_by_decision,
+                            id,
+                            vector,
+                        );
+                        if let Some(observation) = observation {
                             observation.phases.push(phases_by_hit.number(phase_id, ids));
                             observation
                                 .explicit_phases
@@ -2681,12 +2682,12 @@ fn create_coverage_view_with_model(
                         .vector
                         .as_ref()
                         .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
-                    if !decision_indexes.contains_key(decision) {
+                    let Some(&slot) = decision_indexes.get(decision) else {
                         continue;
-                    }
+                    };
                     let key = vector_key(vector);
-                    let indexes = hash_slot(&mut vector_indexes, decision);
-                    let observations = hash_slot(&mut vectors_by_decision, decision);
+                    let indexes = &mut vector_indexes[slot];
+                    let observations = &mut vectors_by_decision[slot];
                     let index = *indexes.entry(key).or_insert_with(|| {
                         observations.push(MutableObservation {
                             vector: vector.clone(),
@@ -2704,7 +2705,7 @@ fn create_coverage_view_with_model(
                         decision,
                     )
                     .insert(vector);
-                    hash_slot(&mut tests_by_decision, decision).push(tests_by_hit.number(&id, ids));
+                    tests_by_decision[slot].push(tests_by_hit.number(&id, ids));
                     (decision, Some(vector))
                 } else if record.record_type == "hit" {
                     let hit = record
@@ -2756,9 +2757,13 @@ fn create_coverage_view_with_model(
                 continue;
             };
             tree_slot(&mut phase.decisions, record_id).insert(vector);
-            let observation =
-                observation_of(&vector_indexes, &mut vectors_by_decision, record_id, vector)
-                    .expect("the record registered its vector above");
+            let observation = observation_of(
+                (&decision_indexes, vector_indexes.as_slice()),
+                &mut vectors_by_decision,
+                record_id,
+                vector,
+            )
+            .expect("the record registered its vector above");
             observation.phases.push(phases_by_hit.number(phase_id, ids));
             if explicit {
                 observation
@@ -2916,13 +2921,19 @@ fn create_coverage_view_with_model(
         (&tests_by_hit, &phases_by_hit, &explicit_phases_by_hit);
     let (declined, declared_branches, hit_ids) = (&declined, &declared_branches, &hit_ids);
     let hit_ranks = &hit_ranks;
+    let decision_indexes = &decision_indexes;
     let decide = move || -> Result<(Vec<DecisionResult>, Vec<BranchResult>), ReportError> {
         let (mut vectors_by_decision, mut tests_by_decision) =
             (vectors_by_decision, tests_by_decision);
         let mut outcome_branches = Vec::new();
         let mut decisions = Vec::with_capacity(decision_metadata.len());
         for meta in decision_metadata {
-            let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
+            // The first of the metadata with the id takes its slot, as
+            // taking it from a map by id did.
+            let slot = decision_indexes.get(meta.id.as_str()).copied();
+            let mutable = slot
+                .map(|slot| std::mem::take(&mut vectors_by_decision[slot]))
+                .unwrap_or_default();
             let outcome_id = format!("{}:outcome", meta.id);
             if !declared_branches.contains(outcome_id.as_str()) {
                 let alternatives = [true, false]
@@ -3023,8 +3034,10 @@ fn create_coverage_view_with_model(
                     }
                 })
                 .collect::<Vec<_>>();
-            let decision_tests =
-                tests_by_hit.reached(tests_by_decision.remove(&meta.id).unwrap_or_default());
+            let decision_tests = slot
+                .map(|slot| std::mem::take(&mut tests_by_decision[slot]))
+                .unwrap_or_default();
+            let decision_tests = tests_by_hit.reached(decision_tests);
             let decision_confidence = confidence(
                 &decision_tests,
                 &phases_by_hit.reached(observed_phases),

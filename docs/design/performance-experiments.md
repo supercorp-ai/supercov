@@ -96,7 +96,11 @@ On small suites (jinja, cobra, rack) this fixed cost is what keeps Go, Python an
 | Index stores a passed test's records once (#372) | index 941 → 554 MB, store 1.12 → 0.74 GB | Kept |
 | Merge reads shard archives in parallel, once each (#358) | 16-shard merge 7.8 → 5.2 s | Kept |
 | Build the merged run's index during the merge | −6 s, but peak memory 8.3 → 11.5 GB | Dropped |
-| Decision slots by position instead of id strings | −4% index build on Excalidraw | Pending measurement on small suites |
+| Decision slots by position instead of id strings | Excalidraw index build −4%; evidence step jinja 2.06–2.11 → 1.97–1.99 s, rack 0.72 → 0.70 s, cobra unchanged; answers identical (jinja within its own run-to-run noise) | Kept |
+| Unfiltered diff through a reader of its own that also skips decisions' vectors and tests | diff 10.0 → 0.32 s | Dropped: a second set of readers to keep exact and covered; the shared readers give 2.1 s |
+| Merged run's index built after the archive is written, entries dropped as parsed | merge + first query 35.8 → 25.6 s, peak 8.2 → 11.0 GB | Dropped: memory |
+| Merge writes its parts side by side on threads | part of the 7.8 → 5.2 s | Dropped: a part that cannot be kept must fail the merge, and test faults are per thread; parts are written one after another |
+| All-tests and passing-tests views built side by side when an index is rebuilt | not tried | Dropped: the rebuild holds one view at a time on purpose (+1 view of memory) |
 
 **Next:** hashing and copying evidence twice at publication, and the remaining view building.
 
