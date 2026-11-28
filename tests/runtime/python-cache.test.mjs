@@ -414,6 +414,9 @@ tree = probes.instrument(ast.parse(source), file)
 namespace = {}
 hits = bytearray(index.slot_bytes)
 probes.hits_get = lambda: hits
+# What the runtime does as it installs: probed code reads its probes there.
+import builtins
+builtins.__supercov_probes__ = probes
 exec(compile(tree, 'm.py', 'exec'), namespace)
 for value, allow, expected, observed in [
     (1, True, 'one', {'one','matched'}),
