@@ -624,15 +624,16 @@ fn batches_allowed(passthrough: &[String]) -> bool {
     })
 }
 
-/// The selected doctests grouped by the file that holds them, `(file,
+/// The selected doctests grouped by the file that holds them, `(filters,
 /// names)`, for each file whose name is a filter that selects exactly
-/// them and that holds more than one; and every other selected doctest,
-/// alone.
+/// them and that holds more than one, in parts of at most `largest`
+/// (`batch_parts`); and every other selected doctest, alone.
 fn file_batches(
     selected: &[String],
     all: &[String],
     allowed: bool,
-) -> (Vec<(String, Vec<String>)>, Vec<String>) {
+    largest: usize,
+) -> (Vec<(Vec<String>, Vec<String>)>, Vec<String>) {
     let mut by_file = BTreeMap::<&str, Vec<String>>::new();
     for name in selected {
         let file = name
@@ -646,12 +647,41 @@ fn file_batches(
         let filter_selects_them = !file.contains(char::is_whitespace)
             && all.iter().filter(|name| name.contains(file)).count() == names.len();
         if allowed && names.len() > 1 && filter_selects_them {
-            batches.push((file.to_owned(), names));
+            batches.extend(batch_parts(file, names, all, largest));
         } else {
             singles.extend(names);
         }
     }
     (batches, singles)
+}
+
+/// A file's batch in parts of at most `largest`, so a large file's doctests
+/// run on several cores rather than one: each part's filters are its
+/// doctests' own, a word of each name no other doctest's holds. The whole
+/// file is one batch when it is small, or when one of its doctests has no
+/// such word.
+fn batch_parts(
+    file: &str,
+    names: Vec<String>,
+    all: &[String],
+    largest: usize,
+) -> Vec<(Vec<String>, Vec<String>)> {
+    let own_words = names
+        .iter()
+        .map(|name| {
+            isolate(name, all)
+                .filter(|(_, skips)| skips.is_empty())
+                .map(|(word, _)| word)
+        })
+        .collect::<Option<Vec<_>>>();
+    match own_words {
+        Some(words) if names.len() > largest => words
+            .chunks(largest)
+            .zip(names.chunks(largest))
+            .map(|(words, names)| (words.to_vec(), names.to_vec()))
+            .collect(),
+        _ => vec![(vec![file.to_owned()], names)],
+    }
 }
 
 /// The doctest a pass printed `test NAME ... ` for and no result yet: the
@@ -1123,12 +1153,16 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
         .cloned()
         .collect::<Vec<_>>();
     let batching = !only_ignored && merged_set.is_empty() && batches_allowed(&harness.passthrough);
-    let (batches, singles) = file_batches(&selected_standalone, &all_names, batching);
+    // Parts small enough that every core has two or so to run.
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let largest = selected_standalone.len().div_ceil(cores * 2).max(2);
+    let (batches, singles) = file_batches(&selected_standalone, &all_names, batching, largest);
     let mut plans = batches
         .into_iter()
-        .map(|(file, names)| {
+        .map(|(filters, names)| {
             let mut arguments = harness.passthrough.clone();
-            arguments.extend([file, "--test-threads".to_owned(), "1".to_owned()]);
+            arguments.extend(filters);
+            arguments.extend(["--test-threads".to_owned(), "1".to_owned()]);
             (names, arguments)
         })
         .collect::<Vec<_>>();
@@ -1664,21 +1698,61 @@ mod tests {
             "my file.rs - g (line 1)",
             "my file.rs - h (line 4)",
         ]);
-        let (batches, singles) = file_batches(&all, &all, true);
+        let (batches, singles) = file_batches(&all, &all, true, 8);
         assert_eq!(
             batches,
             [(
-                "src/lib.rs".to_owned(),
+                names(&["src/lib.rs"]),
                 names(&["src/lib.rs - a (line 1)", "src/lib.rs - b (line 5)"])
             )]
         );
         // One doctest; a file name another holds; a file name with a space.
         assert_eq!(singles.len(), 6);
-        let (batches, singles) = file_batches(&all, &all, false);
+        let (batches, singles) = file_batches(&all, &all, false, 8);
         assert!(batches.is_empty());
         assert_eq!(singles.len(), all.len());
         // A name with no file is its own group.
-        assert_eq!(file_batches(&names(&["x"]), &names(&["x"]), true).1, ["x"]);
+        assert_eq!(
+            file_batches(&names(&["x"]), &names(&["x"]), true, 8).1,
+            ["x"]
+        );
+    }
+
+    /// A large file's batch is cut in parts, each named by its doctests'
+    /// own words, unless one of them has none.
+    #[test]
+    fn a_large_file_runs_in_parts_named_by_their_doctests() {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let all = names(&[
+            "src/lib.rs - a (line 1)",
+            "src/lib.rs - b (line 5)",
+            "src/lib.rs - c (line 9)",
+        ]);
+        let (batches, singles) = file_batches(&all, &all, true, 2);
+        assert!(singles.is_empty());
+        assert_eq!(
+            batches,
+            [
+                (
+                    names(&["a", "b"]),
+                    names(&["src/lib.rs - a (line 1)", "src/lib.rs - b (line 5)"])
+                ),
+                (names(&["c"]), names(&["src/lib.rs - c (line 9)"])),
+            ]
+        );
+        // Every word of the first is in the second: no word of its own.
+        let alike = names(&[
+            "src/lib.rs - a (line 1)",
+            "src/lib.rs - a (line 11)",
+            "src/lib.rs - c (line 9)",
+        ]);
+        let (batches, _) = file_batches(&alike, &alike, true, 2);
+        assert_eq!(batches, [(names(&["src/lib.rs"]), alike.clone())]);
     }
 
     #[test]
