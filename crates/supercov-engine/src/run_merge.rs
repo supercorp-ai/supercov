@@ -1376,23 +1376,14 @@ pub fn merge_runs(
         };
         // What each run answers with, kept in the merged run: it is answered
         // from them, and stands alone once they are gone.
-        // Each from the archive read above, side by side: read again one
-        // after another, every run's evidence was decompressed twice.
+        // Each from the archive read above: read again, every run's
+        // evidence was decompressed twice.
         let parts = work.join(crate::run_store::PARTS_DIRECTORY);
-        std::thread::scope(|scope| {
-            inputs
-                .iter()
-                .zip(answered)
-                .map(|(input, answered)| {
-                    let (inventory, parts) = (&inventory, &parts);
-                    scope.spawn(move || keep_part(inventory, input, Some(answered), parts))
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|kept| kept.join().unwrap_or_else(crate::threads::rethrow))
-                .collect::<std::io::Result<()>>()
-        })
-        .map_err(|error| format!("Could not keep the merged runs' records: {error}"))?;
+        inputs
+            .iter()
+            .zip(answered)
+            .try_for_each(|(input, answered)| keep_part(&inventory, input, Some(answered), &parts))
+            .map_err(|error| format!("Could not keep the merged runs' records: {error}"))?;
         publish_archived_run(
             root,
             &metadata,
@@ -3480,11 +3471,10 @@ mod tests {
         );
         assert_eq!(kept_statuses(&root), None);
         // The merged run's archive cannot be read again to plan it (the
-        // fifth archive opened: each run's, each run's again for what the
-        // merge keeps of it, then the merged run's): nothing is lent, and
-        // the merge stands.
+        // first archive this thread opens: the runs' are read each on a
+        // thread of its own, once): nothing is lent, and the merge stands.
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
-        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each@5", || {
+        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");
