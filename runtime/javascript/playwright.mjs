@@ -1166,8 +1166,23 @@ class CoveragePhaseController {
         const covered = (page) => this.adoptedContexts.has(page.context())
             ? []
             : this.appHosts.map((url) => new URL(url).hostname);
-        await timed("activate.frameEvaluate", () => Promise.all([...pages].filter((page) => !page.isClosed?.()).flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
-            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie, coveredHosts }) => {
+        // DIAGNOSTIC (never merged): SUPERCOV_DIAG_SKIP=rawcdp sends a main
+        // frame's activation as Runtime.evaluate on a session of its own,
+        // still awaited.
+        const raw = diagSkip.has("rawcdp");
+        const send = (frame, fn, args) => {
+            const page = frame.page();
+            if (!raw || frame !== page.mainFrame())
+                return frame.evaluate(fn, args);
+            let session = this.diagRawSessions?.get(page);
+            if (!session) {
+                this.diagRawSessions ??= new Map();
+                session = page.context().newCDPSession(page);
+                this.diagRawSessions.set(page, session);
+            }
+            return timed("activate.rawEvaluate", () => session.then((cdp) => cdp.send("Runtime.evaluate", { expression: `(${fn})(${JSON.stringify(args)})`, returnByValue: true })));
+        };
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].filter((page) => !page.isClosed?.()).flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => send(frame, ({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie, coveredHosts }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
             // A document that loaded under an earlier test's attempt (a page

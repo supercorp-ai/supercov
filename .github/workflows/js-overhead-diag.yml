@@ -45,7 +45,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, plain: '0', variants: 'new' }
+          - { app: large, shard: 1/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,rawcdp' }
+          - { app: large, shard: 3/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,rawcdp' }
+          - { app: large, shard: 5/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,rawcdp' }
+          - { app: large, shard: 7/16, offset: 0, rounds: 2, diagnose: 0, variants: 'new,rawcdp' }
+          - { app: large, shard: 9/16, offset: 1, rounds: 2, diagnose: 0, variants: 'new,rawcdp' }
+          - { app: large, shard: 11/16, offset: 2, rounds: 2, diagnose: 0, variants: 'new,rawcdp' }
+          - { app: large, shard: 13/16, offset: 0, rounds: 1, diagnose: 0, plain: '0', variants: 'tnew,traw' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -66,6 +72,8 @@ jobs:
               noinstr) extra="SUPERCOV_SOURCE_ROOTS=${{ matrix.app == 'large' && 'lib/db.ts' || 'packages/math/src/angle.ts' }}" ;;
               maps-*) extra="SUPERCOV_DIAG_MAPS=${variant#maps-}" ;;
               nosmap) extra="SUPERCOV_DIAG_NO_SOURCE_MAPS=1" ;;
+              tnew) extra="SUPERCOV_PHASE_TIMING=1" ;;
+              traw) extra="SUPERCOV_PHASE_TIMING=1 SUPERCOV_DIAG_SKIP=rawcdp" ;;
               minprelude) extra="SUPERCOV_DIAG_PRELUDE=$RUNNER_TEMP/runtime.min.mjs" ;;
               *) extra="SUPERCOV_DIAG_SKIP=$variant" ;;
             esac
