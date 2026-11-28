@@ -2022,6 +2022,22 @@ mod tests {
                 .contains("could not build")
         );
         let _ = std::fs::remove_dir_all(&root);
+        // A toolchain whose `env` answers and whose build fails: what it
+        // said is the error.
+        std::fs::create_dir_all(&root).unwrap();
+        let go = root.join("go");
+        std::fs::write(
+            &go,
+            "#!/bin/sh\nif [ \"$1\" = env ]; then echo go1.0; exit 0; fi\necho the build broke >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&go, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let error = helper(&root, go.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.starts_with("could not build the Go type-check helper: the build broke"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
         // `sh` reads the request as a script, and fails.
         assert!(
             run_helper(
