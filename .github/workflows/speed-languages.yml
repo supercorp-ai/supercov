@@ -16,8 +16,8 @@ concurrency:
 
 env:
   # A base ref to compare against, or empty to measure the head alone.
-  BASE_REF: 'e90b99d63ffc1aa62460074a4f92737d48feb087'
-  PROJECTS: '["python-jinja","rust-bytes","jvm-gson","ruby-rack"]'
+  BASE_REF: 'ef5137ceff9bf3cfda35abc45e31623f3532c274'
+  PROJECTS: '["rust-bytes","rust-serde-json","rust-semver"]'
 
 jobs:
   setup:
@@ -55,7 +55,6 @@ jobs:
         env:
           CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
           CARGO_PROFILE_MEASURE_STRIP: none
-          RUSTFLAGS: -C force-frame-pointers=yes
       - if: matrix.variant == 'new' || needs.setup.outputs.base != ''
         uses: actions/upload-artifact@v4
         with:
