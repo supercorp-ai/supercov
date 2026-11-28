@@ -18,6 +18,7 @@
 
 **Changed**
 
+- A Python strong pass reaches its kills sooner. Each mutant now runs first the tests that killed the most of its function's other mutants so far in the pass (then its file's), and the cheapest after them. Before, it ran its cheapest tests first, so a mutant only a slow test kills ran every cheap test before it. A kill after other tests than the baseline ran before it is confirmed without the mutant, after the same tests, as before, so the verdicts are the same.
 - A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass takes 70 s where it took 121 s, with every verdict the same.
 
 ## 4.29.19

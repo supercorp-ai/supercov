@@ -24788,6 +24788,69 @@ fn mutants_test_runs_python_mutants_under_unittest() {
     }
 }
 
+/// A Python mutant runs first the test that killed its function's other
+/// mutants: three cheap tests run `grade` and assert nothing, and only the
+/// slow one tells its mutants apart. The first mutant runs all four before
+/// its kill; each after it runs the killer alone, and is killed as before.
+#[cfg(unix)]
+#[test]
+fn a_python_mutant_runs_first_the_test_that_killed_its_neighbours() {
+    let project = Project::empty("strong-python-kill-order");
+    project.write(".gitignore", ".supercov\n__pycache__\n");
+    project.write("school/__init__.py", "");
+    project.write(
+        "school/grade.py",
+        "def grade(score):\n    if score >= 90:\n        return 'A'\n    if score >= 80:\n        return 'B'\n    return 'C'\n",
+    );
+    project.write("tests/__init__.py", "");
+    let runs = "        grade(90)\n        grade(80)\n        grade(10)\n";
+    project.write(
+        "tests/test_grade.py",
+        &format!(
+            "import time\nimport unittest\nfrom school.grade import grade\n\n\nclass Grade(unittest.TestCase):\n    def test_a_runs(self):\n{runs}\n    def test_b_runs(self):\n{runs}\n    def test_c_runs(self):\n{runs}\n    def test_z_grades(self):\n        time.sleep(0.05)\n        self.assertEqual([grade(90), grade(80), grade(10)], ['A', 'B', 'C'])\n"
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("grade");
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    project
+        .supercov_with(&command, &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    // One worker: each mutant starts after the one before it is decided.
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[("SUPERCOV_STRONG_WORKERS", "1")],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let killed = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["strong"]["status"] == "killed")
+        .collect::<Vec<_>>();
+    assert!(killed.len() >= 3, "{listed}");
+    for mutant in &killed {
+        assert!(
+            mutant["strong"]["killedBy"]
+                .as_str()
+                .is_some_and(|test| test.contains("test_z_grades")),
+            "{mutant}"
+        );
+    }
+    let alone = killed
+        .iter()
+        .filter(|mutant| mutant["strong"]["tests"] == 1)
+        .count();
+    assert_eq!(alone, killed.len() - 1, "{listed}\n{said}");
+}
+
 /// `mutants test` under bun:test: Bun's runner loads every test file it is
 /// given into one process, so each job names its file.
 #[cfg(unix)]

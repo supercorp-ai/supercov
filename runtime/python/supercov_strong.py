@@ -25,9 +25,12 @@ starts:
 - The driver runs `SUPERCOV_STRONG_PLAN` once the runner has collected its
   tests (pytest's `pytest_runtestloop`, unittest's `TestProgram.runTests`):
   a forked baseline of the tests the pass needs, then one forked process per
-  mutant with the mutant on, running its candidate tests in collection order
-  and stopping at the first that fails. Each mutant's verdict is appended to
-  `SUPERCOV_STRONG_RESULTS` as it is decided.
+  mutant with the mutant on, running its candidate tests and stopping at the
+  first that fails: first the tests that killed the most of its function's
+  (then its file's) mutants so far in the pass, then the cheapest. A kill
+  after other tests than the baseline ran before it stands only where the
+  same tests without the mutant let the killing test pass. Each mutant's
+  verdict is appended to `SUPERCOV_STRONG_RESULTS` as it is decided.
 
 Stdlib only, CPython 3.9 or newer, POSIX (the driver forks).
 """
@@ -691,6 +694,9 @@ class Driver:
         # Whether a test fails without a mutant after given tests, by the
         # tests before it and it: what a confirmation found.
         self.confirmed: dict = {}
+        # How many mutants each test killed so far, by the mutants' function
+        # and by their file: a mutant runs these first (`_likeliest_first`).
+        self.kills: dict = {}
         self.summary = {
             "summary": True,
             "runner": runner.name,
@@ -723,6 +729,28 @@ class Driver:
                 "reason": reason,
             }
         )
+
+    def _scopes(self, mutant):
+        function = mutant.get("function")
+        return ([("function", mutant["file"], function)] if function else []) + [("file", mutant["file"])]
+
+    def _killed(self, mutant, place) -> None:
+        """Notes that the test at `place` killed `mutant`."""
+        for scope in self._scopes(mutant):
+            counts = self.kills.setdefault(scope, {})
+            counts[place] = counts.get(place, 0) + 1
+
+    def _likeliest_first(self, mutant, places):
+        """`places` with the tests that killed the most of the mutant's
+        function's mutants first, then of its file's, and otherwise in their
+        order (the cheapest first). A kill is any test's, and a survivor
+        needs every test to pass, so the order changes when a verdict comes:
+        a kill after other tests than the baseline ran before it is
+        confirmed without the mutant, after the same tests."""
+        scopes = [self.kills.get(scope, {}) for scope in self._scopes(mutant)]
+        if not any(scopes):
+            return places
+        return sorted(places, key=lambda place: [-counts.get(place, 0) for counts in scopes])
 
     def _timed_out(self, mutant) -> bool:
         name = f"{mutant['file']}#{mutant['index']}"
@@ -902,6 +930,8 @@ class Driver:
             while pending and len(running) < workers:
                 job = pending.pop(0)
                 job.setdefault("began", time.monotonic())
+                if job.get("mutant") is not None:
+                    job["places"] = self._likeliest_first(job["mutant"], job["places"])
                 if job.get("fresh"):
                     running.append(self._spawn_fresh(job, job["places"], job["limit"]))
                 else:
@@ -977,8 +1007,10 @@ class Driver:
             # Cheapest first, as the baseline timed them, and in collection
             # order among equals: most kills come from the first tests
             # tried, and a slow test runs only for a mutant the cheap ones
-            # let live. A kill after other tests than the baseline ran
-            # before it is confirmed (below).
+            # let live. As it starts, the tests that killed its function's
+            # mutants go before them (`_likeliest_first`). A kill after
+            # other tests than the baseline ran before it is confirmed
+            # (below).
             places.sort(key=lambda place: (baseline.get(place, ("passed", 0))[1], place))
             if baseline and not places:
                 self._verdict(mutant, "error", reason="its tests did not finish without the mutant")
@@ -1028,6 +1060,7 @@ class Driver:
                             "limit": job["limit"],
                         }
                     ]
+                self._killed(mutant, place)
                 self._verdict(mutant, "killed", killed_by=self.runner.test_id(self.runner.items[place]), tests=ran, started=job["began"])
                 return None
             if timed_out:
@@ -1036,6 +1069,8 @@ class Driver:
             if not child.ended:
                 at = job["places"][ran] if ran < len(job["places"]) else None
                 test = self.runner.test_id(self.runner.items[at]) if at is not None else None
+                if at is not None:
+                    self._killed(mutant, at)
                 self._verdict(
                     mutant,
                     "killed",
@@ -1066,6 +1101,7 @@ class Driver:
         mutant: it stands unless the test fails that way too."""
         mutant = job["mutant"]
         if not fails_alone:
+            self._killed(mutant, killer)
             self._verdict(mutant, "killed", killed_by=self.runner.test_id(self.runner.items[killer]), tests=ran, started=job["began"])
             return None
         # The test fails without the mutant after the same tests: no kill.
