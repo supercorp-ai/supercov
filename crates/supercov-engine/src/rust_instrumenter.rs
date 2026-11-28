@@ -1075,6 +1075,50 @@ impl<'a> RustObligationCollector<'a> {
         self.manifest.unmeasured = declined.into_iter().collect();
     }
 
+    /// A match guard that holds a `let` (`Some(x) if let Some(y) = f(x)`,
+    /// `if ready && let Ok(v) = read()`) carries no probe: a `let` cannot pass
+    /// through a call, and a guard has no block around it to hold a frame or
+    /// an `else` to record the guard failing in. Its decision, the decision's
+    /// outcome and each `&&` whose left side holds a `let` are declared
+    /// unmeasured, rather than read as never evaluated while the code around
+    /// them ran.
+    fn decline_let_guards(&mut self, root: &ra_ap_syntax::SyntaxNode) {
+        let mut declined = Vec::new();
+        for condition in root
+            .descendants()
+            .filter_map(ast::MatchGuard::cast)
+            .filter_map(|guard| guard.condition())
+            .filter(has_let)
+        {
+            let range = condition.syntax().text_range();
+            let id = stable_id(self.file, "decision", range, "match-guard");
+            declined.push(format!("{id}:outcome"));
+            declined.push(id);
+            declined.extend(
+                condition
+                    .syntax()
+                    .descendants()
+                    .filter_map(ast::BinExpr::cast)
+                    .filter(|binary| {
+                        matches!(binary.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And)))
+                            && binary.lhs().is_some_and(|left| has_let(&left))
+                    })
+                    .filter_map(|binary| binary.rhs())
+                    .map(|right| {
+                        stable_id(self.file, "branch", right.syntax().text_range(), "logical-and")
+                    }),
+            );
+            self.site_limitation(
+                "rust-let-guard-not-measured",
+                range,
+                "A match guard that holds a `let` cannot carry probes: its bindings must stay in scope for the arm, so no call can wrap it, and a failing guard passes straight to the next arm. Its decision is not measured".into(),
+            );
+        }
+        self.manifest.unmeasured.extend(declined);
+        self.manifest.unmeasured.sort();
+        self.manifest.unmeasured.dedup();
+    }
+
     /// One limitation for one kind in this file, at the first site it hides.
     /// The report can then point at a line, and the file listing counts it
     /// against the file it belongs to. `kind` is "source-scope", which the
@@ -1364,6 +1408,7 @@ impl<'a> RustObligationCollector<'a> {
         }
 
         self.decline_unreachable_obligations(root);
+        self.decline_let_guards(root);
         self.leave_out_test_code();
         self.gate_obligations();
 
@@ -5621,6 +5666,63 @@ fn main() {
         );
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stdout, b"8\n");
+    }
+
+    /// A match guard holding a `let` carries no probe, so its decision was
+    /// read as never evaluated in either direction while the lines around it
+    /// ran. It is declared unmeasured, with the `&&` whose left side holds
+    /// the `let`; a guard without a `let` is measured as before.
+    #[test]
+    fn a_match_guard_holding_a_let_is_declared_unmeasured() {
+        let source = r#"pub fn pick(value: Option<u32>, ready: bool) -> u32 {
+    match value {
+        Some(x) if let Some(y) = x.checked_sub(1) => y,
+        Some(x) if ready && let Some(y) = x.checked_add(1) && y > 2 => y,
+        Some(x) if x > 3 || ready => x,
+        _ => 0,
+    }
+}
+"#;
+        let manifest = build_rust_manifest("src/lib.rs", source).unwrap();
+        let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+        let guards = manifest
+            .decisions
+            .iter()
+            .filter(|decision| decision.kind == "match-guard")
+            .map(|decision| (decision.source.as_str(), declined.contains(&decision.id)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            guards,
+            [
+                ("let Some(y) = x.checked_sub(1)", true),
+                ("ready && let Some(y) = x.checked_add(1) && y > 2", true),
+                ("x > 3 || ready", false),
+            ]
+        );
+        for decision in &manifest.decisions {
+            let outcome = format!("{}:outcome", decision.id);
+            assert_eq!(
+                declined.contains(&outcome),
+                declined.contains(&decision.id),
+                "{}",
+                decision.source
+            );
+        }
+        // The `&&` after the `let`, and only that one, goes with its guard.
+        let declined_operators = manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "logical-and" && declined.contains(&branch.id))
+            .map(|branch| branch.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(declined_operators, ["y > 2"]);
+        assert!(
+            manifest.limitations.iter().any(|limitation| limitation["id"]
+                .as_str()
+                .is_some_and(|id| id.contains("rust-let-guard-not-measured"))),
+            "{:?}",
+            manifest.limitations
+        );
     }
 
     #[test]
