@@ -36,9 +36,13 @@ compatibility corpus (`tests/compat`) runs the `compat` tests alone.
 1. A release pull request carries the `Release <v>` commit. Release native
    builds (`release-native.yml`) start on it, beside both tiers, which run in
    full on every platform on every push to it.
-2. Merge once release native builds have passed and the `Fast tier` and
-   `Slow tier` statuses both say "Passed in full". Keep the branch up to date
-   with main, so the squash merge has the tree that passed.
+2. Queue it (`gh pr merge <number>`) once release native builds have passed
+   and the `Fast tier` and `Slow tier` statuses both say "Passed in full".
+   The merge queue runs both tiers in full again on its commit and merges
+   that commit. Bring the branch up to date with main before queuing it (and
+   let release native builds pass on that commit), and queue nothing else
+   beside it: the queue's commit then has the tree release native builds
+   built, which is the tree a release publishes.
 3. A failure of a download or the network (a job that says
    `SUPERCOV_INFRA_FAILURE`, a registry's 429 or 5xx) is rerun, not treated as a
    code failure.

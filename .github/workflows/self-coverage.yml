@@ -568,14 +568,24 @@ jobs:
       # 100% lines, branches and MC/DC by the affected tests. Every other line
       # is covered as it was on main, where every test runs and the whole is
       # held to 100%.
+      # Since the pull request's base, or for the merge queue's commit since
+      # main: the commits of pull requests queued before it are changes too.
       - name: Hold the changed lines to 100% coverage
         if: env.AFFECTED == 'true'
-        run: node scripts/ci-affected.mjs changed-gaps HEAD^1 "$RUNNER_TEMP/out"/lines-gaps.jsonl "$RUNNER_TEMP/out"/branches-gaps.jsonl "$RUNNER_TEMP/out"/mcdc-gaps.jsonl
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          base=HEAD^1
+          if [ -n "$MERGE_GROUP_BASE" ]; then
+            base="$MERGE_GROUP_BASE"
+            git fetch -q --depth=1 origin "$base"
+          fi
+          node scripts/ci-affected.mjs changed-gaps "$base" "$RUNNER_TEMP/out"/lines-gaps.jsonl "$RUNNER_TEMP/out"/branches-gaps.jsonl "$RUNNER_TEMP/out"/mcdc-gaps.jsonl
       # Each test's seconds and processor seconds in this full measurement,
       # a name in several slices summed: CI's plan hands them to every job
       # that deals tests by their time (.github/actions/affected).
       - name: Keep the test seconds
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         run: |
           mkdir -p "$RUNNER_TEMP/seconds"
           find "$RUNNER_TEMP/runs" -name test-seconds.tsv -exec cat {} + \
@@ -583,7 +593,7 @@ jobs:
             | LC_ALL=C sort > "$RUNNER_TEMP/seconds/test-seconds.tsv"
           wc -l "$RUNNER_TEMP/seconds/test-seconds.tsv"
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         with:
           name: test-seconds
           path: ${{ runner.temp }}/seconds/test-seconds.tsv
@@ -592,7 +602,7 @@ jobs:
       # reads: the runs (without
       # what only queries read) and the build that answers for them.
       - name: Keep the map
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         run: |
           map="$RUNNER_TEMP/map"
           mkdir -p "$map"
@@ -601,7 +611,7 @@ jobs:
           cp "$RUNNER_TEMP/out/merged-id" "$map/merged-id"
           du -sh "$map"/*
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         with:
           name: affected-map
           path: ${{ runner.temp }}/map

@@ -2,7 +2,7 @@
 // what a release requires of the statuses of its tree.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decide, IN_FULL, missing, verdict } from '../../scripts/ci-tiers.mjs';
+import { decide, IN_FULL, missing, queuedNumber, verdict, withQueuedPull } from '../../scripts/ci-tiers.mjs';
 
 const pull = (fields = {}) => ({ title: 'Measure the thing', head: { ref: 'feature/x', sha: 'abc' }, labels: [], draft: false, ...fields });
 
@@ -66,4 +66,29 @@ test('the newest run that set a tier on a commit stands, and an older one does n
   assert.equal(standingRun([by('Fast tier', 7)], 'Slow tier'), 0);
   assert.equal(standingRun([by('Slow tier', 9, 'someone')], 'Slow tier'), 0);
   assert.equal(standingRun([], 'Slow tier'), 0);
+});
+
+test("the merge queue's commit runs the slow tier as its pull request would", () => {
+  const group = (fields) => ({
+    action: 'checks_requested',
+    merge_group: { head_ref: 'refs/heads/gh-readonly-queue/main/pr-355-0123456789abcdef0123456789abcdef01234567', base_sha: 'b', head_sha: 'h' },
+    ...(fields ? { pull_request: pull(fields) } : {}),
+  });
+  assert.equal(queuedNumber(group()), 355);
+  assert.equal(queuedNumber({ merge_group: { head_ref: 'refs/heads/main' } }), 0);
+  assert.equal(queuedNumber({}), 0);
+  // The group's pull request is read for its title and labels; other events are left as they are.
+  const read = withQueuedPull('merge_group', group(), (number) => pull({ number }));
+  assert.equal(read.pull_request.number, 355);
+  const untouched = { action: 'opened', pull_request: pull() };
+  assert.equal(withQueuedPull('pull_request', untouched, () => assert.fail('read a pull request')), untouched);
+  assert.equal(withQueuedPull('merge_group', { merge_group: { head_ref: 'refs/heads/x' } }, () => assert.fail('read a pull request')).pull_request, undefined);
+  // On the changed lines, or in full for a release pull request or full-ci: the label that ran it on the pull request is not needed again.
+  const plain = decide('merge_group', group({ labels: [{ name: 'ready' }] }));
+  assert.deepEqual([plain.run, plain.full, plain.pending, plain.stale], [true, false, undefined, undefined]);
+  assert.match(plain.reason, /#355, on the changed lines/u);
+  assert.deepEqual([decide('merge_group', group({})).run, decide('merge_group', group({})).full], [true, false]);
+  assert.equal(decide('merge_group', group({ title: 'Release 4.30.0' })).full, true);
+  assert.equal(decide('merge_group', group({ labels: [{ name: 'full-ci' }] })).full, true);
+  assert.deepEqual([decide('merge_group', { merge_group: {} }).run, decide('merge_group', { merge_group: {} }).full], [true, false]);
 });

@@ -5,7 +5,9 @@
 // change can affect, in about ten minutes. The slow tier (slow-tier.yml) runs
 // Self Coverage, Compatibility, React, Next.js and the release gates once a
 // pull request is ready to merge, each night on main, and on every push to a
-// release pull request. Each tier's answer is a commit status, `Fast tier` and
+// release pull request. Both run again on the merge queue's commit (a
+// `merge_group` event): the pull request on main as main is now, which is
+// what merges. Each tier's answer is a commit status, `Fast tier` and
 // `Slow tier`, which branch protection requires and publish.yml reads; not a
 // check of a job's name, which a run that decided to run nothing (a label's)
 // leaves as skipped, and a skipped check counts as passed.
@@ -39,6 +41,25 @@ const ACTIONS = 'github-actions[bot]';
 const isRelease = (pull) => /^Release \d+\.\d+\.\d+/u.test(pull.title ?? '') || /^release\//u.test(pull.head?.ref ?? '');
 
 /**
+ * The pull request a merge group was made for: the merge queue names it in
+ * the group's branch, `gh-readonly-queue/<base>/pr-<number>-<base sha>`. 0
+ * when the name says none.
+ */
+export const queuedNumber = (payload = {}) => Number(/\/pr-(\d+)-[0-9a-f]+$/u.exec(payload.merge_group?.head_ref ?? '')?.[1] ?? 0);
+
+/**
+ * A merge group's event with the pull request it was made for, as
+ * `pull_request`: the event names the group's commits and not the pull
+ * request, whose title and labels say how its tiers run. Any other event as
+ * it is.
+ */
+export function withQueuedPull(name, payload = {}, fetch = (number) => JSON.parse(gh('api', `repos/${repository()}/pulls/${number}`))) {
+  if (name !== 'merge_group' || payload.pull_request) return payload;
+  const number = queuedNumber(payload);
+  return number > 0 ? { ...payload, pull_request: fetch(number) } : payload;
+}
+
+/**
  * Whether an event runs the slow tier: {run, full, reason}, and for a pull
  * request event it does not run on, the pending status to set (`pending`),
  * whether to take a stale `ready` label off (`stale`), or to leave the
@@ -47,11 +68,19 @@ const isRelease = (pull) => /^Release \d+\.\d+\.\d+/u.test(pull.title ?? '') || 
 export function decide(name, payload = {}) {
   if (name === 'schedule') return { run: true, full: true, reason: 'the nightly run of main' };
   if (name === 'workflow_dispatch') return { run: true, full: true, reason: 'a run by hand measures in full' };
-  if (name !== 'pull_request') return { run: false, quiet: true, reason: `a ${name} event runs no slow tier` };
   const pull = payload.pull_request ?? {};
   const labels = new Set((pull.labels ?? []).map((label) => label.name));
   const release = isRelease(pull);
   const full = release || labels.has(FULL_LABEL);
+  // The merge queue's commit: the pull request on main as it is now, which
+  // it merges as soon as both tiers pass. It runs what the pull request's own
+  // run would: on the changed lines, or in full for a release pull request
+  // or `full-ci`.
+  if (name === 'merge_group') {
+    const number = queuedNumber(payload);
+    return { run: true, full, reason: `the merge queue's group for ${number > 0 ? `#${number}` : 'a pull request'}${full ? `, in full (${release ? 'a release pull request' : `the \`${FULL_LABEL}\` label`})` : ', on the changed lines'}` };
+  }
+  if (name !== 'pull_request') return { run: false, quiet: true, reason: `a ${name} event runs no slow tier` };
   const action = payload.action;
   if (action === 'labeled' && ![READY_LABEL, FULL_LABEL].includes(payload.label?.name)) {
     return { run: false, quiet: true, reason: `the label ${payload.label?.name} asks for nothing here` };
@@ -185,9 +214,12 @@ function candidates(sha) {
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('ci-tiers.mjs')) {
   const [command, ...rest] = process.argv.slice(2);
   if (command === 'decide') {
-    const payload = event();
-    const decision = decide(process.env.GITHUB_EVENT_NAME, payload);
-    const sha = payload.pull_request?.head?.sha ?? process.env.GITHUB_SHA;
+    const name = process.env.GITHUB_EVENT_NAME;
+    const payload = withQueuedPull(name, event());
+    const decision = decide(name, payload);
+    // A merge group's commit is the event's, not the head of the pull
+    // request it was made for.
+    const sha = name === 'merge_group' ? process.env.GITHUB_SHA : (payload.pull_request?.head?.sha ?? process.env.GITHUB_SHA);
     // Each night measures main again, but for Self Coverage: a push to main
     // measured this commit already, and the map it keeps is the measurement.
     let selfCoverage = decision.run;
