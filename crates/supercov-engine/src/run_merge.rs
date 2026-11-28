@@ -1027,13 +1027,22 @@ pub fn merge_runs(
                 .expect("a copy's original is read")
         })
         .collect::<Vec<_>>();
-    let archives = inputs
-        .iter()
-        .map(|input| {
-            read_archive(&input.evidence_path)
-                .map_err(|error| format!("Cannot merge coverage run {}: {error}", input.id))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Each run's archive is decompressed on a core of its own: one after
+    // another, a merge of many shards waited on one core for every one.
+    let archives = std::thread::scope(|scope| {
+        inputs
+            .iter()
+            .map(|input| {
+                scope.spawn(|| {
+                    read_archive(&input.evidence_path)
+                        .map_err(|error| format!("Cannot merge coverage run {}: {error}", input.id))
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|reading| reading.join().unwrap_or_else(crate::threads::rethrow))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
     let grown = judged_against_latest(root, &inputs, &archives, &inventory.runs, allow_changed)?;
     let (manifests, unrun_workers) = settle_unrun_workers(
         &archives
@@ -1297,6 +1306,19 @@ pub fn merge_runs(
         // before the merged run is read back to plan its mutants, which
         // holds every record parsed.
         drop(jobs);
+        // What each run answers with, all the merged run keeps of it as it
+        // is (`keep_part`): taken now, so no run's archive is read again.
+        let answered = inputs
+            .iter()
+            .zip(&archives)
+            .map(|(input, archive)| {
+                archive
+                    .iter()
+                    .filter(|entry| answers_with(input, &entry.path))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         drop(archives);
         let archive_path = work.join("evidence.raw.gz");
         let raw = write_archive(entries, &archive_path)
@@ -1354,10 +1376,13 @@ pub fn merge_runs(
         };
         // What each run answers with, kept in the merged run: it is answered
         // from them, and stands alone once they are gone.
+        // Each from the archive read above: read again, every run's
+        // evidence was decompressed twice.
         let parts = work.join(crate::run_store::PARTS_DIRECTORY);
         inputs
             .iter()
-            .try_for_each(|input| keep_part(&inventory, input, &parts))
+            .zip(answered)
+            .try_for_each(|(input, answered)| keep_part(&inventory, input, Some(answered), &parts))
             .map_err(|error| format!("Could not keep the merged runs' records: {error}"))?;
         publish_archived_run(
             root,
@@ -1507,7 +1532,7 @@ pub fn derive_run_of_files(
                 .iter()
                 .flatten()
                 .filter_map(|parent| crate::run_store::merged_part(&inventory, source, parent))
-                .try_for_each(|part| keep_part(&inventory, &part, &parts))
+                .try_for_each(|part| keep_part(&inventory, &part, None, &parts))
                 .map(|()| parts)
         });
         let parts = parts
@@ -1551,25 +1576,38 @@ const ANSWERED_WITH: &[&str] = &[
     crate::run_currency::PLAYWRIGHT_CONFIGURATION,
 ];
 
+/// Whether an entry of a run's archive is one the run answers with
+/// (`ANSWERED_WITH`): a merged run's are its runs' under `shards/`.
+fn answers_with(run: &StoredRun, path: &str) -> bool {
+    let name = if run.metadata.merged == Some(true) {
+        path.rsplit('/').next().unwrap_or(path)
+    } else {
+        path
+    };
+    ANSWERED_WITH.contains(&name)
+}
+
 /// Keeps under `into` what `run` answers with, as a run of its own: its
 /// metadata, its record of what each test ran, and the entries of its
 /// archive that `ANSWERED_WITH` names (a merge's own at its top level and
 /// its runs' under `shards/`). A merged run's own runs are kept in it the
 /// same way, where they are held. A merged run is answered from its runs, so
 /// one that keeps them answers with its runs gone: a baseline cached alone.
-fn keep_part(inventory: &RunInventory, run: &StoredRun, into: &Path) -> std::io::Result<()> {
+/// `answered` is what the run answers with, when the caller has read its
+/// archive already.
+fn keep_part(
+    inventory: &RunInventory,
+    run: &StoredRun,
+    answered: Option<Vec<EvidenceArchiveEntry>>,
+    into: &Path,
+) -> std::io::Result<()> {
     let directory = into.join(&run.id);
     // fault-site: run-merge.keep-part.create-dir-all
     crate::fault_fs::create_dir_all(&directory)?;
-    let merged = run.metadata.merged == Some(true);
-    let entries = read_archive_selected(&run.evidence_path, |path| {
-        let name = if merged {
-            path.rsplit('/').next().unwrap_or(path)
-        } else {
-            path
-        };
-        ANSWERED_WITH.contains(&name)
-    })
+    let entries = match answered {
+        Some(entries) => Ok(entries),
+        None => read_archive_selected(&run.evidence_path, |path| answers_with(run, path)),
+    }
     .and_then(|entries| write_archive(entries, &directory.join("evidence.raw.gz")))
     .map_err(std::io::Error::other)?;
     let mut metadata = run.metadata.clone();
@@ -1601,7 +1639,7 @@ fn keep_part(inventory: &RunInventory, run: &StoredRun, into: &Path) -> std::io:
         .iter()
         .flatten()
         .filter_map(|id| crate::run_store::merged_part(inventory, run, id))
-        .try_for_each(|part| keep_part(inventory, &part, &parts))
+        .try_for_each(|part| keep_part(inventory, &part, None, &parts))
 }
 
 /// A run merged that saved strong verdicts: where its evidence is among the
@@ -3433,11 +3471,10 @@ mod tests {
         );
         assert_eq!(kept_statuses(&root), None);
         // The merged run's archive cannot be read again to plan it (the
-        // fifth archive opened: each run's, each run's again for what the
-        // merge keeps of it, then the merged run's): nothing is lent, and
-        // the merge stands.
+        // first archive this thread opens: the runs' are read each on a
+        // thread of its own, once): nothing is lent, and the merge stands.
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
-        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each@5", || {
+        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");

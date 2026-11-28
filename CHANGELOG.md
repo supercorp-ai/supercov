@@ -37,6 +37,10 @@
 
 - `supercov diff <older> <newer>` of two whole runs reads only which lines and branch outcomes each covered from their indexes, not which tests covered each, and every query reads its index's records without taking a lock for each (the record of the pages already checked is a bitset). On Excalidraw's 1,700-test Vitest run against the merge of its 16 shards, the diff took 10.0 s and 1.1 GB; it now takes 2.1 s and 0.9 GB, its answer byte for byte the same. A diff filtered by kind or runner reads the tests as before.
 
+**Changed**
+
+- `supercov merge` decompresses each run's evidence once, on a core of its own. It read every run's archive one after another, then read each again to keep what the run answers with. On Excalidraw's Vitest suite split into 16 shards, the merge took 7.8 s; it now takes 5.2 s, about 0.3 GB more at its peak, the merged run byte for byte the same.
+
 ## 4.29.19
 
 **Fixed**
