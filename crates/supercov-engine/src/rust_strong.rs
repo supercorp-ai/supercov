@@ -4965,11 +4965,21 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains("served as their tests build them"), "{said}");
+        let built_in =
+            std::fs::read_to_string(switched.join("build/target")).unwrap_or_else(|error| {
+                let listed = std::fs::read_dir(&switched)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                panic!("{error}: {listed:?}\n{said}")
+            });
         assert!(
-            std::fs::read_to_string(switched.join("build/target"))
-                .unwrap()
-                .trim()
-                .ends_with("switched-target/wasm")
+            built_in.trim().ends_with("switched-target/wasm"),
+            "{built_in}"
         );
         assert!(switched.join(".supercov-strong-worker-built").is_file());
         assert!(!found.is_empty(), "{found:?}\n{said}");
