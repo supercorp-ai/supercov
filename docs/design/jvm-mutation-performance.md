@@ -154,3 +154,25 @@ candidates'). Nor was it faster: a batch runs every test in it past the one
 that kills, and the runs with a mutant rose from 6,534 to 9,406 on
 commons-cli and from 32,839 to 43,832 on kotlinpoet (run 46096323495).
 Dropped.
+
+### 6. No second verification of each mutant's classes
+
+The pass's own JVMs run with `-XX:+UnlockDiagnosticVMOptions
+-XX:-BytecodeVerificationRemote`: each mutant's classes are loaded afresh,
+and verifying classes the project's compiler wrote, again for every mutant,
+was part of what each mutant's first test cost. Where none of the pass's
+JVMs starts (a JVM that refuses an option, as the first try of this did
+until the diagnostic options were unlocked), the build's test JVM runs the
+pass itself.
+
+Result (run 46103054380 against 46091426206): every verdict the same
+(commons-cli 882, kotlinpoet 1,238). Each mutant's first run took 81 s of
+JVM time on commons-cli instead of 98 s, and 157 s instead of 163 s on
+kotlinpoet; the strong pass took 88 s against 124 s on commons-cli (where
+this run had no retry build) and 1,660 s against 1,745 s on kotlinpoet.
+
+Where commons-cli's strong pass goes now (shard 1, 42 s): the build and
+its compilation about 6 s, the JVMs' first round 4 to 14 s each, then two
+rounds of about 10.5 s for its seven mutants past the short limit, each a
+`timeout` only after the generous limit's 10 s. PIT, set the same way
+(`timeoutConstInMillis = 10000`), waits as long for each of its timeouts.
