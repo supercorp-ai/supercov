@@ -1534,27 +1534,86 @@ impl<'a> ManifestIndex<'a> {
     }
 }
 
+/// The slot layout's obligations, worked out once for every phase: each
+/// position's place among the layout's ids in their order (one place for
+/// ids that repeat), and whether the manifest knows the id. A phase's slot
+/// hits then need no hashing and no ordered set to come out named, known
+/// and in order.
+struct SlotIds<'a> {
+    ids: &'a [String],
+    known: Vec<bool>,
+    rank: Vec<usize>,
+    by_rank: Vec<&'a str>,
+}
+
+impl<'a> SlotIds<'a> {
+    fn new(index: &ManifestIndex<'_>, ids: &'a [String]) -> Self {
+        let mut order = (0..ids.len()).collect::<Vec<_>>();
+        order.sort_by(|left, right| ids[*left].cmp(&ids[*right]));
+        let mut rank = vec![0; ids.len()];
+        let mut by_rank = Vec::<&str>::new();
+        for position in order {
+            let id = ids[position].as_str();
+            by_rank.extend((by_rank.last() != Some(&id)).then_some(id));
+            rank[position] = by_rank.len() - 1;
+        }
+        let known = ids
+            .iter()
+            .map(|id| {
+                index.points.contains(id.as_str()) || index.alternatives.contains(id.as_str())
+            })
+            .collect();
+        Self {
+            ids,
+            known,
+            rank,
+            by_rank,
+        }
+    }
+}
+
 fn snapshot(
     index: &ManifestIndex<'_>,
     observations: &Observations,
-    slot_ids: &[String],
+    slots: &SlotIds<'_>,
     phase: &str,
 ) -> Result<RuntimeSnapshot, PythonEvidenceError> {
     let mut positions = observations.slot_hits.clone();
     positions.sort_unstable();
     positions.dedup();
-    let mut hits = BTreeSet::new();
-    for id in observations.hits.iter().map(String::as_str).chain(
-        positions
-            .iter()
-            .map(|position| slot_ids[*position as usize].as_str()),
-    ) {
-        if !index.points.contains(id) && !index.alternatives.contains(id) {
-            return Err(PythonEvidenceError::UnknownObligation(id.to_owned()));
-        }
-        hits.insert(id);
+    // Refused at the first id the manifest does not know: the phase's
+    // reported hits first, then its slots in order.
+    let unknown = observations
+        .hits
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !index.points.contains(id) && !index.alternatives.contains(id))
+        .chain(
+            positions
+                .iter()
+                .filter(|position| !slots.known[**position as usize])
+                .map(|position| slots.ids[*position as usize].as_str()),
+        )
+        .next();
+    if let Some(id) = unknown {
+        return Err(PythonEvidenceError::UnknownObligation(id.to_owned()));
     }
-    let hits = hits.into_iter().map(str::to_owned).collect::<BTreeSet<_>>();
+    let mut ranks = positions
+        .iter()
+        .map(|position| slots.rank[*position as usize])
+        .collect::<Vec<_>>();
+    ranks.sort_unstable();
+    ranks.dedup();
+    // In order already, with the few reported hits after them: sorting
+    // finds the runs and merges them.
+    let mut hits = ranks
+        .iter()
+        .map(|rank| slots.by_rank[*rank])
+        .chain(observations.hits.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    hits.sort_unstable();
+    hits.dedup();
+    let hits = hits.into_iter().map(str::to_owned).collect::<Vec<_>>();
     let mut decisions = Vec::new();
     for (id, vectors) in &observations.vectors {
         let Some(meta) = index.decisions.get(id.as_str()) else {
@@ -1905,6 +1964,7 @@ fn build_from_evidence(
     } = evidence;
     let mut manifest = manifest.clone();
     let index = ManifestIndex::new(&manifest);
+    let slots = SlotIds::new(&index, &slot_ids);
 
     let mut raw_results = Vec::new();
     let mut observed_runners = BTreeSet::new();
@@ -1929,7 +1989,7 @@ fn build_from_evidence(
         .zip(crate::threads::parallel_map(
             &phases_observed,
             |(identity, observations)| {
-                snapshot(&index, observations, &slot_ids, &phase_id(run_id, identity))
+                snapshot(&index, observations, &slots, &phase_id(run_id, identity))
             },
         ))
         .collect::<BTreeMap<_, _>>();
@@ -2231,7 +2291,7 @@ fn build_from_evidence(
                 status: Some("passed".into()),
                 error: None,
             }],
-            runtime: vec![snapshot(&index, observations, &slot_ids, &phase)?],
+            runtime: vec![snapshot(&index, observations, &slots, &phase)?],
             browser: Vec::new(),
             server: Vec::new(),
         });
