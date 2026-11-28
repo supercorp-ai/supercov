@@ -1809,9 +1809,8 @@ mod tests {
         let root = temporary_directory("kept-view");
         create_analyzable_test_run(&root, "run-a");
         let run = discover_runs(&root).unwrap().runs.remove(0);
-        let analyze = |run: &StoredRun, filter: Option<&TestFilter>| {
-            analyze_stored_run_filtered(run, filter)
-        };
+        let analyze =
+            |run: &StoredRun, filter: Option<&TestFilter>| analyze_stored_run_filtered(run, filter);
         let built = run_view_from_report(&run, &analyze_stored_run(&run).unwrap());
         assert!(built.files.iter().any(|file| !file.points.is_empty()));
         let kept = run.directory.join(RUN_VIEW_FILE);
@@ -1871,7 +1870,10 @@ mod tests {
         assert_eq!(picked, whole);
         assert!(!kept.exists());
         let failing = |_: &StoredRun, _: Option<&TestFilter>| Err::<CoverageReport, _>("refused");
-        assert_eq!(open_or_build_run_view(&run, Some(&filter), failing), Err("refused"));
+        assert_eq!(
+            open_or_build_run_view(&run, Some(&filter), failing),
+            Err("refused")
+        );
         assert_eq!(open_or_build_run_view(&run, None, failing), Err("refused"));
         assert!(!kept.exists());
         // The evidence changes while the view is built: it is not kept.
