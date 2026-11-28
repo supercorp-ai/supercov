@@ -70,6 +70,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "runnerEvidence.mjs",
     "runtime.mjs",
     "snapshots.mjs",
+    "strongAvaHost.mjs",
     "strongJestHost.mjs",
     "strongJob.mjs",
     "strongJobs.mjs",

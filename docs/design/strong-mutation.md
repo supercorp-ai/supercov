@@ -1722,8 +1722,8 @@ time per mutant and its files cheapest first:
   with the job's file, its other tests skipped (`context.skip()`), as a
   browser test's does.
 
-**Resident runners.** Jest, Mocha and Vitest Browser Mode suites run their
-jobs in resident processes, one per worker, as StrykerJS's runners do, instead of
+**Resident runners.** Jest, Mocha, AVA and Vitest Browser Mode suites run
+their jobs in resident processes, one per worker, as StrykerJS's runners do, instead of
 starting the runner for each job:
 
 - `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
@@ -1745,6 +1745,25 @@ starting the runner for each job:
   (`SUPERCOV_STRONG_MOCHA_ESM=process`); deep-eql's pass takes 5.9 s
   against 7.2 s on a 16-CPU Linux machine, where jobs side by side hide most of a
   process's start, and 9 s against 27 s on a laptop.
+- `strongAvaHost.mjs` keeps AVA's command loaded, with its options worked
+  out once: it runs AVA's own command (`lib/cli.js`) with the command's
+  arguments and takes the `Api` the command makes, and what the command asks
+  of its run, as the command starts it. Each job is that run again, as AVA's
+  watch mode reruns: AVA makes a worker (a thread, or a process under
+  `--no-worker-threads`) for each test file as the run starts, with the
+  main process's environment as it is then, so the job's files and the code
+  they test load afresh with the job's mutant on, as in a command of its
+  own, and the adapter runs only the job's tests. The main process loads
+  none of the project's code, in the command or here. A shared worker
+  (AVA's plugin API), which lives as long as the main process, is the one
+  thing a command's job had alone and a resident one would share: a job
+  that starts one is its host's last. A command that watches or debugs is
+  left to start for each job, as is any whose AVA cannot be made this way
+  (its command ends instead). As for Browser Mode, a job past its limit in
+  the host, and a baseline that does not pass there, run again as commands,
+  with a command's limit. On dot-prop (AVA, 590 mutants) a job cost 892 ms
+  of a worker's time as a command, on a 4-CPU runner where the whole suite
+  takes 0.6 s.
 - `strongVitestHost.mjs` keeps Vitest (4 and later), its Vite server and its
   browser running for Browser Mode's jobs, one host per worker, and runs each
   job with Vitest's runner API (`runTestSpecifications`) where a job used to
