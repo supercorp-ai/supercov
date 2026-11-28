@@ -2113,6 +2113,28 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
     assert!(!lines.contains(&absent));
 }
 
+/// A match guard holding a `let` is measured both ways: taken at its arm,
+/// failed at the arm the match went to instead. It was read as never
+/// evaluated in either direction while the lines around it ran.
+#[test]
+fn a_match_guard_holding_a_let_is_measured_both_ways() {
+    let project = Project::empty("let-guard");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"guards\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn pick(value: Option<u32>) -> u32 {\n    match value {\n        Some(x) if let Some(y) = x.checked_sub(5) => y,\n        Some(x) => x + 10,\n        None => 0,\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn both_ways() {\n        assert_eq!(super::pick(Some(9)), 4);\n        assert_eq!(super::pick(Some(1)), 11);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/lib.rs:3"])
+        .succeeds();
+    contains_all(&decision, &["let Some(y) = x.checked_sub(5)", "T -> T", "F -> F"]);
+}
+
 #[test]
 fn a_closure_in_a_static_is_measured_and_a_const_block_is_declined_in_a_counted_file() {
     let project = Project::empty("const-contexts");
