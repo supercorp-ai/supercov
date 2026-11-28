@@ -31003,6 +31003,98 @@ fn ruby_mutants_are_mutant_gems_and_the_strong_pass_runs_them_in_minitest() {
     );
 }
 
+/// Ctrl-C during a Ruby strong pass, sent to Supercov's process group as a
+/// terminal sends it, ends the pass at once, though the suite only notes the
+/// signal (as RSpec's handler does), and judges nothing it cut short: the
+/// mutant whose test was running gets no verdict.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_ruby_pass_stops_at_once_and_judges_nothing_it_cut_short() {
+    use std::os::unix::process::CommandExt;
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong-interrupted");
+    project.write(
+        "lib/calc.rb",
+        "class Calc\n  def big?(n)\n    n > 10\n  end\nend\n",
+    );
+    // With a mutant on, the test says which processes run it, then waits.
+    project.write(
+        "test/calc_test.rb",
+        "require 'minitest/autorun'\nrequire 'calc'\n\n# As RSpec's handler does, these only note the signal.\ntrap('INT') {}\ntrap('TERM') {}\n\nclass CalcTest < Minitest::Test\n  def test_big\n    assert Calc.new.big?(20)\n    mutant = ENV['SUPERCOV_ACTIVE_MUTANT'].to_s\n    return if mutant.empty? || mutant == '-'\n\n    marker = ENV.fetch('SUPERCOV_TEST_MARKER')\n    File.write(\"#{marker}.#{Process.pid}\", \"#{Process.pid} #{Process.ppid}\")\n    File.rename(\"#{marker}.#{Process.pid}\", marker)\n    sleep 60\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/calc_test.rb"])
+        .succeeds();
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["runs", "latest", "mutants", "test"])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(240),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    let interrupted = std::time::Instant::now();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    supercov.wait().unwrap();
+    let stopped_in = interrupted.elapsed();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..20).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
+    // The CLI ends a pass that has not stopped after 8 s: this one stopped
+    // when it was told.
+    assert!(
+        stopped_in < std::time::Duration::from_secs(5),
+        "the pass took {stopped_in:?} to stop"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    for mutant in listed["data"]["mutants"].as_array().unwrap() {
+        let strong = &mutant["strong"];
+        assert!(
+            strong["status"] != "timeout"
+                && !strong["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("before its tests did"),
+            "a mutant the stop cut short was judged: {mutant}"
+        );
+    }
+}
+
 /// Go's strong pass: every Gremlins mutant of a module, run in test
 /// binaries built once, each mutant against the tests that ran its code.
 /// A mutant that does not compile is `unviable`; a constant Go needs as a
