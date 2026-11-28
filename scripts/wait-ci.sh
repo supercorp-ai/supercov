@@ -94,9 +94,12 @@ while true; do
         # with nothing of its name to replace it. Otherwise a check counts as
         # failed only when no check of its name passed or is still running
         # (a run a newer one replaced shows as cancelled).
-        ([$c.nodes[] | {name: (.name // .context), result: (.conclusion // .status // .state // ""), required: (.isRequired == true)}]) as $checks
+        # A commit status and a job can share a name (the `Slow tier` status
+        # and the job that posts it): grouped apart, a passed job never hides
+        # a failed status.
+        ([$c.nodes[] | {name: (.name // .context), kind: (if .context then "status" else "check" end), result: (.conclusion // .status // .state // ""), required: (.isRequired == true)}]) as $checks
         | (if any($checks[]; .required) then [$checks[] | select(.required)] else $checks end) as $deciding
-        | ($deciding | group_by(.name)
+        | ($deciding | group_by([.kind, .name])
           | map(select(any(.[]; .result as $s | $failed | split(" ") | index($s))
                        and (any(.[]; .result as $s | "SUCCESS NEUTRAL SKIPPED \($pending)" | split(" ") | index($s)) | not)) | .[0].name)
           | join(", ")),
