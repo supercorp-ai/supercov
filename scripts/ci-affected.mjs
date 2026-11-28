@@ -37,8 +37,10 @@
 //     (`supercov runs <id> gaps --format jsonl`); exits 1 when there is one.
 //
 // Context comes from the environment GitHub Actions sets, plus CHANGED (a
-// file listing the pull request's changed paths, one per line), MAP_REASON
-// (why there is no map, where there is none) and CI_TEST_SECONDS (the test
+// file listing the pull request's changed paths, one per line), SINCE_MAP (a
+// file listing every path changed since the map's commit, the pull request's
+// among them), MAP_REASON (why there is no map, where there is none) and
+// CI_TEST_SECONDS (the test
 // seconds of main's newest Self Coverage run, which outrank the committed
 // .github/test-seconds.tsv; .github/actions/affected fetches them).
 import { execFileSync } from 'node:child_process';
@@ -97,10 +99,24 @@ function event() {
   return withQueuedPull(process.env.GITHUB_EVENT_NAME, payload);
 }
 
-function changedFiles() {
-  const path = process.env.CHANGED;
+function listed(path) {
   if (!path || !existsSync(path)) return null;
   return readFileSync(path, 'utf8').split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+function changedFiles() {
+  return listed(process.env.CHANGED);
+}
+
+/**
+ * The files whose tests the map may not know: the pull request's, and every
+ * file changed since the map's commit. Main's map is measured on a schedule,
+ * not on every merge, so it can be a few merges old: `tests affected` reads
+ * the commits after it as changes, but a test written in one of them is in
+ * no map, and only its file names it. Each of these files' tests runs.
+ */
+export function unmapped(changed, sinceMap = listed(process.env.SINCE_MAP) ?? []) {
+  return [...new Set([...changed, ...sinceMap])];
 }
 
 // A pull request labelled for it runs every job on every platform, as a
@@ -477,7 +493,11 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
   const files = read.files ?? new Set();
   const gatesRun = files.has(GATES) ? [...gates.keys()].filter((gate) => run.has(gate)) : [];
   const unit = [...run].filter((name) => !gatesRun.includes(name));
-  const selection = { names: [...run], changed, reasons: Object.fromEntries(read.reasons ?? []), binaries: [] };
+  // Tests are picked by the file they are written in from these: a test the
+  // map cannot name (new in the pull request, or on main since the map) is
+  // in one of them.
+  const fresh = unmapped(changed);
+  const selection = { names: [...run], changed: fresh, reasons: Object.fromEntries(read.reasons ?? []), binaries: [] };
   const ranGates = (names) => names.filter((name) => gatesRun.includes(name));
   const touched = (patterns) => changed.filter((file) => matches(file, patterns ?? []));
   const timing = seconds();
@@ -517,12 +537,12 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       // Its tests run in part: the affected ones, and the ones the map does
       // not know, found in the job's own listing.
       const ownTests = [...files].some((file) => file !== GATES);
-      const rustChanged = changed.some((file) => file.endsWith('.rs'));
+      const rustChanged = fresh.some((file) => file.endsWith('.rs'));
       if (ownTests) reasons.push(`${unit.length} workspace test(s) affected`);
       else if (rustChanged) reasons.push('Rust changed: tests new since the map run');
       // As many parts as hold the affected tests and the ones written in
       // the changed files at a few minutes each.
-      const parts = spec.shards ? partsFor([...unit, ...testsInFiles(changed)], timing) : 1;
+      const parts = spec.shards ? partsFor([...unit, ...testsInFiles(fresh)], timing) : 1;
       jobs[name] = reasons.length === 0
         ? { run: false, mode: 'skip', why: 'none of its tests is affected', matrix: spec.matrix(true) }
         : { run: true, mode: 'partial', why: `${reasons.join('; ')}${parts > 1 ? `; in ${parts} parts` : ''}`, matrix: spec.matrix(true, parts), parts };
@@ -563,7 +583,7 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       // file the change touched -- one it added is in no map, and the lines
       // it was written for are held to the floor. Dealt into as few slices
       // as hold them at about ten minutes each.
-      const written = testsInFiles(changed);
+      const written = testsInFiles(fresh);
       const measured = new Set([...run, ...written]);
       selection.names = [...measured];
       const total = [...measured].reduce((sum, test) => sum + (timing.get(test) ?? 1), 0);
