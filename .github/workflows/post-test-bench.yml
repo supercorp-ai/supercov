@@ -31,9 +31,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - { variant: base, ref: ce132bc2 }
-          - { variant: timing, ref: origin/exp/post-test-timing-src }
-          - { variant: slots, ref: origin/perf/view-decision-slots }
+          - { variant: base, ref: origin/main }
+          - { variant: view, ref: origin/perf/report-view-cache }
+          - { variant: diff, ref: origin/perf/diff-lean }
+          - { variant: reads, ref: origin/exp/merge-reads-bench }
+          - { variant: shared, ref: origin/perf/index-shared-test-records }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -70,7 +72,7 @@ jobs:
   fixtures:
     name: Fixture runs
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
@@ -127,7 +129,7 @@ jobs:
     needs: [build, fixtures]
     name: Measure
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -152,16 +154,14 @@ jobs:
         run: |
           sudo apt-get update -q && (sudo apt-get install -yq linux-tools-common linux-tools-$(uname -r) || sudo apt-get install -yq linux-tools-common linux-tools-azure)
           sudo sysctl kernel.perf_event_paranoid=-1
-          perf --version && echo "BENCH_PERF=1" >> "$GITHUB_ENV"
+          perf --version
       - env:
           BENCH_MODE: measure
           BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
-          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,timing=${{ github.workspace }}/binaries/supercov-timing/supercov,slots=${{ github.workspace }}/binaries/supercov-slots/supercov
+          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,view=${{ github.workspace }}/binaries/supercov-view/supercov,diff=${{ github.workspace }}/binaries/supercov-diff/supercov,reads=${{ github.workspace }}/binaries/supercov-reads/supercov,shared=${{ github.workspace }}/binaries/supercov-shared/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
           BENCH_ROUNDS: 2
-          SUPERCOV_POST_TIMING: 1
-          BENCH_RUN_SUITE: timing
         run: node scripts/post-test-bench.mjs
       - if: always()
         uses: actions/upload-artifact@v4
