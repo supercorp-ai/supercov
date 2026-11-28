@@ -3287,8 +3287,9 @@ mod tests {
     }
 
     /// The runtime class compiles with the project's main sources, under the
-    /// project's own `--release`: gson builds for Java 7, where a lambda or
-    /// a method reference does not compile and the whole build failed.
+    /// project's own `--release`: gson builds for Java 7, where a lambda, a
+    /// method reference or a type argument left to a conditional's context
+    /// does not compile and the whole build failed.
     #[test]
     fn the_runtime_class_compiles_for_java_7() {
         for (number, line) in RUNTIME_SOURCE.lines().enumerate() {
@@ -3300,6 +3301,12 @@ mod tests {
             assert!(
                 !code.contains("->") && !code.contains("::"),
                 "Supercov.java:{}: Java 8 syntax in a class built for Java 7: {line}",
+                number + 1
+            );
+            // Java 7 infers no type argument from a conditional's context.
+            assert!(
+                !code.contains("? as("),
+                "Supercov.java:{}: a generic call Java 7 cannot infer: {line}",
                 number + 1
             );
         }

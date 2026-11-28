@@ -1053,7 +1053,8 @@ public final class Supercov {
 
   // The object returns are generic so that one helper serves every declared
   // type: the caller casts the replacement to the type it returns, which the
-  // replacement has (an empty list is a Collection and an Iterable).
+  // replacement has (an empty list is a Collection and an Iterable). Each
+  // call names its type argument: Java 7 infers none from a conditional.
 
   @SuppressWarnings("unchecked")
   private static <T> T as(Object value) {
@@ -1061,11 +1062,11 @@ public final class Supercov {
   }
 
   public static <T> T rBT(int file, int index, T value) {
-    return on(file, index) ? as(Boolean.TRUE) : value;
+    return on(file, index) ? Supercov.<T>as(Boolean.TRUE) : value;
   }
 
   public static <T> T rBF(int file, int index, T value) {
-    return on(file, index) ? as(Boolean.FALSE) : value;
+    return on(file, index) ? Supercov.<T>as(Boolean.FALSE) : value;
   }
 
   public static <T> T rN(int file, int index, T value) {
@@ -1073,27 +1074,27 @@ public final class Supercov {
   }
 
   public static <T> T rBI(int file, int index, T value) {
-    return on(file, index) ? as(Integer.valueOf(0)) : value;
+    return on(file, index) ? Supercov.<T>as(Integer.valueOf(0)) : value;
   }
 
   public static <T> T rBS(int file, int index, T value) {
-    return on(file, index) ? as(Short.valueOf((short) 0)) : value;
+    return on(file, index) ? Supercov.<T>as(Short.valueOf((short) 0)) : value;
   }
 
   public static <T> T rBC(int file, int index, T value) {
-    return on(file, index) ? as(Character.valueOf((char) 0)) : value;
+    return on(file, index) ? Supercov.<T>as(Character.valueOf((char) 0)) : value;
   }
 
   public static <T> T rBL(int file, int index, T value) {
-    return on(file, index) ? as(Long.valueOf(0L)) : value;
+    return on(file, index) ? Supercov.<T>as(Long.valueOf(0L)) : value;
   }
 
   public static <T> T rBF0(int file, int index, T value) {
-    return on(file, index) ? as(Float.valueOf(0f)) : value;
+    return on(file, index) ? Supercov.<T>as(Float.valueOf(0f)) : value;
   }
 
   public static <T> T rBD(int file, int index, T value) {
-    return on(file, index) ? as(Double.valueOf(0d)) : value;
+    return on(file, index) ? Supercov.<T>as(Double.valueOf(0d)) : value;
   }
 
   public static String rS(int file, int index, String value) {
@@ -1101,25 +1102,25 @@ public final class Supercov {
   }
 
   public static <T> T rList(int file, int index, T value) {
-    return on(file, index) ? as(java.util.Collections.emptyList()) : value;
+    return on(file, index) ? Supercov.<T>as(java.util.Collections.emptyList()) : value;
   }
 
   public static <T> T rSet(int file, int index, T value) {
-    return on(file, index) ? as(java.util.Collections.emptySet()) : value;
+    return on(file, index) ? Supercov.<T>as(java.util.Collections.emptySet()) : value;
   }
 
   public static <T> T rMap(int file, int index, T value) {
-    return on(file, index) ? as(java.util.Collections.emptyMap()) : value;
+    return on(file, index) ? Supercov.<T>as(java.util.Collections.emptyMap()) : value;
   }
 
   // Optional and Stream by name, so that the runtime still compiles where a
   // project's main source is Java 7.
   public static <T> T rOpt(int file, int index, T value) {
-    return on(file, index) ? as(empty("java.util.Optional")) : value;
+    return on(file, index) ? Supercov.<T>as(empty("java.util.Optional")) : value;
   }
 
   public static <T> T rStream(int file, int index, T value) {
-    return on(file, index) ? as(empty("java.util.stream.Stream")) : value;
+    return on(file, index) ? Supercov.<T>as(empty("java.util.stream.Stream")) : value;
   }
 
   private static Object empty(String type) {
