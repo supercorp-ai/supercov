@@ -97,3 +97,26 @@ test('the ready label asks the slow tier for its workflows, not CI for a second 
   assert.equal(triage('pull_request', labelled, ['crates/x.rs'], 'ci').mode, 'skip');
   for (const workflow of ['self-coverage', 'compatibility', 'react', 'next']) assert.equal(triage('pull_request', labelled, ['crates/x.rs'], workflow).mode, 'map');
 });
+
+test('a workflow file runs in full only the workflows that run by it', async () => {
+  const { triage } = await import('../../scripts/ci-affected.mjs');
+  const push = { action: 'synchronize', pull_request: { title: 'x', head: { ref: 'x' }, labels: [] } };
+  const mode = (changed, workflow) => triage('pull_request', push, changed, workflow).mode;
+  // Another workflow's file, or the seconds the jobs deal by, leaves every tier to the map.
+  for (const workflow of ['ci', 'self-coverage', 'compatibility', 'react', 'next']) {
+    assert.equal(mode(['.github/workflows/mutation-jvm.yml', 'crates/x.rs'], workflow), 'map');
+    assert.equal(mode(['.github/gate-seconds.tsv'], workflow), 'map');
+    // What every workflow runs by still runs everything.
+    assert.equal(mode(['.github/actions/affected/action.yml'], workflow), 'full');
+    assert.equal(mode(['scripts/ci-affected.mjs'], workflow), 'full');
+  }
+  assert.equal(mode(['.github/workflows/ci.yml'], 'ci'), 'full');
+  assert.equal(mode(['.github/workflows/ci.yml'], 'self-coverage'), 'map');
+  assert.equal(mode(['.github/workflows/self-coverage.yml'], 'self-coverage'), 'full');
+  assert.equal(mode(['.github/workflows/self-coverage.yml'], 'compatibility'), 'map');
+  // The slow tier calls the other four: its file runs them all.
+  for (const workflow of ['self-coverage', 'compatibility', 'react', 'next']) assert.equal(mode(['.github/workflows/slow-tier.yml'], workflow), 'full');
+  assert.equal(mode(['.github/workflows/slow-tier.yml'], 'ci'), 'map');
+  // Asked for no workflow, any workflow file still runs everything.
+  assert.equal(mode(['.github/workflows/mutation-jvm.yml']), 'full');
+});

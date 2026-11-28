@@ -52,15 +52,31 @@ const read = (path) => readFileSync(resolve(repository, path), 'utf8');
 // Supercov, whose fingerprint reads what they declare (a release's version
 // bump is not a dependency change); it says so as `runWide`.
 const RUNS_EVERYTHING = [
-  '.github/**',
+  '.github/actions/**',
+  '.github/fetch-verified.sh',
   'rust-toolchain.toml',
   '.cargo/**',
   '**/build.rs',
   '.config/**',
   'scripts/ci-affected.mjs',
-  'scripts/engine-integrations-group.mjs',
   'scripts/ci-tiers.mjs',
 ];
+// And the workflow files a workflow runs by, its own and its caller's: a
+// change to one workflow changes how no other runs. Every pull request that
+// touched any of the repository's two dozen workflow files, or the seconds
+// the jobs deal their tests by, ran every job of both tiers in full: a fix to
+// the mutation benchmark's workflow measured Self Coverage for an hour.
+const SLOW_TIER = '.github/workflows/slow-tier.yml';
+const RUNS_EVERYTHING_OF = {
+  ci: ['.github/workflows/ci.yml', 'scripts/engine-integrations-group.mjs'],
+  compatibility: ['.github/workflows/compatibility.yml', SLOW_TIER],
+  'self-coverage': ['.github/workflows/self-coverage.yml', 'scripts/ci-time-test.sh', SLOW_TIER],
+  next: ['.github/workflows/next-compatibility.yml', SLOW_TIER],
+  react: ['.github/workflows/react-compatibility.yml', SLOW_TIER],
+};
+// A workflow not named here (a call without one) keeps the old answer: any
+// workflow file runs everything.
+const runsEverything = (workflow) => [...RUNS_EVERYTHING, ...(RUNS_EVERYTHING_OF[workflow] ?? ['.github/**'])];
 
 /** `**` any depth, `*` within one path segment. */
 function glob(pattern) {
@@ -120,7 +136,7 @@ export function triage(name = process.env.GITHUB_EVENT_NAME, payload = event(), 
   if (changed.every((file) => matches(file, CORPUS))) {
     return { platforms: 'linux', mode: 'corpus', reason: 'a change to the compatibility corpus alone: its records are checked by the `compat` tests' };
   }
-  const everything = changed.filter((file) => matches(file, RUNS_EVERYTHING));
+  const everything = changed.filter((file) => matches(file, runsEverything(workflow)));
   if (everything.length > 0) {
     return { platforms: 'linux', mode: 'full', reason: `${everything.slice(0, 3).join(', ')}${everything.length > 3 ? ` and ${everything.length - 3} more` : ''} decide how CI runs` };
   }
@@ -428,7 +444,7 @@ const WORKFLOWS = {
   'self-coverage': { measure: { selfCoverage: true } },
 };
 
-const SLICE_SECONDS = 900;
+const SLICE_SECONDS = 600;
 const MAX_SLICES = 10;
 // CI's check job: a part's share of the tests, in nextest seconds, which are
 // about half of Self Coverage's (no instrumentation): some three minutes on
@@ -543,7 +559,7 @@ export function plan(workflow, answer, mode = { platforms: 'linux', mode: 'map',
       // Every test to run: the affected ones, and every test written in a
       // file the change touched -- one it added is in no map, and the lines
       // it was written for are held to the floor. Dealt into as few slices
-      // as hold them at about fifteen minutes each.
+      // as hold them at about ten minutes each.
       const written = testsInFiles(changed);
       const measured = new Set([...run, ...written]);
       selection.names = [...measured];
