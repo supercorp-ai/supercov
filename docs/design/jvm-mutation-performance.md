@@ -74,3 +74,27 @@ runners vary by about a fifth, so a change is judged by the profile's
 counts as much as by the wall time. On kotlinpoet each of the twelve shards
 is a pass of its own, and nearly every test is a candidate of a Kotlin
 expression body's mutant, so each shard still baselines most of the suite.
+
+### 2. Rounds started by the pass itself
+
+The rounds the engine started the build again for (the mutants a JVM left
+when it stopped taking mutants, then the generous round for those past the
+short limit) are started by the build's own test JVM once its pass ends:
+the same java, options and class path, so a round there is what a round of
+a new build is, without Maven's or Gradle's start and compilation. A round
+that decides nothing and lists nothing new ends them, and the engine
+carries on from there as before.
+
+Result (run 46085994371 against 46082385337): every verdict the same
+(commons-cli 882 of 882; kotlinpoet 1,238, one `killed` now a `timeout` at
+the machine's speed). On kotlinpoet the five retry builds (242 s) are gone;
+on commons-cli one shard still started the build again for a mutant whose
+test exhausts the heap (`Option.java:856`), which stopped the test JVM's
+pass before it could start its rounds. This run's runners were slower than
+the last (a run with a mutant took 58 ms against 44 ms on kotlinpoet), so
+its wall times are not comparable; the builds it no longer starts are.
+
+What the per-shard builds show besides: eight of kotlinpoet's twelve
+shards start the build twice, the first ending after about 20 s when the
+compiler refuses a switch (a Kotlin mutant that does not compile is
+`unviable`); that is 180 s of kotlinpoet's strong pass.

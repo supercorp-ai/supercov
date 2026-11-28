@@ -169,6 +169,10 @@ public final class SupercovStrongPass {
   private Thread abandoned;
   private final File claims;
   private final File baselines;
+  /** The mutants this module already has a verdict for, from earlier JVMs. */
+  private final java.util.Set<String> decided;
+  /** The mutants listed for the generous round when this JVM started. */
+  private final java.util.Set<String> listedSlow;
   private final String module;
   private final Executor executor;
   /** Where this JVM's time went, written as the pass's summary line. */
@@ -185,6 +189,8 @@ public final class SupercovStrongPass {
     this.claims = claimed == null ? null : new File(claimed);
     String shared = System.getenv(BASELINES);
     this.baselines = shared == null ? null : new File(shared);
+    this.decided = decided(results, module);
+    this.listedSlow = slow == null ? new java.util.HashSet<>() : lines(slow);
     String limit = System.getenv("SUPERCOV_MUTANT_HIT_LIMIT");
     if (limit != null) {
       try {
@@ -258,7 +264,7 @@ public final class SupercovStrongPass {
 
   /** Runs the pass here and in the other JVMs it starts, and waits for them. */
   static void runEverywhere(Executor executor, String framework) {
-    List<Process> minions = startMinions(framework);
+    List<Process> minions = startMinions(framework, null, false);
     try {
       new SupercovStrongPass(executor, module()).run();
     } catch (Throwable error) {
@@ -266,18 +272,174 @@ public final class SupercovStrongPass {
       error.printStackTrace();
     } finally {
       Supercov.clearActiveMutant();
-      for (Process minion : minions) {
-        try {
-          minion.waitFor();
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-        }
+      waitFor(minions);
+      try {
+        rounds(framework);
+      } catch (Throwable error) {
+        // The engine starts the build again for what is left.
+        System.err.println("supercov: the strong pass's further rounds stopped: " + error);
       }
       for (File tree : trees) {
         removeTree(tree);
       }
       trees.clear();
     }
+  }
+
+  private static void waitFor(List<Process> minions) {
+    for (Process minion : minions) {
+      try {
+        minion.waitFor();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
+
+  /** How many rounds of fresh JVMs a pass starts itself, at most. */
+  static final int ROUNDS = 11;
+
+  /**
+   * The rounds the engine would otherwise start the build again for, in
+   * fresh JVMs started from this one: the mutants a JVM left (one that
+   * stopped taking mutants), then the ones listed for the generous round.
+   * Each is the same JVM the build starts (its java, options and class
+   * path), so a round here is what a round of a new build is, without the
+   * build tool's start and its compilation. They stop where a round decides
+   * nothing new, and the engine carries on from there.
+   */
+  static void rounds(String framework) throws IOException {
+    String plan = System.getenv(PLAN);
+    String results = System.getenv(RESULTS);
+    String claims = System.getenv(CLAIMS);
+    if (plan == null || results == null || claims == null) {
+      return;
+    }
+    String slowFile = System.getenv(SLOW);
+    String module = module();
+    for (int round = 1; round <= ROUNDS; round++) {
+      java.util.Set<String> decided = decided(results, module);
+      java.util.Set<String> slow =
+          slowFile == null ? new java.util.HashSet<>() : lines(new File(slowFile));
+      boolean quickLeft = false;
+      boolean slowLeft = false;
+      for (String[] mutant : planMutants(plan, module)) {
+        if (decided.contains(mutant[0])) {
+          continue;
+        }
+        if (slow.contains(mutant[0])) {
+          slowLeft = true;
+        } else {
+          quickLeft = true;
+        }
+      }
+      boolean retry = !quickLeft;
+      if (!quickLeft && (!slowLeft || "1".equals(System.getenv(RETRY)))) {
+        return;
+      }
+      int before = decided.size();
+      int listed = slow.size();
+      waitFor(startMinions(framework, claims + "-" + round, retry));
+      // A round that decided nothing and listed nothing new would not do
+      // better the next time.
+      if (decided(results, module).size() == before
+          && (slowFile == null || lines(new File(slowFile)).size() == listed)) {
+        return;
+      }
+    }
+  }
+
+  /** The plan's mutants this module runs: each one's id. */
+  private static List<String[]> planMutants(String plan, String module) throws IOException {
+    List<String[]> found = new ArrayList<>();
+    try (BufferedReader reader =
+        new BufferedReader(new InputStreamReader(new FileInputStream(plan), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        String[] parts = line.split("\t", -1);
+        if (parts[0].equals("M") && parts.length >= 7
+            && java.util.Arrays.asList(parts[5].split(",")).contains(module)) {
+          found.add(new String[] {unescape(parts[2])});
+        }
+      }
+    }
+    return found;
+  }
+
+  /**
+   * The mutants that have a verdict for {@code module} in the results: a
+   * whole one, or this module's part of one whose tests span modules.
+   */
+  static java.util.Set<String> decided(String results, String module) {
+    java.util.Set<String> found = new java.util.HashSet<>();
+    if (results == null) {
+      return found;
+    }
+    File file = new File(results);
+    if (!file.isFile()) {
+      return found;
+    }
+    try (BufferedReader reader =
+        new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        String id = field(line, "\"id\":");
+        if (id != null) {
+          found.add(id);
+          continue;
+        }
+        String mutant = field(line, "\"mutant\":");
+        String of = field(line, "\"module\":");
+        if (mutant != null && line.contains("\"partial\":true") && module.equals(of)) {
+          found.add(mutant);
+        }
+      }
+    } catch (IOException e) {
+      // Nothing known: each mutant is run.
+    }
+    return found;
+  }
+
+  /** The JSON string after {@code key} in a line this pass wrote. */
+  static String field(String line, String key) {
+    int at = line.indexOf(key);
+    if (at < 0 || at + key.length() >= line.length() || line.charAt(at + key.length()) != '"') {
+      return null;
+    }
+    StringBuilder value = new StringBuilder();
+    for (int i = at + key.length() + 1; i < line.length(); i++) {
+      char c = line.charAt(i);
+      if (c == '"') {
+        return value.toString();
+      }
+      if (c == '\\' && i + 1 < line.length()) {
+        char next = line.charAt(++i);
+        value.append(next == 'n' ? '\n' : next == 'r' ? '\r' : next == 't' ? '\t' : next);
+      } else {
+        value.append(c);
+      }
+    }
+    return null;
+  }
+
+  /** A file's lines, as a set; none where it cannot be read. */
+  static java.util.Set<String> lines(File file) {
+    java.util.Set<String> found = new java.util.HashSet<>();
+    if (!file.isFile()) {
+      return found;
+    }
+    try (BufferedReader reader =
+        new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (!line.isEmpty()) {
+          found.add(line);
+        }
+      }
+    } catch (IOException e) {
+      // None listed.
+    }
+    return found;
   }
 
   /**
@@ -287,8 +449,10 @@ public final class SupercovStrongPass {
    * {@code main} as the entry. {@code SUPERCOV_STRONG_JVMS} says how many
    * run in all; one by default.
    */
-  private static List<Process> startMinions(String framework) {
+  private static List<Process> startMinions(String framework, String claims, boolean retry) {
     List<Process> started = new ArrayList<>();
+    // A round of its own: every JVM of it is a minion.
+    boolean round = claims != null;
     int jvms = 1;
     try {
       String asked = System.getenv("SUPERCOV_STRONG_JVMS");
@@ -298,7 +462,7 @@ public final class SupercovStrongPass {
     } catch (NumberFormatException e) {
       jvms = 1;
     }
-    if (jvms <= 1 || System.getenv(CLAIMS) == null) {
+    if ((jvms <= 1 && !round) || System.getenv(CLAIMS) == null) {
       return started;
     }
     List<String> command = new ArrayList<>();
@@ -322,9 +486,15 @@ public final class SupercovStrongPass {
     command.add("-D" + MINION + "=true");
     File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
     File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
-    for (int i = 1; i < jvms; i++) {
+    for (int i = round ? 0 : 1; i < jvms; i++) {
       List<String> own = new ArrayList<>(command);
       ProcessBuilder builder = new ProcessBuilder(own).inheritIO();
+      if (round) {
+        builder.environment().put(CLAIMS, claims);
+        if (retry) {
+          builder.environment().put(RETRY, "1");
+        }
+      }
       // What it says on stderr, beside the pass's other files: a build may
       // keep its test JVM's output to itself.
       builder.redirectError(ProcessBuilder.Redirect.appendTo(new File(base, "jvm-" + i + ".log")));
@@ -455,7 +625,12 @@ public final class SupercovStrongPass {
 
   private void runMutants() throws IOException {
     for (Mutant mutant : mutants) {
-      if (!mutant.modules.contains(module)) {
+      if (!mutant.modules.contains(module) || decided.contains(mutant.id)) {
+        continue;
+      }
+      // The generous round runs the mutants listed for it alone; a mutant
+      // listed after this JVM started waits for the next.
+      if (retry ? !listedSlow.contains(mutant.id) : listedSlow.contains(mutant.id)) {
         continue;
       }
       List<Test> mine = new ArrayList<>();
