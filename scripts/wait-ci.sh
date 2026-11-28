@@ -9,8 +9,13 @@
 # own. The first line says which repository it waits on.
 #
 # Exits 0 when everything passed, 1 when anything failed or was cancelled, 2
-# on a usage error. Prints `STALLED` when nothing finished for ten minutes,
-# and keeps waiting.
+# on a usage error, 3 when nothing was decided in four hours. Prints `STALLED`
+# when nothing finished for ten minutes, and keeps waiting.
+#
+# On a pull request, the checks its base branch requires decide, read once
+# from its rules. One that has not been posted yet is waited for, not
+# passed: right after a push, a pull request has the slow tier's deferred
+# `Slow tier` and no `Fast tier` yet.
 #
 # Why not `gh run watch` or a `gh run view` loop: both use the REST API, which
 # allows 5,000 requests an hour for everyone using the token. `gh run watch`
@@ -24,6 +29,7 @@ target=${1:-}
 [ -n "$target" ] && [ $# -eq 1 ] || { sed -n '4,5p' "$0" | sed 's/^# *//' >&2; exit 2; }
 INTERVAL=180
 STALL_SECONDS=600
+TIMEOUT_SECONDS=14400
 
 if [[ $target =~ ^https://github\.com/([^/]+/[^/]+)/ ]]; then
   repository=${BASH_REMATCH[1]}
@@ -51,6 +57,16 @@ if [[ $target =~ ^[0-9]{1,7}$ || $target =~ /pull/([0-9]+) ]]; then
         nodes { ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) } ... on StatusContext { context state isRequired(pullRequestNumber: $number) } }
       } } } } } } } }'
   arguments=(-F number="$number")
+  # The status checks the base branch requires, from its rulesets and any
+  # classic protection rule: each must be there, and pass.
+  expected=$(gh api graphql -f query='query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) { pullRequest(number: $number) { baseRef {
+      rules(first: 50) { nodes { parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } } }
+      branchProtectionRule { requiredStatusCheckContexts } } } } }' -f owner="$owner" -f name="$name" -F number="$number" 2>/dev/null \
+    | jq -c '.data.repository.pullRequest.baseRef as $base
+      | [($base.rules.nodes // [])[].parameters.requiredStatusChecks[]?.context, ($base.branchProtectionRule.requiredStatusCheckContexts // [])[]] | unique' 2>/dev/null)
+  [ -n "$expected" ] || expected='[]'
+  [ "$expected" = '[]' ] || echo "required: $(jq -r 'join(", ")' <<<"$expected")"
 else
   kind=run
   [[ $target =~ ([0-9]{8,}) ]] || { echo "not a pull request number, run id or run URL: $target" >&2; exit 2; }
@@ -64,7 +80,7 @@ else
   echo "waiting on $repository run ${BASH_REMATCH[1]}"
 fi
 
-last=""; changed=$(date +%s); reported=""
+last=""; changed=$(date +%s); reported=""; started=$changed
 while true; do
   answer=$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" "${arguments[@]}" 2>&1) || {
     echo "query failed, trying again in ${INTERVAL}s: $(head -c 200 <<<"$answer")"; sleep "$INTERVAL"; continue; }
@@ -80,7 +96,7 @@ while true; do
   fi
 
   if [ "$kind" = pr ]; then
-    summary=$(jq -r --arg failed "$FAILED" --arg pending "$PENDING" '
+    summary=$(jq -r --arg failed "$FAILED" --arg pending "$PENDING" --argjson expected "$expected" '
       .data.repository.pullRequest as $pr
       | ($pr.commits.nodes[0].commit) as $commit
       | ($commit.statusCheckRollup.contexts // {totalCount: 0, checkRunCountsByState: [], statusContextCountsByState: [], nodes: []}) as $c
@@ -109,16 +125,24 @@ while true; do
           | map(select(any(.[]; .result as $s | $failed | split(" ") | index($s))
                        and (any(.[]; .result as $s | "SUCCESS NEUTRAL SKIPPED \($pending)" | split(" ") | index($s)) | not)) | .[0].name)
           | join(", ")),
-        ([$deciding[] | select(.result as $s | $pending | split(" ") | index($s))] | length),
-        (any($checks[]; .required)),
+        # A required check not posted yet is pending: the deferred `Slow
+        # tier` alone, before `Fast tier` is there, has passed nothing.
+        ([$expected[] | select(. as $n | [$checks[].name] | index($n) | not)]) as $missing
+        | (([$deciding[] | select(.result as $s | $pending | split(" ") | index($s))] | length) + ($missing | length)),
+        (any($checks[]; .required) or ($expected | length > 0)),
+        ($missing | join(", ")),
         ($commit.statusCheckRollup.state // "NONE"),
         $pr.state ] | map(tostring) | join("\u001f")' <<<"$answer")
-    IFS=$'\x1f' read -r head total pending failed deciding_pending required verdict state <<<"$summary"
-    progress="$head: $((total - pending))/$total checks done"
+    IFS=$'\x1f' read -r head total pending failed deciding_pending required missing verdict state <<<"$summary"
+    progress="$head: $((total - pending))/$total checks done${missing:+; not posted yet: $missing}"
     finished=""
-    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then finished=yes; fi
-    # The required checks have their answer: the rest cannot change it.
-    if [ "$required" = true ] && [ "$deciding_pending" -eq 0 ]; then finished=yes; fi
+    # The required checks have their answer, every one of them posted: the
+    # rest cannot change it. Without required checks, every check decides.
+    if [ "$required" = true ]; then
+      [ "$deciding_pending" -eq 0 ] && finished=yes
+    elif [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+      finished=yes
+    fi
     if [ "$state" != OPEN ]; then finished=yes; fi
   else
     summary=$(jq -r '
@@ -148,6 +172,10 @@ while true; do
     # the failed list above already leaves those out.
     [ "$kind" = pr ] || [[ $verdict =~ ^(SUCCESS|NEUTRAL|SKIPPED)$ ]] || exit 1
     exit 0
+  fi
+
+  if [ $(( $(date +%s) - started )) -ge "$TIMEOUT_SECONDS" ]; then
+    echo "TIMED OUT: $progress, nothing decided in $((TIMEOUT_SECONDS / 3600)) hours"; exit 3
   fi
 
   remaining=$(jq -r '.data.rateLimit.remaining // 5000' <<<"$answer")
