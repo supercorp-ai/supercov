@@ -80,6 +80,8 @@ const mappings = [
     "strongJob.mjs",
     "strongJobs.mjs",
     "strongMochaHost.mjs",
+    "strongVitestHost.mjs",
+    "strongAvaHost.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",

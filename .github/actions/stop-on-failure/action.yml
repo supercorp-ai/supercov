@@ -2,7 +2,9 @@ name: Stop on a failure
 description: >-
   A job failed: say which job and which step. In a pull request, also cancel every
   other unfinished run of the same commit, so the failure is the answer at
-  once instead of after the slowest leg of every workflow. This job's own run
+  once instead of after the slowest leg of every workflow. A slow-tier run is
+  left alone: it has its own required status, and once the failure is rerun
+  and passes nothing would start it again. This job's own run
   is left to finish: cancelling it would end this job as cancelled, not
   failed, and hide the failure it reports. A job that failed only because a
   download did not come whole after every retry (a setup step says so in
@@ -48,13 +50,17 @@ runs:
           echo "Step **$step** failed in job **$job**." >> "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
-        echo "::error title=$job failed::$step failed. The other runs of $SHA are stopped; this run finishes."
+        echo "::error title=$job failed::$step failed. The other runs of $SHA are stopped, except its slow tier; this run finishes."
         {
           echo "### $job failed"
           echo
-          echo "Step **$step** failed in job **$job**. The other unfinished runs of \`$SHA\` were cancelled, so their jobs show as cancelled: this job is the one to read."
+          echo "Step **$step** failed in job **$job**. The other unfinished runs of \`$SHA\` were cancelled, so their jobs show as cancelled: this job is the one to read. Its slow tier runs on: it answers for itself."
         } >> "$GITHUB_STEP_SUMMARY"
+        # Not the slow tier's run: a flaky fast-tier job, rerun and passing,
+        # restarts only its own run, and a cancelled slow tier left `Slow
+        # tier` pending with nothing running until the `ready` label was
+        # taken off and added again. Its own jobs failing still stop it.
         for id in $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$SHA" --limit 50 \
-            --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId'); do
+            --json databaseId,status,workflowName --jq '.[] | select(.status != "completed" and .workflowName != "Slow tier") | .databaseId'); do
           [ "$id" = "$GITHUB_RUN_ID" ] || gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
         done

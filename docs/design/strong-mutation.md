@@ -1722,8 +1722,8 @@ time per mutant and its files cheapest first:
   with the job's file, its other tests skipped (`context.skip()`), as a
   browser test's does.
 
-**Resident runners.** Jest and CommonJS Mocha suites run their jobs in
-resident processes, one per worker, as StrykerJS's runners do, instead of
+**Resident runners.** Jest, Mocha, AVA and Vitest Browser Mode suites run
+their jobs in resident processes, one per worker, as StrykerJS's runners do, instead of
 starting the runner for each job:
 
 - `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
@@ -1745,6 +1745,63 @@ starting the runner for each job:
   (`SUPERCOV_STRONG_MOCHA_ESM=process`); deep-eql's pass takes 5.9 s
   against 7.2 s on a 16-CPU Linux machine, where jobs side by side hide most of a
   process's start, and 9 s against 27 s on a laptop.
+- `strongAvaHost.mjs` keeps AVA's command loaded, with its options worked
+  out once: it runs AVA's own command (`lib/cli.js`) with the command's
+  arguments and takes the `Api` the command makes, and what the command asks
+  of its run, as the command starts it. Each job is that run again, as AVA's
+  watch mode reruns: AVA makes a worker (a thread, or a process under
+  `--no-worker-threads`) for each test file as the run starts, with the
+  main process's environment as it is then, so the job's files and the code
+  they test load afresh with the job's mutant on, as in a command of its
+  own, and the adapter runs only the job's tests. The main process loads
+  none of the project's code, in the command or here. A shared worker
+  (AVA's plugin API), which lives as long as the main process, is the one
+  thing a command's job had alone and a resident one would share: a job
+  that starts one is its host's last. A command that watches or debugs is
+  left to start for each job, as is any whose AVA cannot be made this way
+  (its command ends instead). As for Browser Mode, a job past its limit in
+  the host, and a baseline that does not pass there, run again as commands,
+  with a command's limit. On dot-prop (AVA, 590 mutants) a job cost 892 ms
+  of a worker's time as a command, on a 4-CPU runner where the whole suite
+  takes 0.6 s.
+- `strongVitestHost.mjs` keeps Vitest (4 and later), its Vite server and its
+  browser running for Browser Mode's jobs, one host per worker, and runs each
+  job with Vitest's runner API (`runTestSpecifications`) where a job used to
+  start the command, and with it Vitest, Vite and Chromium. What the command
+  gave a job, the host keeps:
+  - *A fresh browser context.* Vitest keeps its browser sessions from one run
+    to the next, and with them the context's cookies, storage, permissions
+    and routes. Before each job the host closes the last job's pages and
+    contexts and forgets Vitest's sessions for them, so the run opens new
+    ones; after the run, every context that served it must be one no
+    earlier job used, or the job's outcome is thrown away and it runs as a
+    command. A fixture test's first test fails wherever a job before it left
+    a cookie or a `localStorage` entry.
+  - *The mutant before the test file loads,* through the browser command
+    that reads the job from the environment the host sets for each job.
+  - *No project code in node from before the job.* A command's processes
+    run with the mutant from their start; a module the host's process
+    loaded earlier ran its top level without it. A job starts in the host
+    only while no instrumented module has loaded in its process.
+  - *The job's own limit, or a command's.* A job in the host takes 3× its
+    baseline in the host and 10 s, which is shorter than a command's (a
+    command's baseline includes starting Vitest and Chromium). A job past
+    it, with no test failed, runs alone as a command, after its tests ran
+    alone as a command without the mutant, as any stopped job does: only
+    past a command's limit is it a `timeout`. A baseline that does not pass
+    in the host runs again as a command, and the file's jobs are the
+    command's from then on.
+
+  It refuses, and the jobs start the command as before, where it cannot keep
+  that: a Vitest before 4, a browser provider other than Playwright's or a
+  persistent context, a global setup (it would run once for every job), the
+  project's own browser commands or a Vite plugin of the project's that
+  serves requests itself (state one job leaves for the next), a test file a
+  project without a browser runs too, or a host that cannot start. A host
+  that refuses to start says why in `vitest-hosts.log`, a job it gives back
+  in `resident-fallbacks.log`, both in the pass's jobs directory; and
+  the summary counts the jobs the host ran (`residentJobs`) and those it gave
+  back (`residentFallbacks`).
 
 The adapters write each job's evidence into the job's own directory, read
 when each record is written (a journal kept per directory: a resident

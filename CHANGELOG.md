@@ -16,6 +16,11 @@
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
 - A Maven or Gradle project that builds for Java 7 is measured. Supercov's runtime class compiles with the project's main sources, and it used two lambdas, so gson (`<release>7`) failed to compile in the copy ("lambda expressions are not supported in -source 7") and no run was published. The class now uses no syntax or library method newer than Java 7 (`Map.merge` included).
 
+**Changed**
+
+- A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass takes 70 s where it took 121 s, with every verdict the same.
+- A strong pass over AVA tests runs its jobs in a resident AVA, one per worker, instead of starting AVA's command for every mutant and test file. AVA's options are worked out once, from the command's own arguments and configuration, and each job is the command's run again, as AVA's watch mode reruns it: every test file in a new worker, with the job's mutant on from the worker's start. A job that starts an AVA shared worker is its host's last, and a command that watches or debugs starts for each job, as before. On dot-prop (590 mutants, 4 CPUs) the pass takes 116 s where it took 185 s, with every verdict the same.
+
 ## 4.29.19
 
 **Fixed**
