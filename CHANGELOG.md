@@ -18,7 +18,7 @@
 
 **Changed**
 
-- A measured Ruby suite spends less time in Supercov's probes: a decision evaluation a test has already recorded returns at once, observing a condition allocates nothing, a decision vector's record is built directly instead of through the encoder (still written at once, so a test whose process ends during it keeps it), and a phase's end settles only its own operator-assignment arrivals instead of reading every earlier phase's. rack's suite (1092 tests) on an Actions runner: see the pull request for the measurement, every answer the same.
+- A measured Ruby suite spends less time in Supercov's probes: a decision evaluation a test has already recorded returns at once, observing a condition allocates nothing, a decision vector's record is built directly instead of through the encoder (still written at once, so a test whose process ends during it keeps it), and a phase's end settles only its own operator-assignment arrivals instead of reading every earlier phase's. rack's suite (1092 tests) on an Actions runner: the test command took 6.62 s measured before and 5.64 s after (plain 3.61 s for the whole run), every answer the same.
 
 ## 4.29.19
 
