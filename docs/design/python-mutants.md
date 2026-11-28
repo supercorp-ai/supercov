@@ -206,8 +206,21 @@ stays Supercov's alone.
    candidate test that interpreter does not collect (its module failed to
    import with the mutant) is a kill.
 6. A mutant's time limit is three times its tests' baseline time and 10 s (5 s
-   more in a fresh interpreter); past it the fork is killed and the mutant is
-   a `timeout`, unless a test had already failed.
+   more in a fresh interpreter); past it the fork is killed, unless a test
+   had already failed. Its tests then run again alone, once every other fork
+   has ended: first without the mutant, whose time sets a new limit (three
+   times it and 10 s, never less than the first), then with it. Only past
+   that limit is the mutant a `timeout`, so a machine busier than when the
+   baseline ran makes none. Where the tests do not finish without the
+   mutant either, it is an `error`.
+7. A pass told to stop (its budget or a signal: Supercov writes `stopped-at`
+   beside the results before it signals the command) judges nothing from
+   then on. The driver looks for `stopped-at` before it judges any fork; an
+   interrupt or a SIGTERM in a fork (each inherits the driver's SIGTERM
+   handler) makes it write `stopped` rather than end as a test the mutant
+   killed would; and the driver kills its forks, which are process groups
+   of their own, and exits 130. A fork the stop ended was judged `killed`
+   before ("the test process ended before its tests did").
 
 `SUPERCOV_STRONG_WORKERS` sets how many forks run at once (one per CPU). A
 test the measured run skipped or failed runs too: the baseline says whether
@@ -218,7 +231,16 @@ changes no test's outcome and costs every fork its tracing. A test's own
 `pytest` or `python -m unittest` subprocess runs its tests, not the pass.
 
 `results.jsonl` ends with the driver's summary: forks, fresh interpreters,
-confirmations, kills overturned, and the baseline's time.
+confirmations, kills overturned, runs again alone (`aloneReruns`), and the
+baseline's time.
+
+A merged run's mutants run under its parts' command (`mutants_test_command.rs`,
+`test_command_of`). Parts of a pytest or unittest suite that differ only in
+the tests they select (`pytest tests/a`, `pytest tests/b`; `python -m
+unittest tests.test_a`, `tests.test_b`) run under one command that selects
+them all, in the place they were named; pytest-split's `--splits` and
+`--group` are dropped. Collecting more than a part's tests changes no
+verdict: the driver runs each mutant's candidates alone.
 
 ## Validation
 
