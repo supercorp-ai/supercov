@@ -641,6 +641,8 @@ pub struct IndexedHitMetadata {
     pub parent_id: Option<String>,
     pub source: String,
     pub tests: Vec<String>,
+    /// How many tests reached it: `tests`' length where they are read.
+    pub reached_by: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3759,7 +3761,19 @@ impl<'a> CoverageIndex<'a> {
     #[track_caller]
     pub fn lines(&self, view: CoverageViewId) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         self.readable("lines")?;
-        self.lines_where(view, None)
+        self.lines_where(view, None, true)
+    }
+
+    /// `lines`, without the tests, phases and confidence of each (left
+    /// empty): what comparing two whole runs reads, without decoding which of
+    /// thousands of tests ran each line.
+    #[track_caller]
+    pub fn line_places(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        self.readable("line_places")?;
+        self.lines_where(view, None, false)
     }
 
     /// `lines`, of one file only: records of other files are skipped before anything in them is decoded.
@@ -3770,13 +3784,14 @@ impl<'a> CoverageIndex<'a> {
         file: &str,
     ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         self.readable("lines_in_file")?;
-        self.lines_where(view, Some(file))
+        self.lines_where(view, Some(file), true)
     }
 
     fn lines_where(
         &self,
         view: CoverageViewId,
         file: Option<&str>,
+        relations: bool,
     ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         let descriptor = self.section(SECTION_LINES);
         let mut lines = Vec::new();
@@ -3793,15 +3808,21 @@ impl<'a> CoverageIndex<'a> {
             if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
-            lines.push(IndexedLine {
+            let mut line = IndexedLine {
                 file: self.string(get_u32(record, 4))?,
                 line: get_usize(record, 8),
                 covered: bool_field(record[1])?,
                 measured: !bool_field(record[2])?,
-                tests: self.relation_strings(get_u64(record, 16), get_u64(record, 24))?,
-                phases: self.relation_strings(get_u64(record, 32), get_u64(record, 40))?,
-                confidence: self.confidence(get_u64(record, 48))?,
-            });
+                tests: Vec::new(),
+                phases: Vec::new(),
+                confidence: crate::coverage_report::CoverageConfidence::default(),
+            };
+            if relations {
+                line.tests = self.relation_strings(get_u64(record, 16), get_u64(record, 24))?;
+                line.phases = self.relation_strings(get_u64(record, 32), get_u64(record, 40))?;
+                line.confidence = self.confidence(get_u64(record, 48))?;
+            }
+            lines.push(line);
         }
         Ok(lines)
     }
@@ -4053,7 +4074,18 @@ impl<'a> CoverageIndex<'a> {
         view: CoverageViewId,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         self.readable("hit_metadata")?;
-        self.hit_metadata_where(view, None)
+        self.hit_metadata_where(view, None, true)
+    }
+
+    /// `hit_metadata`, without which tests reached each (left empty; how
+    /// many did is `reached_by`): what comparing two whole runs reads.
+    #[track_caller]
+    pub fn hit_places(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        self.readable("hit_places")?;
+        self.hit_metadata_where(view, None, false)
     }
 
     /// `hit_metadata`, of one file only: records of other files are skipped before anything in them is decoded.
@@ -4064,13 +4096,14 @@ impl<'a> CoverageIndex<'a> {
         file: &str,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         self.readable("hit_metadata_in_file")?;
-        self.hit_metadata_where(view, Some(file))
+        self.hit_metadata_where(view, Some(file), true)
     }
 
     fn hit_metadata_where(
         &self,
         view: CoverageViewId,
         file: Option<&str>,
+        relations: bool,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         let descriptor = self.section(SECTION_HIT_METADATA);
         let mut metadata = Vec::new();
@@ -4109,8 +4142,13 @@ impl<'a> CoverageIndex<'a> {
                 alternative: self.optional_string(get_u32(record, 40))?,
                 parent_id: (obligation == "branch").then_some(metadata_label).flatten(),
                 source: self.string(get_u32(record, 44))?,
-                tests: self.relation_strings(get_u64(record, 48), get_u64(record, 56))?,
+                tests: Vec::new(),
+                reached_by: get_u64(record, 56),
             });
+            if relations {
+                let tests = self.relation_strings(get_u64(record, 48), get_u64(record, 56))?;
+                metadata.last_mut().expect("pushed above").tests = tests;
+            }
         }
         Ok(metadata)
     }

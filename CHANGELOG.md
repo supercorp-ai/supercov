@@ -32,6 +32,10 @@
 
 - A run's query index holds a passed test's lines, hits and decisions once. A failed run's index wrote them twice, for the whole run and again for its passing tests, most of a large run's store: on Excalidraw's 1,700-test Vitest run the index was 941 MB and is now 554 MB, and the run's store 1,122 MB and now 735 MB, every answer the same. The index's format is version 7; a run's older index is built again from its evidence the first time the run is read.
 
+**Changed**
+
+- `supercov diff <older> <newer>` of two whole runs reads only which lines and branch outcomes each covered from their indexes, not which tests covered each, and every query reads its index's records without taking a lock for each (the record of the pages already checked is a bitset). On Excalidraw's 1,700-test Vitest run against the merge of its 16 shards, the diff took 10.0 s and 1.1 GB; it now takes 2.1 s and 0.9 GB, its answer byte for byte the same. A diff filtered by kind or runner reads the tests as before.
+
 ## 4.29.19
 
 **Fixed**
