@@ -327,7 +327,10 @@ at first it was asked without them, and a file behind a tag got no
 operation probes. A run of
 the same sources reads them; one after an edit asks again, 0.04 to 0.11 s.
 The helper that answers is built once into `.supercov/cache/go-mutants`
-(5 MB, built `-trimpath -ldflags=-s -w`), 3-4 s on a machine's first run.
+(5 MB, built `-ldflags=-s -w`), 3-4 s on a machine's first run, 1.6 to
+1.9 s on a CI runner after the project's `go test` (not `-trimpath`, which
+compiles that run's standard library packages again: 5.6 to 6.0 s), and
+0.13 s once Go's build cache holds the helper's packages.
 Both live in the project's `.supercov`, not the run's workspace: a first
 version kept them in the workspace, which each run makes afresh, so every
 run relinked the helper and asked again, +0.24 s (+92%) on go-humanize.
