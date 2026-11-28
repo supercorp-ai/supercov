@@ -627,7 +627,8 @@ public final class Supercov {
         // every bit any harvest saw.
         java.util.Map<Integer, Integer> probes = new java.util.TreeMap<>();
         for (int[] hit : record.probes) {
-          probes.merge(hit[0], hit[1], (a, b) -> a | b);
+          Integer seen = probes.get(hit[0]);
+          probes.put(hit[0], seen == null ? hit[1] : seen | hit[1]);
         }
         putLong(out, probes.size());
         for (java.util.Map.Entry<Integer, Integer> hit : probes.entrySet()) {
@@ -1052,7 +1053,8 @@ public final class Supercov {
 
   // The object returns are generic so that one helper serves every declared
   // type: the caller casts the replacement to the type it returns, which the
-  // replacement has (an empty list is a Collection and an Iterable).
+  // replacement has (an empty list is a Collection and an Iterable). Each
+  // call names its type argument: Java 7 infers none from a conditional.
 
   @SuppressWarnings("unchecked")
   private static <T> T as(Object value) {
@@ -1060,11 +1062,11 @@ public final class Supercov {
   }
 
   public static <T> T rBT(int file, int index, T value) {
-    return on(file, index) ? as(Boolean.TRUE) : value;
+    return on(file, index) ? Supercov.<T>as(Boolean.TRUE) : value;
   }
 
   public static <T> T rBF(int file, int index, T value) {
-    return on(file, index) ? as(Boolean.FALSE) : value;
+    return on(file, index) ? Supercov.<T>as(Boolean.FALSE) : value;
   }
 
   public static <T> T rN(int file, int index, T value) {
@@ -1072,27 +1074,27 @@ public final class Supercov {
   }
 
   public static <T> T rBI(int file, int index, T value) {
-    return on(file, index) ? as(Integer.valueOf(0)) : value;
+    return on(file, index) ? Supercov.<T>as(Integer.valueOf(0)) : value;
   }
 
   public static <T> T rBS(int file, int index, T value) {
-    return on(file, index) ? as(Short.valueOf((short) 0)) : value;
+    return on(file, index) ? Supercov.<T>as(Short.valueOf((short) 0)) : value;
   }
 
   public static <T> T rBC(int file, int index, T value) {
-    return on(file, index) ? as(Character.valueOf((char) 0)) : value;
+    return on(file, index) ? Supercov.<T>as(Character.valueOf((char) 0)) : value;
   }
 
   public static <T> T rBL(int file, int index, T value) {
-    return on(file, index) ? as(Long.valueOf(0L)) : value;
+    return on(file, index) ? Supercov.<T>as(Long.valueOf(0L)) : value;
   }
 
   public static <T> T rBF0(int file, int index, T value) {
-    return on(file, index) ? as(Float.valueOf(0f)) : value;
+    return on(file, index) ? Supercov.<T>as(Float.valueOf(0f)) : value;
   }
 
   public static <T> T rBD(int file, int index, T value) {
-    return on(file, index) ? as(Double.valueOf(0d)) : value;
+    return on(file, index) ? Supercov.<T>as(Double.valueOf(0d)) : value;
   }
 
   public static String rS(int file, int index, String value) {
@@ -1100,25 +1102,25 @@ public final class Supercov {
   }
 
   public static <T> T rList(int file, int index, T value) {
-    return on(file, index) ? as(java.util.Collections.emptyList()) : value;
+    return on(file, index) ? Supercov.<T>as(java.util.Collections.emptyList()) : value;
   }
 
   public static <T> T rSet(int file, int index, T value) {
-    return on(file, index) ? as(java.util.Collections.emptySet()) : value;
+    return on(file, index) ? Supercov.<T>as(java.util.Collections.emptySet()) : value;
   }
 
   public static <T> T rMap(int file, int index, T value) {
-    return on(file, index) ? as(java.util.Collections.emptyMap()) : value;
+    return on(file, index) ? Supercov.<T>as(java.util.Collections.emptyMap()) : value;
   }
 
   // Optional and Stream by name, so that the runtime still compiles where a
   // project's main source is Java 7.
   public static <T> T rOpt(int file, int index, T value) {
-    return on(file, index) ? as(empty("java.util.Optional")) : value;
+    return on(file, index) ? Supercov.<T>as(empty("java.util.Optional")) : value;
   }
 
   public static <T> T rStream(int file, int index, T value) {
-    return on(file, index) ? as(empty("java.util.stream.Stream")) : value;
+    return on(file, index) ? Supercov.<T>as(empty("java.util.stream.Stream")) : value;
   }
 
   private static Object empty(String type) {
@@ -1783,22 +1785,35 @@ public final class Supercov {
             directory,
             "server-" + System.nanoTime() + "-" + Long.toHexString(Double.doubleToLongBits(Math.random())) + ".windows");
     final long[] start = {System.currentTimeMillis()};
+    // Anonymous classes, not lambdas: this class compiles with the
+    // project's own sources, and a project may build for Java 7.
     Thread sweeper =
         new Thread(
-            () -> {
-              while (true) {
-                try {
-                  Thread.sleep(SERVER_WINDOW_MILLIS);
-                } catch (InterruptedException interrupted) {
-                  return;
+            new Runnable() {
+              @Override
+              public void run() {
+                while (true) {
+                  try {
+                    Thread.sleep(SERVER_WINDOW_MILLIS);
+                  } catch (InterruptedException interrupted) {
+                    return;
+                  }
+                  window(file, start);
                 }
-                window(file, start);
               }
             },
             "supercov-server-windows");
     sweeper.setDaemon(true);
     sweeper.start();
-    Runtime.getRuntime().addShutdownHook(new Thread(() -> window(file, start)));
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(
+                new Runnable() {
+                  @Override
+                  public void run() {
+                    window(file, start);
+                  }
+                }));
   }
 
   /** Sweeps the array into one window and appends it, if it reached anything. */
