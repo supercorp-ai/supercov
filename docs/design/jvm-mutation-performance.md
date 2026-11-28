@@ -177,6 +177,34 @@ rounds of about 10.5 s for its seven mutants past the short limit, each a
 `timeout` only after the generous limit's 10 s. PIT, set the same way
 (`timeoutConstInMillis = 10000`), waits as long for each of its timeouts.
 
+### 7. Reach for Kotlin expression bodies
+
+A Kotlin expression body has no statement point, so a mutant in it was
+linked to no point, and every test was its candidate unless a value probe
+recorded where it ran: on kotlinpoet 22 survivors had 857 candidates each,
+more than half of the runs with a mutant. A run measured for mutants (as
+the value probes are, and not counted as coverage) now writes `fun f() = e`
+as `fun f() = kotlin.run { Supercov.wreach(slot); e }` (`run` is inline:
+the body's type is still `e`'s, a `return` in it still returns from `f`, a
+suspending call still suspends). A `tailrec` function's body and a getter's
+that reads `field` are left as written. Each mutant of the body with no
+other point takes the body's probe; `js_weak_mutation::pit_mutator` reads
+one that recorded nothing as not reached, and one that recorded as reached
+with infection unknown, so the plan keeps as candidates only the tests that
+ran the body.
+
+Result (run 46146878655 against 46103054380 for kotlinpoet and 46046555220
+for picnic): kotlinpoet 1,231 of 1,238 verdicts the same, picnic 319 of the
+342 both runs list. Every one that changed is a mutant in a body no test
+ran: `survived` before, `no-coverage` now (6 on kotlinpoet, 23 on picnic),
+and PIT says `NO_COVERAGE` for each of them (on the line where it reports
+a body that spans several). One `killed` is a `timeout` at the machine's
+speed. PIT's soundness violations are the same ones as before. The pass ran
+20,798 tests with a mutant on kotlinpoet against 32,125; its wall time did
+not show it on this run's runners, whose builds took a third longer than
+the last run's on the shards whose runs did not change (shard 6: the same
+303 runs, 81 s against 55 s).
+
 ## Next
 
 ### Durations from the measured run
@@ -211,20 +239,3 @@ writes the plan; the JVM runs the pass. What it takes:
   stand, and only the strong pass starts again without it.
 - The plan's mutants listed before the build, from the sources, as
   `mutants` lists them now on demand.
-
-### Reach for Kotlin expression bodies
-
-A Kotlin expression body has no statement point, so a mutant in it is
-linked to no point and every test is its candidate unless a value probe
-recorded where it ran; on kotlinpoet 22 survivors had 857 candidates each,
-more than half of the runs with a mutant. A reach probe, placed only in a
-run measured for mutants (as the value probes are) and not counted as
-coverage: `fun f() = e` written `fun f() = run { Supercov.reach(slot); e }`
-(`run` is inline: the type `e` infers is the body's, a `return` in it still
-returns from `f`, a suspending call still suspends). Each mutant of the body
-takes the body's probe as its `probe`; `js_weak_mutation::pit_mutator`
-reads a reach probe that recorded nothing as `not-reached` and one that
-recorded as reached with infection unknown, so `strong_plan` keeps as
-candidates only the tests that ran the body. The probe's outcomes are one
-(`ran`); `jvm_strong::value_outcomes` and the runtime's probe table gain
-the kind.
