@@ -33,6 +33,7 @@ jobs:
         include:
           - { variant: base, ref: ce132bc2 }
           - { variant: timing, ref: origin/exp/post-test-timing-src }
+          - { variant: slots, ref: origin/perf/view-decision-slots }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -156,9 +157,9 @@ jobs:
           BENCH_MODE: measure
           BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
-          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,timing=${{ github.workspace }}/binaries/supercov-timing/supercov
+          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,timing=${{ github.workspace }}/binaries/supercov-timing/supercov,slots=${{ github.workspace }}/binaries/supercov-slots/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
-          BENCH_ROUNDS: 1
+          BENCH_ROUNDS: 2
           SUPERCOV_POST_TIMING: 1
           BENCH_RUN_SUITE: timing
         run: node scripts/post-test-bench.mjs
