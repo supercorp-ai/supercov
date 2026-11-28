@@ -225,6 +225,7 @@ pub fn run_strong_python(
                 // shown with Supercov's diagnostics where the command fails:
                 // the pass's output is Supercov's.
                 captured_output: Some(work.join("python.log")),
+                keep_failed_output: false,
                 console: None,
             },
         },

@@ -117,6 +117,12 @@ export default class SupercovPlaywrightStrongReporter {
     onTestBegin(test) {
         if (!this.pass)
             return;
+        // A test began, so the command started: where no process of it has
+        // a mutant on everywhere (any round but one alone), it starts
+        // without one, which an alone round's failure is judged against.
+        if (!this.begun && this.work?.kind !== "alone")
+            markStartedWithoutMutant(this.pass);
+        this.begun = true;
         this.running.set(test.id, { title: test.title, begunAt: Date.now() });
         this.writeStatus(false);
     }
@@ -266,6 +272,11 @@ export default class SupercovPlaywrightStrongReporter {
         clearInterval(this.timer);
         this.running.clear();
         this.writeStatus(true);
+        // A command that failed before any test began (a web server that
+        // would not start, a global setup that threw) failed: it says so by
+        // its exit code, and Supercov shows and keeps its output.
+        if (this.erred && !this.begun)
+            return undefined;
         // A killed mutant fails a test, and that is the point: the command's
         // outcome is the pass's, not the tests'. The verdicts are the
         // judge's, once every invocation has ended.
@@ -425,8 +436,16 @@ export default class SupercovPlaywrightStrongReporter {
             // the whole command started with it, which says whether it was the
             // mutant's doing.) An error after the round began to stop is the
             // stop's: its servers went down under it.
+            // That is the mutant's doing only where the command starts without
+            // it: some round of this pass began a test with no mutant on
+            // everywhere. Where none did, the command fails without any
+            // mutant too (a build of the pass's copy that fails), and the
+            // failure says nothing of this one: no verdict.
             if (kind === "alone" && !work.batch && globalError && globalError.at < stoppedAt && !ended.length) {
-                verdict({ status: "killed", reason: `the command failed with it switched on (${globalError.message})${suffix}` });
+                if (startedWithoutMutant(pass))
+                    verdict({ status: "killed", reason: `the command failed with it switched on (${globalError.message})${suffix}` });
+                else
+                    verdict({ status: "error", reason: `the command failed with it switched on (${globalError.message}), and no run of it in this pass got as far as a test without a mutant${suffix}` });
                 continue;
             }
             // Its invocation's server never ran it: alone, the whole command
@@ -570,6 +589,21 @@ export default class SupercovPlaywrightStrongReporter {
             controls,
         });
     }
+}
+
+// Whether some round of the pass began a test in a command with no mutant
+// on everywhere: the command starts without one.
+function markStartedWithoutMutant(pass) {
+    try {
+        writeJson(`${pass.shared}/started-without-mutant`, Date.now());
+    }
+    catch {
+        // Unmarked, an alone round's failure decides nothing.
+    }
+}
+
+function startedWithoutMutant(pass) {
+    return existsSync(`${pass.shared}/started-without-mutant`);
 }
 
 /** A round as its first line says it. */

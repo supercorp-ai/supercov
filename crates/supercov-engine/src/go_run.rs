@@ -924,6 +924,7 @@ pub fn run_direct_go(
                         recorder.as_ref(),
                     )),
                     captured_output: None,
+                    keep_failed_output: false,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
             },

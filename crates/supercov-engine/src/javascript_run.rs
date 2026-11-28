@@ -1148,6 +1148,7 @@ fn run_javascript(
                     .strong
                     .as_ref()
                     .map(|strong| strong.results.with_extension("log")),
+                keep_failed_output: true,
                 console: None,
             },
         },
@@ -3104,6 +3105,7 @@ fn run_strong_restarts(
                         cwd: workspace.to_owned(),
                         environment: Some(environment_with(environment)),
                         captured_output: Some(log),
+                        keep_failed_output: true,
                         console: None,
                     },
                 },
