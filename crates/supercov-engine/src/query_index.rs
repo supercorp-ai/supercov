@@ -483,7 +483,8 @@ impl QueryIndex {
     }
 
     pub fn descriptor(&self, kind: u32) -> Result<SectionDescriptor, QueryIndexError> {
-        self.position(kind).map(|position| self.descriptors[position])
+        self.position(kind)
+            .map(|position| self.descriptors[position])
     }
 
     fn position(&self, kind: u32) -> Result<usize, QueryIndexError> {

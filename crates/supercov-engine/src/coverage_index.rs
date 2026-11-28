@@ -4055,11 +4055,16 @@ impl<'a> CoverageIndex<'a> {
                 ));
             }
             let start = get_u64(record, 48);
-            let end = start
-                .checked_add(get_u64(record, 56))
-                .ok_or(CoverageIndexError::InvalidRecord("decision condition range"))?;
+            let end =
+                start
+                    .checked_add(get_u64(record, 56))
+                    .ok_or(CoverageIndexError::InvalidRecord(
+                        "decision condition range",
+                    ))?;
             if end > condition_count {
-                return Err(CoverageIndexError::InvalidRecord("decision condition range"));
+                return Err(CoverageIndexError::InvalidRecord(
+                    "decision condition range",
+                ));
             }
             let conditions = (start..end)
                 .map(|index| {
