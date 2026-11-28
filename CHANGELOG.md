@@ -23,7 +23,7 @@
 
 **Changed**
 
-- `supercov diff <older> <newer>` of two whole runs reads only what each covered from their indexes, not which tests covered each line, branch and condition. On Excalidraw's 1,700-test Vitest run against the merge of its 16 shards, the diff took 9.7 s and 1.1 GB; it now takes 0.3 s and 135 MB, its answer byte for byte the same. A diff filtered by kind or runner reads as before. Every query also reads its index's records without taking a lock for each: the record of which pages were checked is a bitset, and a full diff of the same runs went from 14.4 s to 8.7 s from that alone.
+- `supercov diff <older> <newer>` of two whole runs reads only which lines and branch outcomes each covered from their indexes, not which tests covered each, and every query reads its index's records without taking a lock for each (the record of the pages already checked is a bitset). On Excalidraw's 1,700-test Vitest run against the merge of its 16 shards, the diff took 10.0 s and 1.1 GB; it now takes 2.1 s and 0.9 GB, its answer byte for byte the same. A diff filtered by kind or runner reads the tests as before.
 
 ## 4.29.19
 
