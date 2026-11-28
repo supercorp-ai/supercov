@@ -187,13 +187,22 @@ work. Handed to it with these figures.
 
 ### Python: the order of a mutant's tests
 
-Each mutant runs in one forked process, its candidates in collection order,
-stopping at the first failure. Collection order keeps the suite's own order
-between the tests that run, so running likely killers first is not exact
-where tests depend on order. One fork per test, in kill-history order,
-would be exact on its own terms, but it changes what each test runs after:
-a test would no longer see the state the candidates before it left, as it
-does in the suite. Dropped.
+Each mutant runs in one forked process and stops at its first failing
+test. The driver's docstring said it ran them in collection order. The code
+sorts them cheapest first, by the baseline's times. It keeps the verdicts
+exact another way: a kill that came after other tests than the baseline ran
+before the killer is confirmed by running the same tests, and then the
+killer, without the mutant (`_confirmed`, cached by prefix and killer). The
+kill stands only if the killer passes there. So the order is already free,
+and a different one changes when a verdict comes, not what it is. One fork
+per test (dropped above) is not needed for that.
+
+The lever, then: run first the tests that killed the most of the mutant's
+function's (then its file's) other mutants so far in the pass, then the
+cheapest (`_likeliest_first`). A mutant whose killer goes first has an
+empty prefix, so its confirmation is the killer alone without the mutant,
+cached per test. Branch `perf/python-kill-history-order`. Measured with
+`compare.mjs` on the Python corpus against current main: see the log.
 
 ### Already in place
 
@@ -207,3 +216,5 @@ does in the suite. Dropped.
 - 2026-11-28, run 46079225619: probe of the Go helper's build by cache and
   flags (table above).
 - 2026-11-28, run 46082195960: baseline measured with values.
+- 2026-11-28, run 46146364654: Python-only base on main `55a8e970`, for
+  the kill-history order.
