@@ -5792,6 +5792,8 @@ e: /w/copy/src/A.kt: (x, 2): no line
         Results::new(&request.results)
             .lines()
             .iter()
+            // The pass's summary of its builds is no verdict.
+            .filter(|line| line["summary"] != true)
             .map(|line| {
                 (
                     line["id"].as_str().unwrap_or_default().to_owned(),
@@ -6005,7 +6007,11 @@ e: /w/copy/src/A.kt: (x, 2): no line
             crate::jvm_strong::mutant_id(API, &api[api_last.2]),
             crate::jvm_strong::mutant_id(OTHER, &other[other_first.2]),
         ];
-        let lines = Results::new(&request.results).lines();
+        let lines = Results::new(&request.results)
+            .lines()
+            .into_iter()
+            .filter(|line| line["summary"] != true)
+            .collect::<Vec<_>>();
         assert_eq!(lines.len(), refused.len(), "{lines:?}");
         for line in &lines {
             assert!(
@@ -6041,7 +6047,12 @@ e: /w/copy/src/A.kt: (x, 2): no line
             diagnostics.contains("the strong copy did not compile, at code that holds no switch:\n  src/main/java/app/Unswitched.java:1:1: boom"),
             "{diagnostics}"
         );
-        assert!(Results::new(&request.results).lines().is_empty());
+        assert!(
+            Results::new(&request.results)
+                .lines()
+                .iter()
+                .all(|line| line["summary"] == true)
+        );
         // The refused switches' file cannot be written again.
         let unwritable = root.with_extension("unwritable");
         fs::create_dir_all(&unwritable).unwrap();
@@ -6530,12 +6541,19 @@ fn run_strong_jvm_with(
         // verdicts.
         let slow = work.join("slow");
         let _ = fs::remove_file(&slow);
+        // Each test's baseline, run once for the whole pass and shared by
+        // its JVMs and rounds.
+        let baselines = work.join("baselines.tsv");
+        let _ = fs::remove_file(&baselines);
         let supervisor = crate::process_supervision::ProcessSupervisor::new()
             .map_err(|error| error.to_string())?;
         let options =
             SupervisionOptions::from_variables(variable).map_err(|error| error.to_string())?;
         let mut exit_code = 0;
         let mut remaining = mutants.clone();
+        // Each start of the build: its round, how many mutants it was given
+        // and how long it took, for the pass's summary.
+        let mut builds = Vec::new();
         for start in 0..STRONG_STARTS {
             remaining.retain(|mutant| !results.decided(&mutant.id));
             remaining.retain(|mutant| {
@@ -6579,6 +6597,7 @@ fn run_strong_jvm_with(
                 ("SUPERCOV_STRONG_RESULTS", request.results.as_os_str()),
                 ("SUPERCOV_STRONG_CLAIMS", claims.as_os_str()),
                 ("SUPERCOV_STRONG_SLOW", slow.as_os_str()),
+                ("SUPERCOV_STRONG_BASELINES", baselines.as_os_str()),
             ] {
                 environment.push((OsString::from(name), value.to_owned()));
             }
@@ -6594,9 +6613,15 @@ fn run_strong_jvm_with(
                 console: None,
             };
             let before = remaining.len();
+            let build_started = std::time::Instant::now();
             let outcome = supervisor
                 .supervise(&spec, options, diagnostics)
                 .map_err(|error| error.to_string())?;
+            builds.push(serde_json::json!({
+                "retry": retry,
+                "mutants": round.len(),
+                "ms": build_started.elapsed().as_millis() as u64,
+            }));
             exit_code = outcome.exit_code();
             if let Some(signal) = outcome.interrupted_signal {
                 return Err(format!(
@@ -6677,6 +6702,13 @@ fn run_strong_jvm_with(
                 break;
             }
         }
+        // The builds this pass started, beside the JVMs' own summaries.
+        let mut summaries = fs::read_to_string(&request.results).unwrap_or_default();
+        summaries.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"summary": true, "driver": "jvm-builds", "builds": builds})
+        ));
+        let _ = fs::write(&request.results, summaries);
         Ok(exit_code)
     })();
     let release = lock.release().map_err(|error| error.to_string());

@@ -15,6 +15,10 @@ on:
         description: "Space-separated project names (default: every project)"
         required: false
         default: ""
+      plain:
+        description: "Run each shard's suite once without Supercov first, to time what measuring adds"
+        type: boolean
+        default: false
       handchecks:
         description: "Disagreements to check by hand, separated by `;`: project|file:line:from:to|test. Each applies the mutant (the line's text `from` made `to`), runs the test alone and the whole suite."
         required: false
@@ -174,6 +178,8 @@ jobs:
           # The pass stops in time, its verdicts so far saved; what it
           # leaves shows as mutants without a verdict.
           BUDGET: 420
+          # The suite once without Supercov first, for what measuring adds.
+          PLAIN: ${{ inputs.plain && '1' || '' }}
         run: |
           out="out/${{ matrix.project }}/${{ matrix.shard }}"
           /usr/bin/time -v -o time.txt timeout 540 \
