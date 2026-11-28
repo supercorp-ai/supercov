@@ -1105,7 +1105,12 @@ impl<'a> RustObligationCollector<'a> {
                     })
                     .filter_map(|binary| binary.rhs())
                     .map(|right| {
-                        stable_id(self.file, "branch", right.syntax().text_range(), "logical-and")
+                        stable_id(
+                            self.file,
+                            "branch",
+                            right.syntax().text_range(),
+                            "logical-and",
+                        )
                     }),
             );
             self.site_limitation(
@@ -5717,9 +5722,12 @@ fn main() {
             .collect::<Vec<_>>();
         assert_eq!(declined_operators, ["y > 2"]);
         assert!(
-            manifest.limitations.iter().any(|limitation| limitation["id"]
-                .as_str()
-                .is_some_and(|id| id.contains("rust-let-guard-not-measured"))),
+            manifest
+                .limitations
+                .iter()
+                .any(|limitation| limitation["id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("rust-let-guard-not-measured"))),
             "{:?}",
             manifest.limitations
         );
