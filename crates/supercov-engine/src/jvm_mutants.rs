@@ -219,6 +219,10 @@ pub enum ProbeKind {
     Operation,
     /// A returned value: what it is, as the return mutants replace it.
     Return,
+    /// A Kotlin expression body's evaluation: `ran`. It has no statement
+    /// point, so this is what says which tests reached the mutants in it
+    /// (`kotlin_expression_bodies`).
+    Reach,
 }
 
 /// A probe around a mutant's code: insertions only, so it composes with the
@@ -1162,6 +1166,40 @@ struct Class {
 }
 
 /// Enumerates one file's mutants.
+/// The expression bodies of a Kotlin file's functions and getters
+/// (`fun f() = e`, `get() = e`), where a reach probe goes
+/// (`jvm_strong::probe_edits`): no statement point is in one. Not a
+/// `tailrec` function's, whose recursive call the probe's lambda would take
+/// out of tail position, nor a getter's that reads `field`.
+pub fn kotlin_expression_bodies(tree: &tree_sitter::Tree, source: &str) -> Vec<Range> {
+    let mut found = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        stack.extend(named_children(node));
+        if node.kind() != "function_body" {
+            continue;
+        }
+        let parent = node.parent().expect("a function body has its declaration");
+        let Some(body) = named_children(node).find(|child| child.kind() != "block") else {
+            continue;
+        };
+        let declared = &source[parent.start_byte()..node.start_byte()];
+        let reads_field = text(body, source)
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|word| word == "field");
+        let keep = match parent.kind() {
+            "function_declaration" => !declared.split_whitespace().any(|word| word == "tailrec"),
+            "getter" => !reads_field,
+            _ => false,
+        };
+        if keep {
+            found.push((body.start_byte(), body.end_byte()));
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
 pub fn enumerate(
     source: &str,
     tree: &tree_sitter::Tree,

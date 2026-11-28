@@ -476,11 +476,20 @@ pub fn prepare_jvm_project(
                             crate::jvm_strong::candidate(mutant, &obligations.point_spans)
                         })
                         .collect::<Vec<_>>();
+                    // A Kotlin expression body's mutants take its reach
+                    // probe, where nothing else says which tests ran them.
+                    let bodies = match language {
+                        JvmLanguage::Kotlin => {
+                            crate::jvm_mutants::kotlin_expression_bodies(&tree, &source)
+                        }
+                        JvmLanguage::Java => Vec::new(),
+                    };
                     let (probe_edits, sites) = crate::jvm_strong::probe_edits(
                         relative,
                         &source,
                         &found,
                         &mut listed,
+                        &bodies,
                         &mut next_probe,
                     );
                     plain = !probe_edits.is_empty();

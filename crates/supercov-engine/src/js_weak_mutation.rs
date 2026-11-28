@@ -341,9 +341,26 @@ fn pit_mutator(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Statu
     {
         return None;
     }
+    // A Kotlin expression body's reach probe says only whether the body
+    // ran: where it did not, the mutant was not reached; where it did, the
+    // mutant is decided as one with no probe is.
+    let reach = mutant
+        .probe
+        .as_ref()
+        .filter(|site| site.ends_with("#reach"));
+    if reach.is_some_and(|site| records.comparisons(site).is_none()) {
+        return Some(verdict_of(
+            Status::NotReached,
+            "not-evaluated",
+            "the mutated code never ran",
+        ));
+    }
     // A probe that was placed and recorded nothing says its code never ran:
     // that holds where no statement point does (a Kotlin expression body).
-    let site = mutant.compare.as_ref().or(mutant.probe.as_ref());
+    let site = mutant
+        .compare
+        .as_ref()
+        .or(mutant.probe.as_ref().filter(|_| reach.is_none()));
     if let Some(site) = site {
         let Some(outcomes) = records.comparisons(site) else {
             return Some(verdict_of(
@@ -3473,6 +3490,34 @@ mod tests {
             &Observations::default(),
             Status::NotReached,
             "statement-not-run",
+        );
+    }
+
+    /// A mutant in a Kotlin expression body takes the body's reach probe:
+    /// where the body never ran it was not reached; where it ran, it is
+    /// decided as a mutant with no probe is.
+    #[test]
+    fn a_pit_mutant_in_an_expression_body_is_reached_where_its_body_ran() {
+        let call = CandidateMutant {
+            probe: Some("A.kt:1:11-1:16#reach".into()),
+            ..mutant("VoidMethodCall", "log", "log()")
+        };
+        expect(&call, &ran(), Status::NotReached, "not-evaluated");
+        expect(
+            &call,
+            &with_outcomes("A.kt:1:11-1:16#reach", &["ran"]),
+            PROXY,
+            "statement-ran",
+        );
+        let math = CandidateMutant {
+            probe: Some("A.kt:1:11-1:16#reach".into()),
+            ..mutant("Math", "-", "a + b")
+        };
+        expect(
+            &math,
+            &with_outcomes("A.kt:1:11-1:16#reach", &["ran"]),
+            Status::Unknown,
+            "no-probe",
         );
     }
 }

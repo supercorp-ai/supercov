@@ -1697,6 +1697,14 @@ public final class Supercov {
     return value;
   }
 
+  /**
+   * A Kotlin expression body was evaluated: `ran` (`jvm_strong::reach_probe`
+   * places the call; its mutants have no statement point to say so).
+   */
+  public static void wreach(int slot) {
+    value(slot, 1);
+  }
+
   private static Object emptyOptional;
   private static boolean emptyOptionalRead;
 

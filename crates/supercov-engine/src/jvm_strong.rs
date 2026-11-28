@@ -42,6 +42,7 @@ pub fn value_outcomes(kind: crate::jvm_mutants::ProbeKind, bits: u32) -> Vec<Str
     let names: &[&str] = match kind {
         ProbeKind::Compare => &["lt", "eq", "gt", "unordered"],
         ProbeKind::Operation => &["same", "differs"],
+        ProbeKind::Reach => &["ran"],
         ProbeKind::Return => &[
             "false",
             "true",
@@ -80,6 +81,7 @@ fn site_id(file: &str, source: &str, probe: &crate::jvm_mutants::ValueProbe) -> 
             start.0, start.1, end.0, end.1
         ),
         ProbeKind::Return => format!("{file}:{}:{}-{}:{}#return", start.0, start.1, end.0, end.1),
+        ProbeKind::Reach => format!("{file}:{}:{}-{}:{}#reach", start.0, start.1, end.0, end.1),
     }
 }
 
@@ -93,6 +95,7 @@ pub fn probe_edits(
     source: &str,
     mutants: &[JvmMutant],
     listed: &mut [CandidateMutant],
+    bodies: &[crate::jvm_mutants::Range],
     next_probe: &mut u64,
 ) -> (
     Vec<crate::go_instrumenter::GoEdit>,
@@ -139,6 +142,7 @@ pub fn probe_edits(
                         link.probe = Some(site.clone());
                     }
                 }
+                ProbeKind::Reach => {}
             }
         }
         sites.insert(
@@ -149,8 +153,79 @@ pub fn probe_edits(
             },
         );
     }
+    for body in bodies {
+        reach_probe(
+            file, source, *body, mutants, listed, next_probe, &mut edits, &mut sites,
+        );
+    }
     (edits, sites)
 }
+
+/// A Kotlin expression body's reach probe, `= kotlin.run { …reach(slot);
+/// e }`, where a mutant in the body has no point and no value probe to
+/// say which tests ran it: each such mutant takes the body's probe. Not a
+/// mutant deferred in a lambda of the body, which a test may run though it
+/// never evaluated the body (the lambda made in another test). `run` is
+/// inline: the body's type is `e`'s, a `return` in it still returns from
+/// the function, and a suspending call still suspends. The probe opens
+/// outside every wrapper at the body's start and closes outside every one
+/// at its end (a braced `if` branch included).
+#[allow(clippy::too_many_arguments)]
+fn reach_probe(
+    file: &str,
+    source: &str,
+    body: crate::jvm_mutants::Range,
+    mutants: &[JvmMutant],
+    listed: &mut [CandidateMutant],
+    next_probe: &mut u64,
+    edits: &mut Vec<crate::go_instrumenter::GoEdit>,
+    sites: &mut BTreeMap<u64, ValueSite>,
+) {
+    use crate::jvm_mutants::ProbeKind;
+    let probe = crate::jvm_mutants::ValueProbe {
+        kind: ProbeKind::Reach,
+        span: body,
+        edits: Vec::new(),
+    };
+    let site = site_id(file, source, &probe);
+    let mut linked = false;
+    for (mutant, link) in mutants.iter().zip(listed.iter_mut()) {
+        let inside = body.0 <= mutant.range.0 && mutant.range.1 <= body.1;
+        let unlinked = link.statement.is_none()
+            && link.function.is_none()
+            && link.compare.is_none()
+            && link.probe.is_none();
+        if inside && unlinked && mutant.deferred.is_none() {
+            link.probe = Some(site.clone());
+            linked = true;
+        }
+    }
+    if !linked {
+        return;
+    }
+    *next_probe += 1;
+    let slot = *next_probe;
+    edits.push(crate::go_instrumenter::GoEdit {
+        at: body.0,
+        rank: -1_000,
+        text: format!("kotlin.run {{ {PROBES}.wreach({slot}); "),
+    });
+    edits.push(crate::go_instrumenter::GoEdit {
+        at: body.1,
+        rank: 10_000_000,
+        text: " }".to_owned(),
+    });
+    sites.insert(
+        slot,
+        ValueSite {
+            site,
+            kind: ProbeKind::Reach,
+        },
+    );
+}
+
+/// The runtime class a probe calls.
+const PROBES: &str = "com.supercorp.supercov.Supercov";
 
 /// One file's mutants, with the ids of its points.
 pub struct FileMutants {
@@ -1454,7 +1529,7 @@ mod tests {
     #[test]
     fn a_probe_with_nothing_to_place_takes_its_slot_alone() {
         let mut next_probe = 4;
-        let (edits, sites) = probe_edits("src/A.java", TWICE, &[], &mut [], &mut next_probe);
+        let (edits, sites) = probe_edits("src/A.java", TWICE, &[], &mut [], &[], &mut next_probe);
         assert!(edits.is_empty() && sites.is_empty());
         assert_eq!(next_probe, 4);
         let mut probed = twice_mutants()
@@ -1463,7 +1538,14 @@ mod tests {
             .expect("a probed mutant");
         let kind = probed.probe.as_ref().unwrap().kind;
         probed.probe.as_mut().unwrap().edits.clear();
-        let (edits, sites) = probe_edits("src/A.java", TWICE, &[probed], &mut [], &mut next_probe);
+        let (edits, sites) = probe_edits(
+            "src/A.java",
+            TWICE,
+            &[probed],
+            &mut [],
+            &[],
+            &mut next_probe,
+        );
         assert!(edits.is_empty());
         assert_eq!(next_probe, 5);
         assert_eq!(
@@ -1472,6 +1554,82 @@ mod tests {
                 .map(|(slot, site)| (slot, site.kind))
                 .collect::<Vec<_>>(),
             [(5, kind)]
+        );
+    }
+
+    /// A Kotlin expression body (a function's, a getter's, an anonymous
+    /// function's not) is where a reach probe goes; a block body, a
+    /// `tailrec` function's and a getter's that reads `field` are not.
+    #[test]
+    fn a_kotlin_expression_body_is_where_a_reach_probe_goes() {
+        let source = "class A {\n    fun twice(n: Int) = n * 2\n    fun under(a_b: Int) = a_b + 1\n    fun block(n: Int): Int { return n + 1 }\n    tailrec fun down(n: Int): Int = if (n <= 0) 0 else down(n - 1)\n    val size: Int\n        get() = 3 + 1\n    var count: Int = 0\n        get() = field + 1\n    val h = fun(x: Int) = x + 1\n}\n";
+        let tree = crate::jvm_instrumenter::parse(source, JvmLanguage::Kotlin).unwrap();
+        let bodies = crate::jvm_mutants::kotlin_expression_bodies(&tree, source)
+            .into_iter()
+            .map(|(start, end)| &source[start..end])
+            .collect::<Vec<_>>();
+        assert_eq!(bodies, ["n * 2", "a_b + 1", "3 + 1"]);
+    }
+
+    /// A Kotlin expression body's mutants with no point and no value probe
+    /// take its reach probe, which wraps the body in `kotlin.run`; a mutant
+    /// deferred in a lambda, or one a point already places, does not. A
+    /// body none of whose mutants takes it has no probe.
+    #[test]
+    fn an_expression_body_s_unplaced_mutants_take_its_reach_probe() {
+        let source = "fun f(x: Int) = g(x)\n";
+        let body = (16, 20);
+        let mut mutant = twice_mutants().remove(0);
+        mutant.range = body;
+        mutant.deferred = None;
+        mutant.probe = None;
+        let mut deferred = mutant.clone();
+        deferred.deferred = Some(body);
+        let mutants = [mutant.clone(), deferred, mutant.clone()];
+        let mut listed = vec![
+            candidate(&mutants[0], &[]),
+            candidate(&mutants[1], &[]),
+            CandidateMutant {
+                statement: Some("p".into()),
+                ..candidate(&mutants[2], &[])
+            },
+        ];
+        let mut next_probe = 0;
+        let (edits, sites) = probe_edits(
+            "src/A.kt",
+            source,
+            &mutants,
+            &mut listed,
+            &[body],
+            &mut next_probe,
+        );
+        assert_eq!(next_probe, 1);
+        let site = &sites[&1];
+        assert_eq!(site.kind, crate::jvm_mutants::ProbeKind::Reach);
+        assert!(site.site.ends_with("#reach"), "{}", site.site);
+        assert_eq!(listed[0].probe.as_ref(), Some(&site.site));
+        assert_eq!(
+            (listed[1].probe.as_ref(), listed[2].probe.as_ref()),
+            (None, None)
+        );
+        assert_eq!(
+            crate::jvm_instrumenter::rewrite_plain(source, &edits),
+            "fun f(x: Int) = kotlin.run { com.supercorp.supercov.Supercov.wreach(1); g(x) }\n"
+        );
+        // Each mutant is placed already: no probe for the body.
+        let (edits, sites) = probe_edits(
+            "src/A.kt",
+            source,
+            &mutants,
+            &mut listed,
+            &[body],
+            &mut next_probe,
+        );
+        assert!(edits.is_empty() && sites.is_empty());
+        assert_eq!(next_probe, 1);
+        assert_eq!(
+            crate::jvm_strong::value_outcomes(crate::jvm_mutants::ProbeKind::Reach, 1),
+            ["ran"]
         );
     }
 
