@@ -266,7 +266,16 @@ public final class SupercovStrongPass {
   static void runEverywhere(Executor executor, String framework) {
     List<Process> minions = startMinions(framework, null, false);
     try {
-      new SupercovStrongPass(executor, module()).run();
+      // Where the pass has JVMs of its own, they run every mutant and this
+      // one waits: theirs is the JIT the pass sets (see startMinions).
+      if (minions.isEmpty()) {
+        new SupercovStrongPass(executor, module()).run();
+      } else if (!waitFor(minions)) {
+        // None of its JVMs could start (a JVM that refuses an option the
+        // pass gives it): this one runs the pass as it would alone.
+        System.err.println("supercov: the strong pass's own JVMs did not start; it runs here");
+        new SupercovStrongPass(executor, module()).run();
+      }
     } catch (Throwable error) {
       System.err.println("supercov: the strong pass stopped: " + error);
       error.printStackTrace();
@@ -286,14 +295,17 @@ public final class SupercovStrongPass {
     }
   }
 
-  private static void waitFor(List<Process> minions) {
+  /** Waits for the JVMs: whether any of them ended as a pass's JVM does (exit 0). */
+  private static boolean waitFor(List<Process> minions) {
+    boolean any = false;
     for (Process minion : minions) {
       try {
-        minion.waitFor();
+        any |= minion.waitFor() == 0;
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
     }
+    return any;
   }
 
   /** How many rounds of fresh JVMs a pass starts itself, at most. */
@@ -451,7 +463,7 @@ public final class SupercovStrongPass {
    */
   private static List<Process> startMinions(String framework, String claims, boolean retry) {
     List<Process> started = new ArrayList<>();
-    // A round of its own: every JVM of it is a minion.
+    // A round of its own, after the first.
     boolean round = claims != null;
     int jvms = 1;
     try {
@@ -483,10 +495,21 @@ public final class SupercovStrongPass {
     if (assertionsOn()) {
       command.add("-ea");
     }
+    // C1 alone: each mutant's classes are loaded afresh, so code the JIT
+    // compiles is thrown away with its loader, and C2's compilations of it
+    // took as much processor time as the tests did, beside them, on as many
+    // processors as there are JVMs. Not in the generous round: it decides
+    // the mutants past the short limit, whose verdict can turn on the JIT's
+    // speed (a mutant that allocates until the heap runs out fails at 8 s
+    // with C2 and passes the 10 s limit with C1 alone), so there each JVM
+    // has the JIT the build's own has, as a round of a new build would.
+    if (!retry && !"1".equals(System.getenv(RETRY))) {
+      command.add("-XX:TieredStopAtLevel=1");
+    }
     command.add("-D" + MINION + "=true");
     File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
     File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
-    for (int i = round ? 0 : 1; i < jvms; i++) {
+    for (int i = 0; i < jvms; i++) {
       List<String> own = new ArrayList<>(command);
       ProcessBuilder builder = new ProcessBuilder(own).inheritIO();
       if (round) {
@@ -723,6 +746,7 @@ public final class SupercovStrongPass {
       Outcome outcome = execute(test, true, mutant.file, mutant.index, mutated);
       profile.runs++;
       profile.runNanos += System.nanoTime() - run;
+      profile.measuredMillis += test.measuredMillis;
       if (ran == 1) {
         profile.firstRunNanos += System.nanoTime() - run;
       }
@@ -799,6 +823,8 @@ public final class SupercovStrongPass {
     long baselineNanos;
     int runs;
     long runNanos;
+    /** What the measured run took for the tests run with a mutant. */
+    long measuredMillis;
     long firstRunNanos;
     int confirmations;
     long confirmNanos;
@@ -849,6 +875,7 @@ public final class SupercovStrongPass {
       line.append(",\"runs\":").append(runs);
       line.append(",\"runMs\":").append(runNanos / 1_000_000L);
       line.append(",\"firstRunMs\":").append(firstRunNanos / 1_000_000L);
+      line.append(",\"measuredMs\":").append(measuredMillis);
       line.append(",\"confirmations\":").append(confirmations);
       line.append(",\"confirmMs\":").append(confirmNanos / 1_000_000L);
       line.append(",\"classesLoaded\":").append(classes);
