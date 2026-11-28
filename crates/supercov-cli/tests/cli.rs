@@ -31255,13 +31255,13 @@ fn a_ruby_mutant_whose_tests_the_command_does_not_run_is_an_error() {
         "require 'minitest/autorun'\nrequire 'half'\n\nclass HalfTest < Minitest::Test\n  def test_half\n    assert_equal 4, Half.new.of(8)\n  end\nend\n",
     );
     project.write(
-        "test/all.rb",
-        "require_relative 'calc_test'\nrequire_relative 'half_test'\n",
+        "test/all_test.rb",
+        "require 'minitest/autorun'\nrequire_relative 'calc_test'\nrequire_relative 'half_test'\n",
     );
     project.git(&["init", "-q"]);
     project.commit("fixture");
     project
-        .supercov(&["--", ruby.as_str(), "-Ilib", "test/all.rb"])
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/all_test.rb"])
         .succeeds();
     let ran = project.supercov(&[
         "runs",
