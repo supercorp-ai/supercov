@@ -253,6 +253,10 @@ artifact can leave it out:
 tar czf supercov-runs.tgz --exclude 'query-index.v1.bin' .supercov/runs
 ```
 
+A run also keeps the view its reports read (`run-view.json.gz`, a few
+megabytes), so an export or the HTML report does not analyse the evidence
+again. Like the index, it is a cache, made again when it is missing.
+
 A merged run holds a copy of each run's evidence and an index of its own, so
 merging adds about as much again. To hand a run to a reviewer, the HTML report
 (`npx supercov report`) is usually the smaller artifact.
