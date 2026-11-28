@@ -21,6 +21,10 @@
 - A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass takes 70 s where it took 121 s, with every verdict the same.
 - A strong pass over AVA tests runs its jobs in a resident AVA, one per worker, instead of starting AVA's command for every mutant and test file. AVA's options are worked out once, from the command's own arguments and configuration, and each job is the command's run again, as AVA's watch mode reruns it: every test file in a new worker, with the job's mutant on from the worker's start. A job that starts an AVA shared worker is its host's last, and a command that watches or debugs starts for each job, as before. On dot-prop (590 mutants, 4 CPUs) the pass takes 116 s where it took 185 s, with every verdict the same.
 
+**Changed**
+
+- `supercov diff <older> <newer>` of two whole runs reads only what each covered from their indexes, not which tests covered each line, branch and condition. On Excalidraw's 1,700-test Vitest run against the merge of its 16 shards, the diff took 9.7 s and 1.1 GB; it now takes 0.3 s and 135 MB, its answer byte for byte the same. A diff filtered by kind or runner reads as before.
+
 ## 4.29.19
 
 **Fixed**
