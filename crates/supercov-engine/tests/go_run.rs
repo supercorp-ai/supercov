@@ -618,7 +618,13 @@ fn a_package_whose_evidence_is_cut_short_fails_the_run_naming_it() {
     };
     let root = temporary("cut-short");
     fixture(root.as_path());
-    let evidence = root.join(".supercov/work/run-go-cut-short/go/evidence");
+    // Beside the copy, where every run of it writes its test packages' evidence.
+    let canonical = std::fs::canonicalize(root.as_path()).unwrap();
+    let copy = supercov_engine::workspace::copy_path(&canonical, 1).unwrap();
+    let evidence = copy.parent().unwrap().join(format!(
+        ".{}.go-evidence",
+        canonical.file_name().unwrap().to_string_lossy()
+    ));
     let request = DirectGoRunRequest {
         root: root.to_path_buf(),
         command: vec![
@@ -639,7 +645,7 @@ fn a_package_whose_evidence_is_cut_short_fails_the_run_naming_it() {
     assert!(error.contains("ended in the middle of its"), "{error}");
     // Named by its file, whose separators differ by platform.
     assert!(
-        error.contains("run-go-cut-short") && error.contains(".bin"),
+        error.contains(".go-evidence") && error.contains(".bin"),
         "{error}"
     );
     std::fs::remove_dir_all(root).ok();
