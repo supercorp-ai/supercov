@@ -444,11 +444,11 @@ module Supercov
       @unprobed_lines = {}
       @features_seen = 0
       @pending_hits = {}
-      # Per context, the decision vectors not written yet (see flush_hits).
-      @pending_vectors = {}
       @id_numbers = {}
       @line_ids = {}
       @seen_vectors = {}
+      # Decision ids as JSON strings, for their records (see vector).
+      @encoded_ids = {}
       # Per context and decision probe, the evaluations already recorded,
       # by their condition values and outcome (see probe_decision).
       @finished_decisions = {}
@@ -1222,14 +1222,13 @@ module Supercov
     # The queued hits, one record per context; each id is named once per
     # process and numbered after that.
     def flush_hits
-      pending, values, vectors = @seen_lock.synchronize do
-        taken = [@pending_hits, @pending_values, @pending_vectors]
+      pending, values = @seen_lock.synchronize do
+        taken = [@pending_hits, @pending_values]
         @pending_hits = {}
         @pending_values = {}
-        @pending_vectors = {}
         taken
       end
-      return if pending.empty? && values.empty? && vectors.empty?
+      return if pending.empty? && values.empty?
 
       # Open (or, in a forked child, reopen) the evidence file first: that
       # decides which numbers the file has already named.
@@ -1259,21 +1258,6 @@ module Supercov
         record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
         record_json(%({"t":"cmps","ctx":#{Integer(context)},"n":[#{numbers.join(',')}],"o":[#{bits.values.join(',')}]}))
       end
-      # Decision vectors the same way: the decision by number, its condition
-      # digits (0, 1 and 2 only) and its outcome.
-      vectors.each do |context, entries|
-        fresh = []
-        numbers = entries.map do |id, _, _|
-          @id_numbers[id] ||= begin
-            fresh << id
-            @id_numbers.size
-          end
-        end
-        record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
-        digits = entries.map { |_, values, _| %("#{values}") }.join(",")
-        outcomes = entries.map { |_, _, outcome| outcome }.join(",")
-        record_json(%({"t":"decs","ctx":#{Integer(context)},"n":[#{numbers.join(',')}],"v":[#{digits}],"o":[#{outcomes}]}))
-      end
     end
 
     # What one observation proves besides itself: the branch alternatives and
@@ -1301,11 +1285,14 @@ module Supercov
         @seen_vectors[key] = true
         count_key = [context, decision_id]
         @vector_counts[count_key] = (@vector_counts[count_key] || 0) + 1
-        # Queued with the context's hits and written with them at the next
-        # boundary: a record apiece, each through the encoder, was an eighth
-        # of a decision-heavy suite's time.
-        (@pending_vectors[context] ||= []) << [decision_id, digits, outcome ? 1 : 0]
       end
+      # Written at once, so a test whose process ends during it (`exit!`, a
+      # signal) keeps its decisions. The record is the one the encoder writes,
+      # built directly: the encoder's walk was most of a decision-heavy
+      # suite's evidence cost. Digits are 0, 1 and 2 only; the id is encoded
+      # once.
+      id = @encoded_ids[decision_id] ||= Encode.string(decision_id, +"")
+      record_json(%({"t":"dec","ctx":#{Integer(context)},"id":#{id},"v":"#{digits}","o":#{outcome ? 1 : 0}}))
     end
 
     def limitation(id, reason, file = nil, obligation = nil)

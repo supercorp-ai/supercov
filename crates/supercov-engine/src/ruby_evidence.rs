@@ -141,15 +141,6 @@ enum Record {
         v: String,
         o: u8,
     },
-    /// One context's decision vectors since the last boundary: each the
-    /// decision by number, as `hits` names them, its condition digits and
-    /// its outcome, as `dec` writes one.
-    Decs {
-        ctx: u64,
-        n: Vec<usize>,
-        v: Vec<String>,
-        o: Vec<u8>,
-    },
     /// An infection probe's outcomes at mutants' sites
     /// (`file:L:C-EL:EC#kind`) in one context since the last boundary: the
     /// ids by number, as `hits` names them, each with its outcomes as bits
@@ -742,46 +733,6 @@ fn read_evidence_file(
                 .entry(id)
                 .or_default()
                 .insert((values, outcome));
-            }
-            Record::Decs { ctx, n, v, o } => {
-                if n.len() != v.len() || n.len() != o.len() {
-                    return Err(invalid(
-                        "decision numbers, vectors and outcomes differ in length",
-                    ));
-                }
-                let mut vectors = Vec::with_capacity(n.len());
-                for ((&number, digits), &outcome) in n.iter().zip(&v).zip(&o) {
-                    let id = interned
-                        .get(number)
-                        .ok_or_else(|| invalid("decision number has no name"))?;
-                    let (values, outcome) =
-                        crate::python_evidence::decision_vector(digits, outcome)
-                            .map_err(invalid)?;
-                    vectors.push((id.clone(), values, outcome));
-                }
-                if let Some(before) = before_assertion.get_mut(&ctx) {
-                    for (id, values, outcome) in &vectors {
-                        before
-                            .vectors
-                            .entry(id.clone())
-                            .or_default()
-                            .insert((values.clone(), *outcome));
-                    }
-                }
-                let into = observations(
-                    evidence,
-                    &contexts,
-                    process_worker.as_deref(),
-                    ctx,
-                    name,
-                    line_number,
-                )?;
-                for (id, values, outcome) in vectors {
-                    into.vectors
-                        .entry(id)
-                        .or_default()
-                        .insert((values, outcome));
-                }
             }
             Record::Cmps { ctx, n, o } => {
                 if n.len() != o.len() {
@@ -2095,29 +2046,6 @@ pub(crate) mod tests {
                     json!({"t":"dec","ctx":0,"id":"d","v":"12","o":2}),
                 ],
                 "outcome must be 0 or 1",
-            ),
-            (
-                vec![
-                    ok.clone(),
-                    json!({"t":"ids","first":0,"names":["d"]}),
-                    json!({"t":"decs","ctx":0,"n":[0],"v":["12","2"],"o":[1]}),
-                ],
-                "decision numbers, vectors and outcomes differ in length",
-            ),
-            (
-                vec![
-                    ok.clone(),
-                    json!({"t":"decs","ctx":0,"n":[0],"v":["12"],"o":[1]}),
-                ],
-                "decision number has no name",
-            ),
-            (
-                vec![
-                    ok.clone(),
-                    json!({"t":"ids","first":0,"names":["d"]}),
-                    json!({"t":"decs","ctx":0,"n":[0],"v":["13"],"o":[1]}),
-                ],
-                "digits must be 0, 1 or 2",
             ),
             // Hits and decisions in a context no phase opened.
             (
