@@ -28017,6 +28017,7 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     project
         .supercov_with(&["--", "node", "e2e.mjs"], &roots)
         .succeeds();
+    let measuring_ms = measuring.elapsed().as_millis();
     let measuring = measuring.elapsed().as_secs();
     let _ = std::fs::remove_file(&listed);
     let planning = std::time::Instant::now();
@@ -28091,10 +28092,17 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         listings.iter().all(|(count, _)| *count == "30"),
         "{counts}\n{context}"
     );
-    // The main pass's three processes each began its tests within seconds
-    // of being started (a second apart, after the list), whatever the
-    // plan's size: each runner's status says when (one whose tests' mutants
-    // were all decided by then runs none of them).
+    // The main pass's three processes each began its tests about as soon
+    // after the list as the measured run's processes ran theirs, whatever
+    // the plan's size: each runner's status says when (one whose tests'
+    // mutants were all decided by then runs none of them). The yardstick is
+    // the measured run of the same suite on the same machine, the list and
+    // all three processes with their servers: a process that read the
+    // whole plan, or made every copy of every test as it loaded, spent
+    // minutes before its first test, many times that run. A fixed 20 s was
+    // the machine's speed more than the pass's: under self-coverage on a
+    // loaded runner the processes began at 32-34 s, where the measured run
+    // was as slow.
     let listed_at = listings[0].1.parse::<i64>().unwrap();
     let status = std::fs::read_dir(project.root.join(".supercov/strong"))
         .unwrap()
@@ -28119,9 +28127,10 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .map(|started| started - listed_at)
         .collect::<Vec<_>>();
     eprintln!("first test of each process, ms after the list: {waits:?}");
+    let bound = 20_000_i64.max(2 * i64::try_from(measuring_ms).unwrap_or(i64::MAX / 2));
     assert!(
-        waits.iter().all(|wait| *wait < 20_000),
-        "{waits:?}\n{context}"
+        waits.iter().all(|wait| *wait < bound),
+        "{waits:?} against {bound} ms (twice the measured run's {measuring_ms} ms)\n{context}"
     );
     // One verdict a mutant, and none an error: no baseline went missing.
     assert_eq!(reply["summary"]["error"], 0, "{context}");
