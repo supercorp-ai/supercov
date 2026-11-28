@@ -525,6 +525,7 @@ fn pass(
         &std::env::var_os("PATH").unwrap_or_default(),
         &worker_build,
     )?);
+    let phase = Instant::now();
     let built = build_switched(
         &root,
         &places,
@@ -541,6 +542,7 @@ fn pass(
         diagnostics,
         stop,
     )?;
+    let switched_build = phase.elapsed();
     for (at, error) in &unviable {
         results.verdict(
             &jobs[*at].id,
@@ -601,7 +603,9 @@ fn pass(
         .chain(alone.iter().map(|(at, _)| at))
         .flat_map(|at| jobs[*at].candidates.iter().copied())
         .collect::<BTreeSet<_>>();
+    let phase = Instant::now();
     let baselines = baselines(&runner, &tests, &needed, request.workers);
+    let baselines_took = phase.elapsed();
     // Baselines a stop cut short tell no mutant's candidates.
     if stop.now() {
         return Ok(0);
@@ -632,6 +636,7 @@ fn pass(
         Ended::Slow(slow) => Some(slow),
     };
     let slow = Mutex::new(Vec::<(usize, Slow)>::new());
+    let phase = Instant::now();
     pool(request.workers.min(switchable.len()), || {
         // Each worker takes the next mutant until none is left (a worker
         // started after the others took them all takes none).
@@ -678,12 +683,16 @@ fn pass(
         count(ended);
     }
 
+    let switched_tests = phase.elapsed();
     // The mutants built on their own, one at a time.
+    let phase = Instant::now();
+    let mut alone_builds = Duration::ZERO;
     for (at, why) in &alone {
         let job = &jobs[*at];
         let mutant_started = Instant::now();
         let (source, _) = sources[&job.file].as_ref().expect("a job's file was read");
-        match build_alone(
+        let building = Instant::now();
+        let alone_built = build_alone(
             &root,
             &places,
             &build_invocation,
@@ -691,7 +700,9 @@ fn pass(
             job,
             source,
             stop,
-        ) {
+        );
+        alone_builds += building.elapsed();
+        match alone_built {
             // The stop cut its build short: it is left for the next pass.
             Err(_) if stop.now() => break,
             Err(error) => {
@@ -774,6 +785,20 @@ fn pass(
             }
         }
     }
+    let alone_took = phase.elapsed();
+    let seconds = |took: Duration| format!("{:.1} s", took.as_secs_f64());
+    let _ = writeln!(
+        diagnostics,
+        "[supercov] Rust pass times: switched build {}, each test without a mutant {} ({} tests), {} switched mutant(s) tested {}, {} built on their own {} (building {})",
+        seconds(switched_build),
+        seconds(baselines_took),
+        baselines.len(),
+        switchable.len(),
+        seconds(switched_tests),
+        alone.len(),
+        seconds(alone_took),
+        seconds(alone_builds),
+    );
     // Leave the plain copy as written.
     // fault-site: rust-strong.pass.sync-project
     let _ = sync_project(&root, &places.plain);
@@ -789,6 +814,13 @@ fn pass(
         "failedBaselines": baselines.values().filter(|ran| ran.outcome != Outcome::Passed).count(),
         "statuses": counts,
         "durationMs": started.elapsed().as_millis() as u64,
+        "timesMs": {
+            "switchedBuild": switched_build.as_millis() as u64,
+            "baselines": baselines_took.as_millis() as u64,
+            "switchedTests": switched_tests.as_millis() as u64,
+            "alone": alone_took.as_millis() as u64,
+            "aloneBuilds": alone_builds.as_millis() as u64,
+        },
     }));
     Ok(0)
 }
@@ -1008,6 +1040,65 @@ fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
     walk(root, copy, true).map_err(|error| format!("{}: {error}", copy.display()))
 }
 
+/// Each file under `copy` (its build directory aside): its contents' hash
+/// and its modification time. What cannot be read is left out, and so
+/// keeps whatever time it gets.
+fn file_times(copy: &Path) -> HashMap<PathBuf, (u64, std::time::SystemTime)> {
+    fn walk(directory: &Path, found: &mut HashMap<PathBuf, (u64, std::time::SystemTime)>) {
+        // fault-site: rust-strong.file-times.read-dir
+        let Ok(entries) = crate::fault_fs::read_dir(directory) else {
+            return;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            // fault-site: rust-strong.file-times.metadata
+            let metadata = crate::fault_fs::symlink_metadata(&path);
+            match metadata {
+                Ok(metadata) if metadata.is_dir() => {
+                    if path.file_name().is_some_and(|name| name != "target") {
+                        walk(&path, found);
+                    }
+                }
+                Ok(metadata) if metadata.is_file() => {
+                    // fault-site: rust-strong.file-times.read
+                    let bytes = crate::fault_fs::read(&path);
+                    if let (Ok(modified), Ok(bytes)) = (metadata.modified(), bytes) {
+                        found.insert(path, (content_hash(&bytes), modified));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = HashMap::new();
+    walk(copy, &mut found);
+    found
+}
+
+fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Gives each file under `copy` whose contents are as `before` found them
+/// the time it had then: rewritten to the same bytes, it is not a change
+/// for Cargo, whose fingerprints read file times.
+fn keep_unchanged_times(copy: &Path, before: &HashMap<PathBuf, (u64, std::time::SystemTime)>) {
+    for (path, now) in file_times(copy) {
+        let Some(was) = before
+            .get(&path)
+            .filter(|was| was.0 == now.0 && was.1 != now.1)
+        else {
+            continue;
+        };
+        // fault-site: rust-strong.keep-unchanged-times.open
+        let file = crate::fault_fs::open_with(std::fs::OpenOptions::new().write(true), &path);
+        // A file that cannot be opened is rebuilt, as before.
+        let _ = file.and_then(|file| file.set_modified(was.1));
+    }
+}
+
 /// A build of the project and how to run its tests.
 struct Built {
     project: crate::rust_project::PreparedRustProject,
@@ -1159,8 +1250,6 @@ fn switched_build(
     invocation: &CargoTestInvocation,
     stop: &Stop,
 ) -> Result<(crate::rust_project::StrongWorkspace, BuildOutcome), String> {
-    // fault-site: rust-strong.switched-build
-    sync_project(root, &places.switched)?;
     let mut by_file = BTreeMap::<String, Vec<(u64, RustMutant)>>::new();
     for at in chosen {
         let job = &jobs[*at];
@@ -1169,8 +1258,16 @@ fn switched_build(
             .or_default()
             .push((job.ordinal, job.mutant.clone()));
     }
-    let mut prepared = crate::rust_project::prepare_rust_strong_project(&places.switched, &by_file)
-        .map_err(|error| error.to_string())?;
+    // The copy is put back as written, then switched again: a file that ends
+    // as it was keeps its time, so Cargo rebuilds only the crates whose
+    // switches changed, not every crate that holds a mutant.
+    let before = file_times(&places.switched);
+    // fault-site: rust-strong.switched-build
+    sync_project(root, &places.switched)?;
+    let prepared = crate::rust_project::prepare_rust_strong_project(&places.switched, &by_file)
+        .map_err(|error| error.to_string());
+    keep_unchanged_times(&places.switched, &before);
+    let mut prepared = prepared?;
     prepared.project.target_directory = places.switched_target.clone();
     let built = cargo_build(&prepared.project, invocation, stop)?;
     Ok((prepared, built))
@@ -4991,6 +5088,87 @@ mod tests {
             said.contains("without the mutants (they do not build for wasm: unplaced"),
             "{said}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A switched build put back and switched again leaves each file that
+    /// ends as it was with the time it had, and only a file whose bytes
+    /// changed with a new one: Cargo then rebuilds only the crates whose
+    /// switches changed. The build directory is not read; a file new since,
+    /// one left alone, a link and what cannot be read change nothing.
+    #[test]
+    fn a_file_rewritten_to_the_same_bytes_keeps_its_time() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-times-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for file in [
+            "a/src/lib.rs",
+            "b/src/lib.rs",
+            "c/src/lib.rs",
+            "target/debug/out",
+        ] {
+            std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            std::fs::write(root.join(file), "switched").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("a/src/lib.rs"), root.join("link.rs")).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let time = |file: &str| {
+            std::fs::metadata(root.join(file))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        let set = |file: &str| {
+            let handle = std::fs::OpenOptions::new()
+                .write(true)
+                .open(root.join(file))
+                .unwrap();
+            handle.set_modified(old).unwrap();
+        };
+        for file in ["a/src/lib.rs", "b/src/lib.rs", "c/src/lib.rs"] {
+            set(file);
+        }
+        let before = file_times(&root);
+        assert!(
+            !before
+                .keys()
+                .any(|path| path.starts_with(root.join("target")))
+        );
+        assert_eq!(before.len(), 3, "{before:?}");
+        // Put back as written, then switched again: `a` as before, `b` not;
+        // `c` left alone, `d` new.
+        for file in ["a/src/lib.rs", "b/src/lib.rs"] {
+            std::fs::write(root.join(file), "written").unwrap();
+        }
+        std::fs::write(root.join("a/src/lib.rs"), "switched").unwrap();
+        std::fs::write(root.join("b/src/lib.rs"), "switched otherwise").unwrap();
+        std::fs::write(root.join("d.rs"), "new").unwrap();
+        // A file that cannot be opened keeps its new time.
+        crate::fault::during("fs.open_with#rust-strong.keep-unchanged-times.open", || {
+            keep_unchanged_times(&root, &before)
+        });
+        assert!(time("a/src/lib.rs") > old);
+        keep_unchanged_times(&root, &before);
+        assert_eq!(time("a/src/lib.rs"), old);
+        assert!(time("b/src/lib.rs") > old);
+        assert_eq!(time("c/src/lib.rs"), old);
+        // What cannot be listed, described or read is left out.
+        for fault in [
+            "fs.read_dir#rust-strong.file-times.read-dir",
+            "fs.symlink_metadata#rust-strong.file-times.metadata",
+            "fs.read#rust-strong.file-times.read",
+        ] {
+            assert!(
+                crate::fault::during(fault, || file_times(&root)).is_empty(),
+                "{fault}"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }
