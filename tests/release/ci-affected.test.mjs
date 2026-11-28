@@ -91,11 +91,13 @@ test('tests are dealt into parts of about equal seconds, the same way in every j
   assert.ok(every.some((part) => part.expression.includes('binary_id(supercov-engine)')));
 });
 
-test('the ready label asks the slow tier for its workflows, not CI for a second run', async () => {
+test('only full-ci asks a pull request for a second run; ready asks for nothing', async () => {
   const { triage } = await import('../../scripts/ci-affected.mjs');
-  const labelled = { action: 'labeled', label: { name: 'ready' }, pull_request: { title: 'x', head: { ref: 'x' }, labels: [{ name: 'ready' }] } };
-  assert.equal(triage('pull_request', labelled, ['crates/x.rs'], 'ci').mode, 'skip');
-  for (const workflow of ['self-coverage', 'compatibility', 'react', 'next']) assert.equal(triage('pull_request', labelled, ['crates/x.rs'], workflow).mode, 'map');
+  const labelled = (name) => ({ action: 'labeled', label: { name }, pull_request: { title: 'x', head: { ref: 'x' }, labels: [{ name }] } });
+  for (const workflow of ['ci', 'self-coverage', 'compatibility', 'react', 'next']) {
+    assert.equal(triage('pull_request', labelled('ready'), ['crates/x.rs'], workflow).mode, 'skip');
+    assert.deepEqual(triage('pull_request', labelled('full-ci'), ['crates/x.rs'], workflow).mode, 'full');
+  }
 });
 
 test('a workflow file runs in full only the workflows that run by it', async () => {

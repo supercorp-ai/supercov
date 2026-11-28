@@ -2,32 +2,23 @@ name: Slow tier
 
 # What a pull request must pass before it merges beyond the fast tier (CI):
 # Self Coverage with its 100% gate on the lines the change adds or changes,
-# Compatibility, React, Next.js and the release gates. Each ran on every push
-# to every pull request ready for review; with three to six pushes a pull
-# request, that was most of an hour before each push said whether it was green,
-# and most of the organisation's runners. It runs once a pull request is ready
-# to merge instead (scripts/ci-tiers.mjs decide):
+# Compatibility, React, Next.js and the release gates. It runs once, on the
+# commit that merges (scripts/ci-tiers.mjs decide):
 #
-#   - the `ready` label added to a pull request that is not a draft
-#     (`gh pr edit <n> --add-label ready`), or `full-ci`, which also runs
-#     every platform;
-#   - a draft marked ready for review;
-#   - every push to a release pull request, in full;
+#   - on the merge queue's commit (`merge_group`): the pull request on main as
+#     main is now, on what the group changes, or in full for a release pull
+#     request or `full-ci`. The queue merges once this run's `Slow tier`
+#     status on that commit passes;
+#   - on a pull request, only every push to a release pull request and
+#     `full-ci` when it is added, in full. Any other pull request's commit is
+#     given `Slow tier` success, "runs in the merge queue", and runs nothing:
+#     run there as well, it took the runners twice, and the slow tiers of
+#     every ready pull request starved the queue's own runs;
 #   - each night on main, in full;
-#   - by hand, in full: `gh workflow run slow-tier.yml --ref <branch>`;
-#   - on the merge queue's commit (`merge_group`), as the pull request's own
-#     run would: what the group changes on main, or in full for a release
-#     pull request or `full-ci`. The queue merges once this run's `Slow
-#     tier` status on that commit passes.
+#   - by hand, in full: `gh workflow run slow-tier.yml --ref <branch>`.
 #
-# A push after it ran takes the `ready` label off: the new commit has not
-# passed, and adding the label again runs it on that commit. It comes off
-# when this run's decide job runs, minutes after the push while runners are
-# busy, and the label stays on until then. Adding it while it is still on
-# does nothing (GitHub sends no event for a label already there): wait until
-# the `Slow tier` status says "Not run on this commit" and the label is gone,
-# then add it. Its answer is the `Slow tier` commit status, which branch
-# protection requires and a release reads (publish.yml).
+# Its answer is the `Slow tier` commit status, which branch protection
+# requires and a release reads (publish.yml).
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
@@ -40,11 +31,11 @@ on:
 permissions:
   contents: read
 
-# A newer push or a newer `ready` replaces the run before it, and a push
+# A newer push or a newer `full-ci` replaces the run before it, and a push
 # makes a run on the commit before it moot. A label that asks for nothing is
 # a run of its own and cancels nothing.
 concurrency:
-  group: slow-tier-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'ready' && github.event.label.name != 'full-ci' && github.run_id || 'tier' }}
+  group: slow-tier-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'tier' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -55,8 +46,6 @@ jobs:
       contents: read
       actions: read
       statuses: write
-      # A `ready` label a newer push outlived is taken off.
-      pull-requests: write
     outputs:
       run: ${{ steps.decide.outputs.run }}
       full: ${{ steps.decide.outputs.full }}

@@ -3,20 +3,19 @@
 //
 // The fast tier (ci.yml) runs on every push: build, lint and the tests the
 // change can affect, in about ten minutes. The slow tier (slow-tier.yml) runs
-// Self Coverage, Compatibility, React, Next.js and the release gates once a
-// pull request is ready to merge, each night on main, and on every push to a
-// release pull request. Both run again on the merge queue's commit (a
-// `merge_group` event): the pull request on main as main is now, which is
-// what merges. Each tier's answer is a commit status, `Fast tier` and
+// Self Coverage, Compatibility, React, Next.js and the release gates on the
+// merge queue's commit (a `merge_group` event): the pull request on main as
+// main is now, which is what merges. A pull request's own commit has it say
+// so as a passing `Slow tier`, except a release pull request's (every push)
+// and one given `full-ci`, which run it there too. Each night on main too. Each tier's answer is a commit status, `Fast tier` and
 // `Slow tier`, which branch protection requires and publish.yml reads; not a
 // check of a job's name, which a run that decided to run nothing (a label's)
 // leaves as skipped, and a skipped check counts as passed.
 //
 //   node scripts/ci-tiers.mjs decide
 //     Whether this event runs the slow tier, in full or on the changed lines,
-//     as the step outputs run, full and reason. A push it does not run on is
-//     marked pending ("not run on this commit"), and a `ready` label it
-//     outlived is taken off, so the pull request says what to do.
+//     as the step outputs run, full and reason. A pull request's commit it
+//     does not run on gets `Slow tier` success, "runs in the merge queue".
 //   node scripts/ci-tiers.mjs report <context>
 //     The status of <context> for SHA, from RESULTS (the `needs` of the job,
 //     as JSON): success when every job passed or was not needed, failure
@@ -25,16 +24,18 @@
 //   node scripts/ci-tiers.mjs verify-release [<commit>]
 //     Whether the tree of <commit> (HEAD) passed both tiers in full: on that
 //     commit, or on another of the same tree (the release pull request's head,
-//     whose squash merge it is). Exits 1, naming what is missing, when not.
+//     when the queue's commit has its tree). Exits 1, naming what is missing, when not.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 
 export const FAST = 'Fast tier';
 export const SLOW = 'Slow tier';
-export const READY_LABEL = 'ready';
 export const FULL_LABEL = 'full-ci';
 // What a status says when every test ran, as a release requires.
 export const IN_FULL = 'Passed in full';
+// What a pull request's `Slow tier` says: the merge queue runs it. Not "in
+// full": a release reads statuses of the commit the queue merged.
+export const IN_QUEUE = 'Runs in the merge queue, on the commit it merges';
 // Statuses only GitHub Actions posts count: anyone who can push can post one.
 const ACTIONS = 'github-actions[bot]';
 
@@ -61,9 +62,9 @@ export function withQueuedPull(name, payload = {}, fetch = (number) => JSON.pars
 
 /**
  * Whether an event runs the slow tier: {run, full, reason}, and for a pull
- * request event it does not run on, the pending status to set (`pending`),
- * whether to take a stale `ready` label off (`stale`), or to leave the
- * commit's status as it is (`quiet`: a label that asks for nothing).
+ * request event it does not run on, the status to set: success that says the
+ * merge queue runs it (`deferred`), pending (`pending`, a release or `full-ci`
+ * draft), or none (`quiet`: a label that asks for nothing).
  */
 export function decide(name, payload = {}) {
   if (name === 'schedule') return { run: true, full: true, reason: 'the nightly run of main' };
@@ -82,23 +83,21 @@ export function decide(name, payload = {}) {
   }
   if (name !== 'pull_request') return { run: false, quiet: true, reason: `a ${name} event runs no slow tier` };
   const action = payload.action;
-  if (action === 'labeled' && ![READY_LABEL, FULL_LABEL].includes(payload.label?.name)) {
+  if (action === 'labeled' && payload.label?.name !== FULL_LABEL) {
     return { run: false, quiet: true, reason: `the label ${payload.label?.name} asks for nothing here` };
   }
-  if (pull.draft) {
-    return { run: false, pending: 'A draft runs the fast tier alone: mark it ready for review to run the slow tier', reason: 'a draft' };
+  // A release pull request on every push, and `full-ci` when it is added,
+  // run it on the pull request as well, in full: a release's native builds
+  // and every platform are judged before it is queued.
+  const asked = release ? 'a push to a release pull request' : action === 'labeled' ? `the \`${FULL_LABEL}\` label` : '';
+  if (asked) {
+    if (pull.draft) return { run: false, pending: 'A draft runs the fast tier alone: mark it ready for review to run the slow tier', reason: 'a draft' };
+    return { run: true, full: true, reason: `${asked}, in full` };
   }
-  const run = (reason) => ({ run: true, full, reason: `${reason}${full ? `, in full (${release ? 'a release pull request' : `the \`${FULL_LABEL}\` label`})` : ', on the changed lines'}` });
-  if (action === 'labeled') return run(`the \`${payload.label.name}\` label`);
-  if (action === 'ready_for_review') return run('ready for review');
-  if (release) return run('a push to a release pull request');
-  if (labels.has(READY_LABEL) && action !== 'synchronize') return run(`opened with the \`${READY_LABEL}\` label`);
-  return {
-    run: false,
-    pending: `Not run on this commit: add the \`${READY_LABEL}\` label when it is ready to merge (still on from before? take it off and add it again)`,
-    stale: action === 'synchronize' && labels.has(READY_LABEL),
-    reason: action === 'synchronize' ? 'a push to a pull request runs the fast tier alone' : 'not marked ready to merge',
-  };
+  // Any other pull request: the merge queue runs it once, on the commit it
+  // merges. Running it on the pull request as well took the runners twice,
+  // and the slow tiers of every ready pull request starved the queue's runs.
+  return { run: false, deferred: IN_QUEUE, reason: 'the merge queue runs it, on the commit it merges' };
 }
 
 /** A tier's commit status from its jobs' results: {state, description}. */
@@ -229,14 +228,7 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
       if (measured !== '0') selfCoverage = false;
     }
     if (decision.pending) post(sha, SLOW, 'pending', decision.pending);
-    if (decision.stale) {
-      try {
-        gh('pr', 'edit', String(payload.pull_request.number), '--repo', repository(), '--remove-label', READY_LABEL);
-        console.log(`Took the \`${READY_LABEL}\` label off: it was given to an earlier commit.`);
-      } catch (error) {
-        console.log(`The \`${READY_LABEL}\` label could not be taken off: ${error.message}`);
-      }
-    }
+    if (decision.deferred) post(sha, SLOW, 'success', decision.deferred);
     if (decision.run) post(sha, SLOW, 'pending', `Running: ${decision.reason}`);
     output({ run: decision.run, full: Boolean(decision.full), 'self-coverage': selfCoverage, sha });
     if (process.env.GITHUB_STEP_SUMMARY) {

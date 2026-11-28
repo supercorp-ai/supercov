@@ -106,8 +106,6 @@ function changedFiles() {
 // A pull request labelled for it runs every job on every platform, as a
 // release pull request does.
 export const FULL_LABEL = 'full-ci';
-// The label that asks for the slow tier on a pull request ready to merge.
-export const READY_LABEL = 'ready';
 // What a corpus pull request changes: the compatibility corpus's records. Its
 // check is the workspace's `compat` tests, on Linux.
 const CORPUS = ['tests/compat/**'];
@@ -123,12 +121,11 @@ export function triage(name = process.env.GITHUB_EVENT_NAME, payload = event(), 
     return { platforms: 'all', mode: 'full', reason: name === 'push' ? 'a push to main runs every test on every platform and keeps the map current' : `a ${name} run runs every test on every platform` };
   }
   const pull = payload.pull_request ?? {};
-  // A label that asks this workflow for nothing is a run of its own: it runs
-  // nothing, and the run of the push goes on. The slow tier's workflows run
-  // when the slow tier calls them, which the `ready` label does
-  // (scripts/ci-tiers.mjs); CI, the fast tier, ran on the push already.
-  const asks = workflow === 'ci' || workflow === '' ? [FULL_LABEL] : [FULL_LABEL, READY_LABEL];
-  if (payload.action === 'labeled' && !asks.includes(payload.label?.name)) {
+  // A label other than `full-ci` is a run of its own that runs nothing, and
+  // the run of the push goes on: the slow tier's workflows run on a pull
+  // request only when the slow tier calls them (scripts/ci-tiers.mjs), and
+  // CI, the fast tier, ran on the push already.
+  if (payload.action === 'labeled' && payload.label?.name !== FULL_LABEL) {
     return { platforms: 'linux', mode: 'skip', reason: `the label ${payload.label?.name} asks for nothing here` };
   }
   if (/^Release \d+\.\d+\.\d+/u.test(pull.title ?? '') || /^release\//u.test(pull.head?.ref ?? '')) {

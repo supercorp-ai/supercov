@@ -20,8 +20,8 @@ It is a pre-check: CI and Compatibility still decide.
 ## What a pull request runs
 
 Two tiers (CONTRIBUTING.md): the fast tier (`ci.yml`) on every push, the slow
-tier (`slow-tier.yml`) once the pull request is ready to merge (the `ready`
-label), and both before it merges. Each runs on Linux alone: the tests its
+tier (`slow-tier.yml`) in the merge queue, and both on the commit the queue
+merges. Each runs on Linux alone: the tests its
 change can affect, by Supercov's own `tests affected` over the Self Coverage
 map of main
 (`scripts/ci-affected.mjs`; each workflow's step summary says why each job ran
@@ -36,7 +36,8 @@ compatibility corpus (`tests/compat`) runs the `compat` tests alone.
 1. A release pull request carries the `Release <v>` commit. Release native
    builds (`release-native.yml`) start on it, beside both tiers, which run in
    full on every platform on every push to it.
-2. Queue it (`gh pr merge <number>`) once release native builds have passed
+2. Queue it (`gh pr merge <number> --match-head-commit <sha>`) once release
+   native builds have passed
    and the `Fast tier` and `Slow tier` statuses both say "Passed in full".
    The merge queue runs both tiers in full again on its commit and merges
    that commit. Bring the branch up to date with main before queuing it (and
