@@ -124,6 +124,17 @@ jobs:
       - if: always()
         continue-on-error: true
         run: node scripts/speed/evidence-composition.mjs "$RUNNER_TEMP/speed/evidence-unit/evidence.raw.gz" > "$RUNNER_TEMP/speed/logs/composition.txt" 2>&1
+      # A few instrumented sources as the build read them.
+      - if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/speed/logs/instrumented"
+          for file in components/c1.tsx components/c2.tsx app/s/1/board.tsx app/s/1/page.tsx app/api/s/1/route.ts lib/db.ts; do
+            found=$(find "$RUNNER_TEMP/speed/large-app/.supercov" -path "*/$file" -not -path "*/node_modules/*" 2>/dev/null | head -1)
+            [ -n "$found" ] && cp "$found" "$RUNNER_TEMP/speed/logs/instrumented/$(echo $file | tr / _)"
+            cp "$RUNNER_TEMP/speed/large-app/$file" "$RUNNER_TEMP/speed/logs/instrumented/plain_$(echo $file | tr / _)" 2>/dev/null || true
+          done
+          ls -la "$RUNNER_TEMP/speed/logs/instrumented"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
