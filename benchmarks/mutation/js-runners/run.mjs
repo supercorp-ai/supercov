@@ -36,7 +36,7 @@ function run(name, command, options = {}) {
 
 // StrykerJS and its runners, apart from the project.
 const tools = join(work, "stryker-tools");
-if (!existsSync(join(tools, "node_modules/.bin/stryker"))) {
+if (!args["skip-stryker"] && !existsSync(join(tools, "node_modules/.bin/stryker"))) {
     mkdirSync(tools, { recursive: true });
     writeFileSync(join(tools, "package.json"), '{"private":true}');
     // StrykerJS reads a project's tsconfig.json with TypeScript.

@@ -91,9 +91,51 @@ test('tests are dealt into parts of about equal seconds, the same way in every j
   assert.ok(every.some((part) => part.expression.includes('binary_id(supercov-engine)')));
 });
 
-test('the ready label asks the slow tier for its workflows, not CI for a second run', async () => {
+test('only full-ci asks a pull request for a second run; ready asks for nothing', async () => {
   const { triage } = await import('../../scripts/ci-affected.mjs');
-  const labelled = { action: 'labeled', label: { name: 'ready' }, pull_request: { title: 'x', head: { ref: 'x' }, labels: [{ name: 'ready' }] } };
-  assert.equal(triage('pull_request', labelled, ['crates/x.rs'], 'ci').mode, 'skip');
-  for (const workflow of ['self-coverage', 'compatibility', 'react', 'next']) assert.equal(triage('pull_request', labelled, ['crates/x.rs'], workflow).mode, 'map');
+  const labelled = (name) => ({ action: 'labeled', label: { name }, pull_request: { title: 'x', head: { ref: 'x' }, labels: [{ name }] } });
+  for (const workflow of ['ci', 'self-coverage', 'compatibility', 'react', 'next']) {
+    assert.equal(triage('pull_request', labelled('ready'), ['crates/x.rs'], workflow).mode, 'skip');
+    assert.deepEqual(triage('pull_request', labelled('full-ci'), ['crates/x.rs'], workflow).mode, 'full');
+  }
+});
+
+test('a workflow file runs in full only the workflows that run by it', async () => {
+  const { triage } = await import('../../scripts/ci-affected.mjs');
+  const push = { action: 'synchronize', pull_request: { title: 'x', head: { ref: 'x' }, labels: [] } };
+  const mode = (changed, workflow) => triage('pull_request', push, changed, workflow).mode;
+  // Another workflow's file, or the seconds the jobs deal by, leaves every tier to the map.
+  for (const workflow of ['ci', 'self-coverage', 'compatibility', 'react', 'next']) {
+    assert.equal(mode(['.github/workflows/mutation-jvm.yml', 'crates/x.rs'], workflow), 'map');
+    assert.equal(mode(['.github/gate-seconds.tsv'], workflow), 'map');
+    // What every workflow runs by still runs everything.
+    assert.equal(mode(['.github/actions/affected/action.yml'], workflow), 'full');
+    assert.equal(mode(['scripts/ci-affected.mjs'], workflow), 'full');
+  }
+  assert.equal(mode(['.github/workflows/ci.yml'], 'ci'), 'full');
+  assert.equal(mode(['.github/workflows/ci.yml'], 'self-coverage'), 'map');
+  assert.equal(mode(['.github/workflows/self-coverage.yml'], 'self-coverage'), 'full');
+  assert.equal(mode(['.github/workflows/self-coverage.yml'], 'compatibility'), 'map');
+  // The slow tier calls the other four: its file runs them all.
+  for (const workflow of ['self-coverage', 'compatibility', 'react', 'next']) assert.equal(mode(['.github/workflows/slow-tier.yml'], workflow), 'full');
+  assert.equal(mode(['.github/workflows/slow-tier.yml'], 'ci'), 'map');
+  // Asked for no workflow, any workflow file still runs everything.
+  assert.equal(mode(['.github/workflows/mutation-jvm.yml']), 'full');
+});
+
+test("the merge queue's commit runs as its pull request does, on what the group changes", async () => {
+  const { triage } = await import('../../scripts/ci-affected.mjs');
+  const group = (fields = {}) => ({
+    action: 'checks_requested',
+    merge_group: { head_ref: 'refs/heads/gh-readonly-queue/main/pr-355-0123abcd', base_sha: 'b', head_sha: 'h' },
+    pull_request: { title: 'x', head: { ref: 'x' }, labels: [], ...fields },
+  });
+  for (const workflow of ['ci', 'self-coverage', 'compatibility', 'react', 'next']) {
+    assert.deepEqual(triage('merge_group', group(), ['crates/x.rs'], workflow), { platforms: 'linux', mode: 'map', reason: '' });
+    assert.equal(triage('merge_group', group(), ['scripts/ci-affected.mjs'], workflow).mode, 'full');
+    assert.equal(triage('merge_group', group({ title: 'Release 4.30.0' }), ['crates/x.rs'], workflow).platforms, 'all');
+    assert.equal(triage('merge_group', group({ labels: [{ name: 'full-ci' }] }), ['crates/x.rs'], workflow).mode, 'full');
+    // Changed files it could not list run everything.
+    assert.equal(triage('merge_group', group(), null, workflow).mode, 'full');
+  }
 });

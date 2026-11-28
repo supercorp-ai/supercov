@@ -18048,19 +18048,19 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@44", "runtime.d.mts"),
-        ("fs.rename@45", "playwright.mjs"),
-        ("fs.rename@47", "playwright.config.mjs"),
-        ("fs.rename@48", "vitest.config.mjs"),
-        ("fs.rename@51", "vitestCommands.mjs"),
+        ("fs.rename@46", "runtime.d.mts"),
+        ("fs.rename@47", "playwright.mjs"),
+        ("fs.rename@49", "playwright.config.mjs"),
+        ("fs.rename@50", "vitest.config.mjs"),
+        ("fs.rename@53", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@53", "test/cart.test.js"),
-        ("fs.rename@54", "authored-sources.json"),
-        ("fs.rename@55", "statement-exclusions.json"),
-        ("fs.rename@56", "mutants.json"),
-        ("fs.rename@57", "manifest.json"),
-        ("fs.rename@58", "instrumentation-complete"),
-        ("fs.rename@59", "injected fault at fs"),
+        ("fs.rename@55", "test/cart.test.js"),
+        ("fs.rename@56", "authored-sources.json"),
+        ("fs.rename@57", "statement-exclusions.json"),
+        ("fs.rename@58", "mutants.json"),
+        ("fs.rename@59", "manifest.json"),
+        ("fs.rename@60", "instrumentation-complete"),
+        ("fs.rename@61", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -24479,7 +24479,7 @@ fn strong_statuses(project: &Project) -> std::collections::BTreeMap<String, Stri
 /// shipping condition apart, never give `shipping` 50, never call `refund`,
 /// and a countdown that never ends is a timeout. Only the jobs driver ran.
 #[cfg(unix)]
-fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
+fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) -> serde_json::Value {
     let mut measure = vec!["--"];
     measure.extend_from_slice(command);
     project
@@ -24522,6 +24522,7 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
             "{runner} {id}: {statuses:?}\n{verdicts}\n{said}"
         );
     }
+    reply
 }
 
 /// What a strong pass let survive is named in every view, not only counted:
@@ -24694,7 +24695,11 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
             ),
         ],
     );
-    assert_cart_verdicts(&ava, &["npx", "ava"], "ava");
+    let reply = assert_cart_verdicts(&ava, &["npx", "ava"], "ava");
+    // Its jobs ran in a resident AVA, none as a command.
+    let pass = &reply["passes"][0];
+    assert!(pass["residentJobs"].as_u64().unwrap_or(0) > 0, "{reply}");
+    assert_eq!(pass["residentFallbacks"], 0, "{reply}");
 }
 
 /// `mutants test` on a Python project under unittest: the run lists mutmut's
@@ -24894,9 +24899,12 @@ fn mutants_test_runs_vitest_browser_mode_mutants_one_job_at_a_time() {
                 "vitest.config.js",
                 "import { defineConfig } from \"vitest/config\";\nimport { playwright } from \"@vitest/browser-playwright\";\nexport default defineConfig({ test: { browser: { enabled: true, provider: playwright(), headless: true, instances: [{ browser: \"chromium\" }] } } });\n",
             ),
+            // The first test fails wherever a job before it left its mark in
+            // the browser's storage: each job's browser context is fresh, as
+            // a command's own browser was.
             (
                 "test/cart.test.js",
-                "import { expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\nit(\"charges small orders\", () => expect(shipping(10)).toBe(5));\nit(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n",
+                "import { expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => { expect(localStorage.getItem(\"seen\")).toBe(null); expect(document.cookie).toBe(\"\"); localStorage.setItem(\"seen\", \"1\"); document.cookie = \"seen=1\"; expect(shipping(80)).toBe(0); });\nit(\"charges small orders\", () => expect(shipping(10)).toBe(5));\nit(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n",
             ),
             (
                 "test/count.test.js",
@@ -24923,7 +24931,11 @@ fn mutants_test_runs_vitest_browser_mode_mutants_one_job_at_a_time() {
             .all(|test| test["runner"] == "vitest-browser"),
         "{plan}"
     );
-    assert_cart_verdicts(&browser, &["npx", "vitest", "run"], "vitest-browser");
+    let reply = assert_cart_verdicts(&browser, &["npx", "vitest", "run"], "vitest-browser");
+    // Its jobs ran in a resident Vitest, none as a command.
+    let pass = &reply["passes"][0];
+    assert!(pass["residentJobs"].as_u64().unwrap_or(0) > 0, "{reply}");
+    assert_eq!(pass["residentFallbacks"], 0, "{reply}");
     // A run of node tests and browser tests: its node tests run as jobs
     // beside the browser's.
     let mixed = job_runner_project(

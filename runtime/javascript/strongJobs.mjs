@@ -247,6 +247,20 @@ export function mochaArguments(command) {
     return at < 0 ? undefined : command.slice(at + 1);
 }
 
+// The arguments a command gives AVA, where it starts AVA itself (`ava`,
+// `npx ava`, `node_modules/.bin/ava`, AVA's `entrypoints/cli.mjs`).
+export function avaArguments(command) {
+    const at = command.findIndex((word) => /(?:^|[\\/])ava$/.test(word) || /ava[\\/]entrypoints[\\/]cli\.mjs$/.test(word));
+    return at < 0 ? undefined : command.slice(at + 1);
+}
+
+// The arguments a command gives Vitest, where it starts Vitest itself
+// (`vitest run`, `npx vitest`, `node_modules/.bin/vitest`).
+export function vitestArguments(command) {
+    const at = command.findIndex((word) => /(?:^|[\\/])vitest(?:\.m?js)?$/.test(word));
+    return at < 0 ? undefined : command.slice(at + 1);
+}
+
 // Whether a project's .js files are CommonJS (its package.json has no
 // `"type": "module"`).
 export function packageIsCommonJs(root) {
@@ -261,7 +275,7 @@ export function packageIsCommonJs(root) {
 // Resident runners (strongJestHost.mjs, strongMochaHost.mjs), each running one
 // job at a time. A host whose job passes its limit is stopped, and the next
 // job starts another.
-function residentHosts({ script, args, root, environment, log }) {
+function residentHosts({ script, args, root, environment, log, asCommand = false }) {
     const idle = [];
     const all = new Set();
     const host = () => new Promise((resolveHost, rejectHost) => {
@@ -330,8 +344,12 @@ function residentHosts({ script, args, root, environment, log }) {
                 };
                 const answered = (message) => {
                     if (message?.type === "done" && message.id === id) {
-                        idle.push(child);
-                        settle({ timedOut: false, error: message.error });
+                        // A host that can run no further job is stopped.
+                        if (message.tainted)
+                            stop(child);
+                        else
+                            idle.push(child);
+                        settle({ timedOut: false, error: message.error, fallback: message.fallback, tainted: message.tainted });
                     }
                 };
                 const exited = () => settle({ timedOut: false, error: "the resident runner ended" });
@@ -348,6 +366,10 @@ function residentHosts({ script, args, root, environment, log }) {
             for (const child of all)
                 stop(child);
         },
+        // Whether a job it stops at its limit, and a baseline that does not
+        // pass in it, run again as commands (the runners whose jobs used to
+        // start the command, and whose limits came from such a start).
+        asCommand,
     };
 }
 
@@ -442,6 +464,18 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // (SUPERCOV_STRONG_MOCHA_ESM=process: a process per job instead).
     const esmHosts = residentHosts({ script: "strongMochaHost.mjs", args: mochaArgs, root, environment: { ...environment, SUPERCOV_MOCHA_FRESH_WORKERS: "1" }, log: join(work, "mocha-esm-hosts.log") });
     const esmResident = process.env.SUPERCOV_STRONG_MOCHA_ESM !== "process";
+    // Vitest Browser Mode: a resident Vitest, its Vite server and its
+    // browser kept for job after job, each job in fresh browser contexts
+    // (strongVitestHost.mjs). A file it cannot run as a command would runs
+    // as a command from then on (`commandOnly`).
+    const vitestArgs = residentAllowed ? vitestArguments(withoutNpx(command, root)) : undefined;
+    const vitestHosts = residentHosts({ script: "strongVitestHost.mjs", args: vitestArgs, root, environment: { ...environment, SUPERCOV_STRONG_PLAN: "" }, log: join(work, "vitest-hosts.log"), asCommand: true });
+    const commandOnly = new Set();
+    // AVA: a resident AVA, its command's options worked out once, each job's
+    // test files in fresh workers as the command's own run makes them
+    // (strongAvaHost.mjs).
+    const avaArgs = residentAllowed ? avaArguments(withoutNpx(command, root)) : undefined;
+    const avaHosts = residentHosts({ script: "strongAvaHost.mjs", args: avaArgs, root, environment: { ...environment, SUPERCOV_STRONG_PLAN: "" }, log: join(work, "ava-hosts.log"), asCommand: true });
     const commonJs = packageIsCommonJs(root);
     const broken = new Set();
     const residentFor = (file) => {
@@ -454,6 +488,10 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             return mochaHosts;
         if (runner === "mocha" && mochaArgs && esmResident)
             return esmHosts;
+        if (runner === "vitest-browser" && vitestArgs && !commandOnly.has(file))
+            return vitestHosts;
+        if (runner === "ava" && avaArgs && !commandOnly.has(file))
+            return avaHosts;
         return undefined;
     };
     // Rust compiled to wasm (SUPERCOV_WASM_STRONG): a job that starts the
@@ -488,7 +526,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         });
         return handed ? parallel(work, priority) : result;
     };
-    const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, alone: 0, jobMs: 0 };
+    const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, alone: 0, jobMs: 0, residentJobs: 0, residentFallbacks: 0 };
     const machine = turns();
     let jobNumber = 0;
 
@@ -498,7 +536,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // so that the kills most mutants get at once come first, and a
     // survivor's many files fill what is left. One run `alone` waits for no
     // slot: it has the machine to itself.
-    function job({ mutant, file, tests: chosen, bail, limitMs, priority = 0, alone = false }) {
+    function job({ mutant, file, tests: chosen, bail, limitMs, priority = 0, alone = false, command: asCommand = false }) {
         const start = (work) => (alone ? machine.alone(work) : run(() => machine.shared(work), priority));
         return start((turn) => new Promise((resolveJob) => {
             const number = ++jobNumber;
@@ -510,7 +548,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail, mutant: mutant ? `${mutant.file}#${mutant.index}` : null }));
             const results = join(directory, "results.jsonl");
             const begun = Date.now();
-            const resident = residentFor(file);
+            const resident = asCommand ? undefined : residentFor(file);
             // A job's outcome, read from its evidence; then its directory is
             // removed, as nothing after reads it (a job's evidence ran to
             // 24 MB on nanoid, a gigabyte a pass).
@@ -603,18 +641,42 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                 SUPERCOV_STRONG_RESULTS: results,
                 SUPERCOV_STRONG_PLAN: "",
             };
-            resident.run({ file: join(root, file), mutant: mutant ? { file: mutant.file, index: mutant.index } : null, environment: environmentOfJob }, limitMs).then(({ timedOut, error, notStarted }) => {
+            resident.run({ file: join(root, file), mutant: mutant ? { file: mutant.file, index: mutant.index } : null, environment: environmentOfJob }, limitMs).then(({ timedOut, error, notStarted, fallback, tainted }) => {
                 if (notStarted) {
                     broken.add(runnerOf.get(file));
                     spawnJob();
                     return;
                 }
+                // The resident runner did not run the job as the command
+                // would have: the command runs it, from a clean slate.
+                if (fallback !== undefined) {
+                    profile.residentFallbacks += 1;
+                    try {
+                        appendFileSync(join(work, "resident-fallbacks.log"), `${file}: ${fallback}\n`);
+                    }
+                    catch {
+                        // The log is for reading only.
+                    }
+                    if (tainted)
+                        broken.add(runnerOf.get(file));
+                    else
+                        commandOnly.add(file);
+                    rmSync(evidence, { recursive: true, force: true });
+                    mkdirSync(evidence, { recursive: true });
+                    rmSync(`${results}.timeouts.jsonl`, { force: true });
+                    spawnJob();
+                    return;
+                }
+                if (tainted)
+                    broken.add(runnerOf.get(file));
+                profile.residentJobs += 1;
                 if (timedOut)
                     profile.stopped += 1;
                 profile.jobMs += Date.now() - begun;
                 const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
                 resolveJob(read({
                     timedOut,
+                    resident: resident.asCommand,
                     mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
                     exitCode: error ? 1 : 0,
                     error,
@@ -640,12 +702,25 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     async function wholeBaseline(file) {
         const state = fileState(file);
         state.whole ??= (async () => {
-            profile.baselines += 1;
-            const result = await job({ mutant: null, file, tests: null, bail: false, limitMs: baselineLimit(file, null) });
-            const passing = new Set([...result.statuses].filter(([, status]) => status === "passed").map(([id]) => id));
-            return { ...result, passing, finished: !result.timedOut && passing.size > 0 };
+            const once = async () => {
+                profile.baselines += 1;
+                const result = await job({ mutant: null, file, tests: null, bail: false, limitMs: baselineLimit(file, null) });
+                const passing = new Set([...result.statuses].filter(([, status]) => status === "passed").map(([id]) => id));
+                return { ...result, passing, finished: !result.timedOut && passing.size > 0 };
+            };
+            return commandWhereResidentFails(file, once, (result) => result.finished && [...result.statuses.values()].every((status) => status === "passed" || status === "skipped"));
         })();
         return state.whole;
+    }
+    // A baseline the resident runner ran that did not pass as it should is
+    // run again as a command, and the file's jobs are the command's from
+    // then on: what a test does without a mutant is the command's to say.
+    async function commandWhereResidentFails(file, once, clean) {
+        const result = await once();
+        if (!result.resident || clean(result))
+            return result;
+        commandOnly.add(file);
+        return once();
     }
     // The baseline a mutant's job in `file` is judged by: the subset's where
     // it stood for the file, else the whole file's.
@@ -653,10 +728,13 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         const state = fileState(file);
         if (!state.wholeNeeded && state.union.size > 0) {
             state.subset ??= (async () => {
-                profile.baselines += 1;
-                const chosen = new Set(state.union);
-                const result = await job({ mutant: null, file, tests: chosen, bail: false, limitMs: baselineLimit(file, chosen) });
-                return { ...result, chosen, finished: passedAll(result, chosen) };
+                const once = async () => {
+                    profile.baselines += 1;
+                    const chosen = new Set(state.union);
+                    const result = await job({ mutant: null, file, tests: chosen, bail: false, limitMs: baselineLimit(file, chosen) });
+                    return { ...result, chosen, finished: passedAll(result, chosen) };
+                };
+                return commandWhereResidentFails(file, once, (result) => result.finished);
             })();
             const subset = await state.subset;
             if (subset.finished)
@@ -702,9 +780,13 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             // machine's speed now.
             if (result.timedOut && !result.mutantTimedOut && killerIn(result) === undefined) {
                 profile.alone += 1;
-                const now = await job({ mutant: null, file: group.file, tests: chosen, bail: false, limitMs: baselineLimit(group.file, chosen), alone: true });
+                // A resident runner's limit is tighter than a command's, which
+                // starts the runner and the browser within it: the job runs
+                // again as a command, with a command's limit.
+                const asCommand = Boolean(result.resident);
+                const now = await job({ mutant: null, file: group.file, tests: chosen, bail: false, limitMs: baselineLimit(group.file, chosen), alone: true, command: asCommand });
                 const slowest = Math.max(baseline.durationMs, now.durationMs);
-                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs: 3 * slowest + aloneGraceMs, alone: true });
+                result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs: 3 * slowest + aloneGraceMs, alone: true, command: asCommand });
             }
             const ran = [...result.statuses].filter(([id, status]) => status !== "skipped" && (chosen === null || chosen.has(id)));
             const killer = killerIn(result);
@@ -852,6 +934,8 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     jestHosts.close();
     mochaHosts.close();
     esmHosts.close();
+    vitestHosts.close();
+    avaHosts.close();
     write({ summary: true, driver: "jobs", workers, ...profile, durationMs: Date.now() - started });
     return 0;
 }

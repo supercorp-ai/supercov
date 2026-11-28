@@ -99,13 +99,21 @@ shards start the build twice, the first ending after about 20 s when the
 compiler refuses a switch (a Kotlin mutant that does not compile is
 `unviable`); that is 180 s of kotlinpoet's strong pass.
 
-### 3. The tests that killed the file's other mutants first
+### 3. The tests that killed the file's other mutants first (dropped)
 
 A JVM keeps, for each source file, the tests that killed its mutants and
 how many, and runs a mutant's candidates that did first, the most kills
 first, the rest in the plan's order. The first kill ends a mutant's run, so
 the order decides only which candidate kills it. Before, kotlinpoet's 54
 mutants killed after more than 100 candidates ran 13,256 tests between them.
+
+Dropped after its result below: the first timeout ends a mutant's run as
+the first kill does, so where one candidate fails with the mutant and
+another runs past its limit, the order decides `killed` against `timeout`.
+No verdict in the run changed that way, but an order made from earlier
+kills can, as kill-history orders did for Python and Rust
+(`performance-experiments.md`). Its 12 to 14% fewer runs are left for an
+order that cannot change a verdict.
 
 ### 4. The pass's own JVMs, with C1 alone
 
@@ -134,6 +142,34 @@ machine's speed; kotlinpoet 1,238).
 The measured durations the plan gives the JVM pass are all 0: the
 measured run records no duration for a JVM test, so each test's limits come
 from its baseline alone.
+
+**C1 alone, again, without 3 and with the generous round on the build's
+JIT** (run 46171865165 against 46085994371). The `timeout` above was C1's
+doing, not the machine's: `HelpFormatter.java:385` (the call removed)
+allocates in a loop until the heap runs out, and its one candidate failed
+with `OutOfMemoryError` at 7.3 to 9.5 s in every run before C1 (`killed`)
+and passed the 10 s limit under C1 (`timeout`); kotlinpoet's
+`LineWrapper.kt:60` did the same (6.5 to 8.1 s before; 8.1 to 10.6 s, and
+twice a `timeout`, under C1). A mutant past the short limit is decided in
+the generous round, and only there can its verdict turn on the JIT's
+speed, so the generous round's JVMs now have the build's own JIT, as a
+round of a new build would; every other round keeps C1. Result: commons-cli
+882 of 882 the same, both mutants `killed` again; kotlinpoet 1,238 the same
+save `LineWrapper.kt:66`, a `timeout` before and `killed` now, which the
+runs before C1 already disagree on (`timeout` at 10.7 s, `OutOfMemoryError`
+at 9.7 s, `timeout` at 10.1 s).
+
+| | commons-cli before | after | kotlinpoet before | after |
+| --- | ---: | ---: | ---: | ---: |
+| JIT time (s) | 266 | 38 | 2,485 | 151 |
+| runs with a mutant | 7,395 | 7,394 | 38,371 | 38,372 |
+| their time (s) | 167 | 154 | 2,239 | 2,674 |
+| baselines' time (s) | 84 | 56 | 1,707 | 1,614 |
+| strong pass (s, wall) | 194 | 109 | 2,023 | 2,115 |
+
+On commons-cli the pass takes half the time. On kotlinpoet the JIT's time
+went, and the tests ran slower without C2 by about as much: its wall time
+is the same within the runners' spread.
 
 Where kotlinpoet's time is left: each of its twelve shards starts Gradle
 three times (the measured run, the strong copy's build that the compiler

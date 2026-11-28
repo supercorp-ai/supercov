@@ -175,14 +175,6 @@ public final class SupercovStrongPass {
   private final java.util.Set<String> listedSlow;
   private final String module;
   private final Executor executor;
-  /**
-   * The tests that killed mutants of each file in this JVM, and how many:
-   * a mutant's candidates that killed its file's other mutants run first.
-   * Mutants of one file are killed by the same few tests (the file's own
-   * test class, the ones that exercise it), and the first kill ends a
-   * mutant's run; the order decides nothing but which candidate kills it.
-   */
-  private final Map<Integer, Map<Integer, Integer>> killers = new HashMap<>();
   /** Where this JVM's time went, written as the pass's summary line. */
   private final Profile profile = new Profile();
 
@@ -506,13 +498,19 @@ public final class SupercovStrongPass {
     // C1 alone: each mutant's classes are loaded afresh, so code the JIT
     // compiles is thrown away with its loader, and C2's compilations of it
     // took as much processor time as the tests did, beside them, on as many
-    // processors as there are JVMs.
-    command.add("-XX:TieredStopAtLevel=1");
-    // Each mutant's classes are loaded, and so verified, afresh: the
-    // project's compiler wrote them, and verifying them again for every
-    // mutant was much of what a mutant's first test cost.
-    command.add("-XX:+UnlockDiagnosticVMOptions");
-    command.add("-XX:-BytecodeVerificationRemote");
+    // processors as there are JVMs. And each mutant's classes are loaded,
+    // and so verified, afresh: the project's compiler wrote them, and
+    // verifying them again for every mutant was much of what a mutant's
+    // first test cost. Neither in the generous round: it decides the
+    // mutants past the short limit, whose verdict can turn on the JVM's
+    // speed (a mutant that allocates until the heap runs out fails at 8 s
+    // with C2 and passes the 10 s limit with C1 alone), so there each JVM
+    // runs as the build's own does, as a round of a new build would.
+    if (!retry && !"1".equals(System.getenv(RETRY))) {
+      command.add("-XX:TieredStopAtLevel=1");
+      command.add("-XX:+UnlockDiagnosticVMOptions");
+      command.add("-XX:-BytecodeVerificationRemote");
+    }
     command.add("-D" + MINION + "=true");
     File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
     File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
@@ -709,7 +707,7 @@ public final class SupercovStrongPass {
     ClassLoader mutated = fresh();
     int ran = 0;
     String unrepeatable = null;
-    for (Test test : killersFirst(mutant, candidates)) {
+    for (Test test : candidates) {
       if (test.baseline == null && sharedBaseline(test)) {
         profile.sharedBaselines++;
       }
@@ -795,7 +793,6 @@ public final class SupercovStrongPass {
           return false;
         }
         write(mutant, "killed", test.name, ran, started, outcome.reason);
-        killers.computeIfAbsent(mutant.file, file -> new HashMap<>()).merge(test.index, 1, Integer::sum);
         return true;
       }
     }
@@ -895,21 +892,6 @@ public final class SupercovStrongPass {
         // The profile is for reading, not for verdicts.
       }
     }
-  }
-
-  /**
-   * {@code candidates} with the tests that killed this file's mutants first,
-   * the most kills first, and the rest in the plan's order.
-   */
-  private List<Test> killersFirst(Mutant mutant, List<Test> candidates) {
-    final Map<Integer, Integer> kills = killers.get(mutant.file);
-    if (kills == null) {
-      return candidates;
-    }
-    List<Test> ordered = new ArrayList<>(candidates);
-    // Stable: candidates with the same count keep the plan's order.
-    ordered.sort((a, b) -> kills.getOrDefault(b.index, 0) - kills.getOrDefault(a.index, 0));
-    return ordered;
   }
 
   /** Takes another JVM's baseline of {@code test}, where one ran: whether it did. */
