@@ -5287,10 +5287,10 @@ mod tests {
         let prepared = root.with_extension("bin");
         fs::write(&prepared, evidence_of_one_test(probes)).unwrap();
         let request = jvm_request(&root, &[]);
-        let module = root
-            .join(".supercov/work")
-            .join(&request.run_id)
-            .join("jvm/_");
+        // Beside the copy, where every run of it writes its modules' evidence.
+        let canonical = canonicalize_simplified(&root).unwrap();
+        let copy = crate::workspace::copy_path(&canonical, 1).unwrap();
+        let module = stable_evidence_directory(&canonical, &copy).join("_");
         let runs = root.join(".supercov/runs");
         let command = format!(
             "mkdir -p {module} && cp {} {module}/1.bin && rm -rf {runs} && touch {runs}",
