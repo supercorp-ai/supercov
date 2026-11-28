@@ -2109,6 +2109,21 @@ mod tests {
                 .unwrap_err()
                 .contains("`false env` failed")
         );
+        // A toolchain that says what it is but cannot build it says why.
+        let broken = root.join("go-broken");
+        std::fs::write(
+            &broken,
+            "#!/bin/sh\nif [ \"$1\" = env ]; then printf 'go1.26.0\\nlinux\\namd64\\n\\n'; exit 0; fi\n\
+             echo 'no compiler here' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = helper(&root, broken.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.starts_with("could not build the Go type-check helper: ")
+                && error.contains("no compiler here"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
