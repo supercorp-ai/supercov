@@ -12,6 +12,12 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
+import os as _os
+if _os.environ.get("SUPERCOV_PYSPY"):
+    import subprocess as _sp
+    _sp.Popen(["sudo", "-n", _os.environ["SUPERCOV_PYSPY_BIN"], "record", "--pid", str(_os.getpid()), "--rate", "500", "--nonblocking", "--format", "raw", "-o", _os.path.join(_os.environ["SUPERCOV_PYSPY"], "%d.txt" % _os.getpid())], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+    import time as _t; _t.sleep(0.3)
+
 try:
     if os.environ.get("SUPERCOV_PYTHON_SCHEMATA"):
         # A strong pass: mutants behind switches, and no coverage.

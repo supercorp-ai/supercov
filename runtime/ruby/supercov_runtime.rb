@@ -2394,4 +2394,22 @@ module Supercov
   end
 end
 
+if ENV["SUPERCOV_STACKPROF"] && !ENV["SUPERCOV_STACKPROF"].empty?
+  begin
+    ENV["SUPERCOV_STACKPROF_LIB"].to_s.split(":").reverse_each { |path| $LOAD_PATH.unshift(path) }
+    require "stackprof"
+    StackProf.start(mode: :cpu, interval: 500, raw: true)
+    dump = Module.new do
+      define_method(:close_after_tests) do |runtime|
+        super(runtime)
+      ensure
+        StackProf.stop
+        StackProf.results(File.join(ENV["SUPERCOV_STACKPROF"], "#{Process.pid}.dump"))
+      end
+    end
+    Supercov.singleton_class.prepend(dump)
+  rescue LoadError => e
+    warn("[diag] no stackprof: #{e.message}")
+  end
+end
 Supercov.install

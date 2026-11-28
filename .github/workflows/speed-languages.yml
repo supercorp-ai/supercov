@@ -16,8 +16,8 @@ concurrency:
 
 env:
   # A base ref to compare against, or empty to measure the head alone.
-  BASE_REF: 'ce132bc27835046d57ad788187a5fd5d756fdcff'
-  PROJECTS: '["ruby-rack"]'
+  BASE_REF: 'e90b99d63ffc1aa62460074a4f92737d48feb087'
+  PROJECTS: '["ruby-rack","jvm-commons-cli","jvm-gson","go-cobra"]'
 
 jobs:
   setup:
