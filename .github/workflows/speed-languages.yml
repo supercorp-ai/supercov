@@ -17,7 +17,7 @@ concurrency:
 env:
   # A base ref to compare against, or empty to measure the head alone.
   BASE_REF: 'ef5137ceff9bf3cfda35abc45e31623f3532c274'
-  PROJECTS: '["rust-bytes","rust-serde-json","rust-semver"]'
+  PROJECTS: '["rust-bytes","rust-serde-json","rust-semver","python-h11","python-jinja"]'
 
 jobs:
   setup:
