@@ -627,7 +627,8 @@ public final class Supercov {
         // every bit any harvest saw.
         java.util.Map<Integer, Integer> probes = new java.util.TreeMap<>();
         for (int[] hit : record.probes) {
-          probes.merge(hit[0], hit[1], (a, b) -> a | b);
+          Integer seen = probes.get(hit[0]);
+          probes.put(hit[0], seen == null ? hit[1] : seen | hit[1]);
         }
         putLong(out, probes.size());
         for (java.util.Map.Entry<Integer, Integer> hit : probes.entrySet()) {
