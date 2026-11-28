@@ -34,6 +34,9 @@ module Supercov
     # does not move a verdict.
     SEED = 0
     MUTANT = -1
+    # The signals a stop sends the pass (Ctrl-C, the CLI at its budget or
+    # when it is itself stopped).
+    STOP_SIGNALS = %w[INT TERM].freeze
 
     # Raised past the hit limit: an Exception, so code under test that
     # rescues StandardError does not carry on through an endless loop.
@@ -223,12 +226,31 @@ module Supercov
       end
 
       def receive
-        Worker.read(@reader) || { data: nil, killed: false, status: "the worker ended", duration: 0 }
+        Worker.read(@reader) || { data: nil, killed: false, status: "the worker ended", duration: 0, stopped: stopped? }
+      end
+
+      # Whether the worker, its output ended, was ended by a stop's signal.
+      def stopped?
+        _, status = Process.waitpid2(@pid)
+        @pid = nil
+        Pass.stopped_by?(status)
+      rescue StandardError
+        false
+      end
+
+      # Ends the worker now: a stop judges nothing it runs.
+      def kill
+        return unless @pid
+
+        Process.kill("KILL", @pid)
+        Process.waitpid(@pid)
+      rescue StandardError
+        nil
       end
 
       def stop
         @writer.close
-        Process.waitpid(@pid)
+        Process.waitpid(@pid) if @pid
       rescue StandardError
         nil
       end
@@ -252,12 +274,23 @@ module Supercov
       # A forked process's work, ended without the parent's `at_exit` hooks
       # (a runner's autorun among them): an error that escapes it ends the
       # process with no outcome written.
+      #
+      # A stop's signal ends it at once, as the system ends a process: what
+      # the suite or the code under test does with the signal (RSpec's
+      # first Ctrl-C only asks it to quit; code that rescues every
+      # Exception carries on) would let it go on and end as no mutant made
+      # it end. Its parent sees the signal and judges nothing it ran.
       def self.child
+        STOP_SIGNALS.each { |signal| trap(signal, "SYSTEM_DEFAULT") }
         yield
         exit!(0)
       rescue Exception => error # rubocop:disable Lint/RescueException
         warn("[supercov] #{error.class}: #{error.message}")
         exit!(1)
+      end
+
+      def self.stopped_by?(status)
+        !status.nil? && status.signaled? && STOP_SIGNALS.include?(Signal.signame(status.termsig))
       end
 
       def initialize(runner)
@@ -267,11 +300,36 @@ module Supercov
         @results = File.open(@plan["results"], "a")
         @results.sync = true
         @confirmed = {}
+        # The CLI says a stop here (`stopped-at` beside the results) before
+        # it signals the pass: from then on the pass starts nothing and
+        # judges nothing, and what it had not decided is left for the next.
+        @stop_marker = @plan["stopped"]
+        @stop = nil
+      end
+
+      # Whether the pass has been told to stop: a signal it heard, a process
+      # of it that a stop's signal ended, or the CLI's word.
+      def stopped?
+        return true if @stop
+
+        @stop = "TERM" if @stop_marker && File.exist?(@stop_marker)
+        !@stop.nil?
+      end
+
+      # A stop ends the pass with the status of its signal.
+      def end_stopped(workers)
+        workers.each(&:kill)
+        @results.close
+        exit!(@stop == "INT" ? 130 : 143)
       end
 
       def run
+        # Heard here rather than by the suite: RSpec's own handler only asks
+        # its examples to stop, and forks made after it ran none.
+        STOP_SIGNALS.each { |signal| trap(signal) { @stop ||= signal } }
         tests = @runner.tests
         baseline = run_isolated(-1, @plan["baseline"].select { |id| tests.key?(id) }, nil, all: true)
+        end_stopped([]) if stopped?
         unless baseline
           # Without a baseline no verdict means anything: every mutant is an
           # error, and the pass says why.
@@ -297,8 +355,8 @@ module Supercov
         @jobs.times { workers << Worker.new(self, workers.dup) }
         idle = workers.dup
         busy = {}
-        until @queue.empty? && busy.empty?
-          while (worker = idle.first) && (job = @queue.shift)
+        until (@queue.empty? && busy.empty?) || stopped?
+          while !stopped? && (worker = idle.first) && (job = @queue.shift)
             next unless (sent = dispatch(job, tests))
 
             idle.shift
@@ -312,6 +370,7 @@ module Supercov
             finish(job, worker.receive)
           end
         end
+        end_stopped(workers) if stopped?
         workers.each(&:stop)
         @results.write("#{Json.value('summary' => true, 'driver' => 'ruby', 'confirmations' => @confirmations, 'overturned' => @overturned)}\n")
         @results.close
@@ -375,6 +434,13 @@ module Supercov
           _, status = Process.waitpid2(pid, Process::WNOHANG)
           break if status
 
+          if @stop_marker && File.exist?(@stop_marker)
+            Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
+            Process.waitpid(pid)
+            output.join
+            reader.close
+            return { data: nil, killed: false, status: "stopped", duration: 0, stopped: true }
+          end
           if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > job[:limit]
             Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
             killed = true
@@ -386,10 +452,14 @@ module Supercov
         data = output.value
         reader.close
         duration = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
-        { data: data, killed: killed, status: status.inspect, duration: duration }
+        { data: data, killed: killed, status: status.inspect, duration: duration, stopped: !killed && Pass.stopped_by?(status) }
       end
 
       def finish(job, ended)
+        # What a stop ended says nothing of its mutant.
+        @stop ||= "TERM" if ended[:stopped]
+        return if stopped?
+
         data = ended[:data]
         duration = ended[:duration]
         outcome = data.nil? || data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
@@ -481,7 +551,7 @@ module Supercov
         output = Thread.new { reader.read }
         if deadline
           started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          until Process.waitpid(pid, Process::WNOHANG)
+          until (status = Process.waitpid2(pid, Process::WNOHANG)&.last)
             if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > deadline
               Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
               Process.waitpid(pid)
@@ -492,10 +562,11 @@ module Supercov
             sleep 0.01
           end
         else
-          Process.waitpid(pid)
+          _, status = Process.waitpid2(pid)
         end
         data = output.value
         reader.close
+        @stop ||= "TERM" if Pass.stopped_by?(status)
         data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
       end
 
@@ -512,6 +583,8 @@ module Supercov
       end
 
       def write(mutant, status, killed_by, tests, duration, reason)
+        return if stopped?
+
         record = { "id" => mutant["id"], "status" => status, "killedBy" => killed_by, "tests" => tests, "durationMs" => duration, "reason" => reason }
         @results.write("#{Json.value(record)}\n")
       end
