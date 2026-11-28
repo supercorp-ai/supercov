@@ -37,6 +37,10 @@ module Supercov
     # The signals a stop sends the pass (Ctrl-C, the CLI at its budget or
     # when it is itself stopped).
     STOP_SIGNALS = %w[INT TERM].freeze
+    # Where each process of the pass says it evaluated the active mutant (its
+    # key, a line, the first time): the fork that runs a mutant's tests and
+    # any Ruby process they start. Set from the plan.
+    REACHED = ""
 
     # Raised past the hit limit: an Exception, so code under test that
     # rescues StandardError does not carry on through an endless loop.
@@ -61,6 +65,10 @@ module Supercov
           @files[File.join(@root, relative)] = switched
         end
         @limit = Integer(ENV["SUPERCOV_MUTANT_HIT_LIMIT"] || @plan["hitLimit"] || 1_000_000)
+        if @plan["reached"]
+          remove_const(:REACHED)
+          const_set(:REACHED, @plan["reached"].dup.freeze)
+        end
         @keys = {}
         @plan["mutants"].each { |mutant| @keys["#{mutant['file']}##{mutant['index']}"] = mutant["key"] }
         active = ENV[ACTIVE_ENV].to_s
@@ -81,9 +89,14 @@ module Supercov
       # One evaluation of the active mutant's replacement.
       # (A non-main Ractor cannot count: its evaluations are not limited.)
       def h
-        return unless MAIN.equal?(Ractor.current)
+        unless MAIN.equal?(Ractor.current)
+          # Counted nowhere, but said once per Ractor: it reached the mutant.
+          Ractor.current[:supercov_reached] ||= Strong.note_reached || true
+          return
+        end
 
         @hits += 1
+        note_reached if @hits == 1
         return if @hits <= @limit
 
         unless @timed_out
@@ -94,6 +107,24 @@ module Supercov
       end
 
       def timed_out? = @timed_out
+
+      def note_reached
+        return nil if REACHED.empty?
+
+        File.open(REACHED, "a") { |file| file.write("#{MUTANT}\n") }
+        nil
+      rescue StandardError
+        nil
+      end
+
+      # Whether a process of the pass said it evaluated mutant `key`.
+      def reached?(key)
+        return true if REACHED.empty?
+
+        File.foreach(REACHED).any? { |line| line.chomp == key.to_s }
+      rescue StandardError
+        false
+      end
 
       # The pass begins: a Ruby process its tests start switches mutants on
       # and runs its own tests, never a pass of its own.
@@ -478,6 +509,13 @@ module Supercov
         end
         killer = outcome[:failed].first
         unless killer
+          # Tests that passed without ever evaluating the mutated code (it ran
+          # while the suite loaded, before the pass switched it on, or in a
+          # process that did not load the switches) could not have failed.
+          if outcome[:ran].positive? && outcome[:reached] == false
+            write(mutant, "no-coverage", nil, outcome[:ran], duration, "not-reached-mutated: its #{outcome[:ran]} test(s) passed but never ran the mutated code; it ran before the pass switched the mutant on (while the suite loaded) or in a process that did not load the pass's switches, so they could not fail")
+            return
+          end
           write(mutant, "survived", nil, outcome[:ran], duration, nil)
           return
         end
@@ -579,7 +617,7 @@ module Supercov
         rescue MutantTimeout
           { failed: ids.take(1), sequence: ids.take(1), durations: {} }
         end
-        outcome.merge(ran: outcome[:sequence].size, timed_out: Strong.timed_out?)
+        outcome.merge(ran: outcome[:sequence].size, timed_out: Strong.timed_out?, reached: Strong.reached?(key))
       end
 
       def write(mutant, status, killed_by, tests, duration, reason)

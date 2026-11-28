@@ -1431,6 +1431,8 @@ pub fn run_strong_ruby(
             .display()
             .to_string(),
         "timeouts": pass.strong.timeouts_path().display().to_string(),
+        // Where each process says it evaluated its mutant (`Strong.h`).
+        "reached": format!("{}.reached", pass.strong.results.display()),
         "hitLimit": crate::strong_driver::DEFAULT_HIT_LIMIT,
         "jobs": jobs,
     });
