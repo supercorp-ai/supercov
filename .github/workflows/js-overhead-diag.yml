@@ -45,8 +45,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new', only: plain }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new', only: plain }
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'events' }
