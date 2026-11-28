@@ -62,3 +62,15 @@ takes it from there. Each JVM runs a test in a fresh class loader and a
 working directory of its own, so another JVM's baseline is what its own
 would be; a kill is still confirmed in the JVM that saw it, so a JVM a
 mutant left broken still stops.
+
+Result (run 46082385337 against 46079425710): every verdict both runs
+reached is the same (commons-cli 882 of 882; kotlinpoet, where the earlier
+run's budget left 430 mutants without a verdict, every one both decided,
+save a `timeout` that is now `killed` at the machine's speed). On
+commons-cli the baselines run 2,744 times instead of 5,712 and take 88 s of
+JVM time instead of 144 s; the strong pass took 136 s against 143 s. PIT
+itself took 114 s in this run and 137 s in the one before: runs on shared
+runners vary by about a fifth, so a change is judged by the profile's
+counts as much as by the wall time. On kotlinpoet each of the twelve shards
+is a pass of its own, and nearly every test is a candidate of a Kotlin
+expression body's mutant, so each shard still baselines most of the suite.
