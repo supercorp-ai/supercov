@@ -3,7 +3,7 @@ name: CI
 # The fast tier: every push to a pull request, drafts included, says in about
 # ten minutes whether its build, lint and affected tests pass, as the `Fast
 # tier` status. The slow tier (slow-tier.yml: Self Coverage, Compatibility,
-# React, Next.js and the release gates) runs once the pull request is ready.
+# React, Next.js and the release gates) runs in the merge queue.
 # CONTRIBUTING.md says how each is asked for.
 on:
   workflow_dispatch:

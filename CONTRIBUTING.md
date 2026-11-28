@@ -34,49 +34,43 @@ It works on macOS and Linux; it needs `cargo-nextest`
 | --- | --- | --- |
 | Workflow | `ci.yml` | `slow-tier.yml`, calling `self-coverage.yml`, `compatibility.yml`, `react-compatibility.yml`, `next-compatibility.yml` and `release-gates.yml` |
 | What | build, `cargo fmt`, clippy, the tests the change can affect, engine integrations, wasm and worker gates | Self Coverage with its 100% gate on the changed lines, Compatibility, React, Next.js, the release gates (release build, packed install, benchmark) |
-| When | every push to every pull request, drafts included; the merge queue's commit; each night on main | a pull request ready to merge; every push to a release pull request; the merge queue's commit; each night on main |
+| When | every push to every pull request, drafts included; the merge queue's commit; each night on main | the merge queue's commit; every push to a release pull request; `full-ci`; each night on main |
 | How long | about ten minutes | about twenty to thirty minutes |
 | Platforms | Linux; every platform on a release pull request, at night and with `full-ci` | Linux; every platform on a release pull request, at night and with `full-ci` |
 | Answer | the `Fast tier` commit status | the `Slow tier` commit status |
 
-Both statuses are required before a merge. A status, not a job's check: a run
-that decided to run nothing (a label's) leaves its jobs skipped, and a skipped
-check counts as passed.
+Both statuses are required before a merge, on the merge queue's commit. A
+status, not a job's check: a run that decided to run nothing (a label's)
+leaves its jobs skipped, and a skipped check counts as passed.
 
 ### Running the slow tier
 
-The slow tier runs on a pull request that is not a draft when you:
+The slow tier runs in the merge queue, once, on the commit that merges (see
+below). On a pull request it says so: its `Slow tier` status passes as "Runs
+in the merge queue, on the commit it merges", and nothing runs. There is no
+label to add.
 
-- add the `ready` label: `gh pr edit <number> --add-label ready`;
-- mark a draft ready for review: `gh pr ready <number>`;
-- add `full-ci`, which also runs every platform;
-- open it with the label: `gh pr create --label ready ...`.
+It runs on the pull request as well, in full on every platform:
 
-A release pull request (titled `Release <v>`, or on a `release/` branch) runs
-it on every push, in full. By hand, in full, on any branch:
-`gh workflow run slow-tier.yml --ref <branch>`.
+- on every push to a release pull request (titled `Release <v>`, or on a
+  `release/` branch);
+- when `full-ci` is added: `gh pr edit <number> --add-label full-ci`.
 
-A push after the slow tier ran takes the `ready` label off and marks `Slow
-tier` pending on the new commit: it has not passed. Add the label again to run
-it there. Push the fixes a review asks for first, then add `ready` once.
-
-The label comes off when the push's slow-tier run gets a runner, which can be
-minutes after the push; until then it is still on, and adding it again does
-nothing (GitHub sends no event for a label already there). Wait until `Slow
-tier` on the new commit says "Not run on this commit" and the label is gone,
-then add it. `gh pr update-branch` is a push like any other.
+By hand, in full, on any branch: `gh workflow run slow-tier.yml --ref
+<branch>`.
 
 ### Merging: the merge queue
 
-A pull request whose two statuses passed goes into the merge queue:
-`gh pr merge <number>` (the queue squashes; no merge method to choose). The
-queue makes a commit of main as it is now with the pull request on top (and
-the pull requests queued before it), runs both tiers on it as a `merge_group`
-event, and merges that commit once its `Fast tier` and `Slow tier` pass. The
-tiers run there as they did on the pull request: on what the group changes
-since main, or in full for a release pull request or `full-ci`
-(scripts/ci-tiers.mjs, scripts/ci-affected.mjs). If they fail, the pull
-request leaves the queue and main is untouched.
+A pull request whose `Fast tier` passed goes into the merge queue:
+`gh pr merge <number> --match-head-commit <sha>` (the queue merges with a
+merge commit; there is no method to choose). The queue makes a commit of main
+as it is now with the pull request merged in (and the pull requests queued
+before it), runs both tiers on it as a `merge_group` event, and merges that
+commit once its `Fast tier` and `Slow tier` pass. The tiers run there on what
+the group changes since main, or in full for a release pull request or
+`full-ci` (scripts/ci-tiers.mjs, scripts/ci-affected.mjs). If they fail, the
+pull request leaves the queue and main is untouched: fix it, push, and queue
+it again.
 
 There is no need to keep a pull request up to date with main by hand: the
 queue tests it on the newest main, so a merge never waits on a rebase and a
@@ -126,7 +120,7 @@ gh api -X POST repos/supercorp-ai/supercov/rulesets --input - <<'JSON'
     {
       "type": "merge_queue",
       "parameters": {
-        "merge_method": "SQUASH",
+        "merge_method": "MERGE",
         "grouping_strategy": "ALLGREEN",
         "max_entries_to_build": 3,
         "min_entries_to_merge": 1,
@@ -141,7 +135,7 @@ JSON
 ```
 
 The merge queue merges the commit both tiers passed on, main as it was then
-with the pull request on top: a release publishes that tree without running
+with the pull request merged in: a release publishes that tree without running
 anything again (RELEASING.md). So the branch need not be up to date with main
 (`strict` is off): the queue's commit always is. `max_entries_to_build` is how
 many queue commits run at once, each holding the pull requests before it;
