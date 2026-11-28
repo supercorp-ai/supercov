@@ -1323,45 +1323,50 @@ module Supercov
 
     # Condition leaf: records the operand's truthiness and passes it through.
     def probe_condition(key, index, value)
-      target = @probes[key]
-      frame_key = [current_context, key]
-      stack = (@open[frame_key] ||= [])
-      last = stack.last
-      if last.nil? || index <= last[:last]
-        stack.shift if stack.length >= MAX_OPEN_EVALUATIONS
-        last = { values: Array.new(target["width"]), last: -1 }
-        stack << last
+      # An open evaluation is two integers on its context's and decision's
+      # stack: the last condition index it observed, and two bits per
+      # condition (0 not evaluated, 1 false, 2 true). Integers, so observing
+      # a condition allocates nothing.
+      stack = ((@open[current_context] ||= {})[key] ||= [])
+      if stack.empty? || index <= stack[-2]
+        stack.shift(2) if stack.length >= MAX_OPEN_EVALUATIONS * 2
+        stack.push(-1, 0)
       end
-      last[:last] = index
-      last[:values][index] = value ? true : false
+      stack[-2] = index
+      stack[-1] |= (value ? 2 : 1) << (2 * index)
       value
     end
 
     # Decision outcome: closes the innermost open evaluation.
     def probe_decision(key, value)
-      target = @probes[key]
-      frame_key = [current_context, key]
-      stack = @open[frame_key]
-      frame = stack && stack.pop
+      context = current_context
       truthy = value ? true : false
-      values = if frame
-                 frame[:values]
-               elsif target["width"] == 1
-                 # A lone condition carries no c() wrapper: its value is the
-                 # outcome, read back through the condition's own negation.
-                 [target["not"][0] ? !truthy : truthy]
-               else
-                 Array.new(target["width"])
-               end
+      evaluations = @open[context]
+      stack = evaluations && evaluations[key]
+      bits =
+        if stack && !stack.empty?
+          frame = stack.pop
+          stack.pop
+          frame
+        elsif @probes[key]["width"] == 1
+          # A lone condition carries no c() wrapper: its value is the
+          # outcome, read back through the condition's own negation.
+          (@probes[key]["not"][0] ? !truthy : truthy) ? 2 : 1
+        else
+          0
+        end
       # What an evaluation records follows from its condition values and
       # outcome alone, and within one context each record is written once: a
       # combination this context has already finished records nothing new.
-      context = current_context
-      code = truthy ? 1 : 0
-      values.each { |each| code = (code << 2) | (each.nil? ? 0 : (each ? 2 : 1)) }
+      code = (bits << 1) | (truthy ? 1 : 0)
       finished = ((@finished_decisions[context] ||= {})[key] ||= {})
       return value if finished[code]
 
+      target = @probes[key]
+      values = Array.new(target["width"]) do |index|
+        digit = (bits >> (2 * index)) & 3
+        digit.zero? ? nil : digit == 2
+      end
       finish_decision(target, values, truthy)
       finished[code] = true
       value
