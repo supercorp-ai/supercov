@@ -16,6 +16,10 @@
 - Shards run one after the other against the same run, on one machine, now decide every mutant between them. Each shard's share was dealt from the mutants still without a verdict, so `--shard 2/2` after `--shard 1/2` took half of what the first left and left the rest undecided (never a wrong verdict; a later pass decided them). A shard's share is now its share of every mutant of the run.
 - A Maven or Gradle project that builds for Java 7 is measured. Supercov's runtime class compiles with the project's main sources, and it used two lambdas, so gson (`<release>7`) failed to compile in the copy ("lambda expressions are not supported in -source 7") and no run was published. The class now uses no syntax or library method newer than Java 7 (`Map.merge` included).
 
+**Changed**
+
+- A measured Ruby suite spends less time in Supercov's probes: a decision evaluation a test has already recorded returns at once, observing a condition allocates nothing, a test's decision vectors are written as one record with its hits instead of a record apiece through the encoder, and a phase's end settles only its own operator-assignment arrivals instead of reading every earlier phase's. rack's suite (1092 tests) on an Actions runner: the test command took 6.54 s measured before and 5.75 s after (3.64 s plain), every answer the same.
+
 ## 4.29.19
 
 **Fixed**
