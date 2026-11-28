@@ -15106,6 +15106,9 @@ case "$mode" in
     fi
     if [ -f "$fake/named.out" ]; then cat "$fake/named.out"; else printf 'test %s ... ok\n' "$SUPERCOV_DOCTEST_NAME"; fi
     exit "$(cat "$fake/named.status" 2>/dev/null || echo 0)" ;;
+  batched)
+    cat "$fake/batched.out" 2>/dev/null
+    exit 0 ;;
 esac
 "#;
 
@@ -15362,6 +15365,8 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
         recorded.starts_with("the pass for doctest src/lib.rs - s (line 3) ran 2 doctest(s)"),
         "{recorded}"
     );
+    // Run alone (a thread count of the user's own keeps a file's doctests
+    // from running as one batch).
     let (ran, recorded) = wrap_rustdoc(
         &project,
         "alike",
@@ -15369,12 +15374,30 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
             "standalone",
             "src/lib.rs - a b (line 3): test\nsrc/lib.rs - b a (line 3): test\n",
         )],
-        &["--test", "src/lib.rs"],
+        &["--test", "src/lib.rs", "--test-args", "--test-threads=2"],
     );
     ran.exits(101);
     assert_eq!(
         recorded,
         "doctest src/lib.rs - a b (line 3) cannot be told apart from another doctest by a filter"
+    );
+    // A file's batch must run each of its doctests, once.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "batch-short",
+        &[
+            (
+                "standalone",
+                "src/lib.rs - s (line 3): test\nsrc/lib.rs - t (line 7): test\n",
+            ),
+            ("batched.out", "test src/lib.rs - s (line 3) ... ok\n"),
+        ],
+        &["--test", "src/lib.rs"],
+    );
+    ran.exits(101);
+    assert_eq!(
+        recorded,
+        "the pass for 2 doctest(s) of one file ran 1 instead: src/lib.rs - s (line 3)"
     );
     // Under `--ignored` a pass that runs and reports nothing passed over a
     // doctest that is not ignored...
@@ -15440,6 +15463,82 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
     );
     let output = ran.exits(101);
     assert!(output.contains("could not launch"), "{output}");
+}
+
+/// The doctests of one file run in one rustdoc, one after another, each
+/// named by the line its harness printed as it started it: every doctest
+/// is a test of its own, with its own evidence, as when each ran alone. A
+/// file with one doctest runs it alone. A step of the batch that fails is
+/// named.
+#[test]
+fn doctests_of_one_file_run_in_one_rustdoc_each_named() {
+    let crate_with_doctests = |label: &str| {
+        let project = Project::empty(label);
+        project.write(
+            "Cargo.toml",
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        );
+        project.write(
+            "src/lib.rs",
+            "pub mod one;\n\n/// ```\n/// assert_eq!(w::double(1), 2);\n/// ```\npub fn double(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n\n/// ```\n/// assert_eq!(w::half(4), 2);\n/// ```\n///\n/// ```should_panic\n/// w::half(1);\n/// ```\npub fn half(n: u32) -> u32 {\n    assert!(n % 2 == 0, \"odd\");\n    n / 2\n}\n",
+        );
+        project.write(
+            "src/one.rs",
+            "/// ```\n/// assert_eq!(w::one::one(), 1);\n/// ```\npub fn one() -> u32 {\n    1\n}\n",
+        );
+        project.write(".gitignore", "target/\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project
+    };
+    let project = crate_with_doctests("doctest-batches");
+    let ran = project.supercov(&["--", "cargo", "test", "-q"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr().contains("Rust coverage: 4 test(s)"),
+        "{}",
+        ran.stderr()
+    );
+    // Each doctest reached its own function, and no other doctest's.
+    let half = project
+        .supercov(&["runs", "latest", "test", "src/lib.rs - half (line 14)"])
+        .succeeds();
+    assert!(half.contains("passed"), "{half}");
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/lib.rs:18"])
+        .succeeds();
+    assert!(
+        line.contains("src/lib.rs - half (line 10)")
+            && line.contains("src/lib.rs - half (line 14)")
+            && !line.contains("double (line 3)"),
+        "{line}"
+    );
+
+    let stand_in = "env:SUPERCOV_DOCTEST_WRAPPER_ROOT/";
+    for (fault, place) in [
+        (
+            format!("{stand_in}spawn#rust-owned-doctests.run-batched.launch"),
+            "rust-owned-doctests.run-batched.launch",
+        ),
+        (
+            format!("{stand_in}wait#rust-owned-doctests.run-batched.reap"),
+            "rust-owned-doctests.run-batched.reap",
+        ),
+        (
+            "__doctest-runner/fs.write#rust-owned-doctests.asked-name.write".to_owned(),
+            "rust-owned-doctests.asked-name.write",
+        ),
+    ] {
+        let project = crate_with_doctests("doctest-batch-steps");
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("SUPERCOV_TEST_FAULT", fault.as_str())],
+        );
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_ne!(ran.code(), 0, "{fault}: {said}");
+        assert!(fired_at(&said, place), "{fault}: {said}");
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+    }
 }
 
 #[cfg(unix)]

@@ -17,6 +17,10 @@
 - A Maven or Gradle project that builds for Java 7 is measured. Supercov's runtime class compiles with the project's main sources, and it used two lambdas, so gson (`<release>7`) failed to compile in the copy ("lambda expressions are not supported in -source 7") and no run was published. The class now uses no syntax or library method newer than Java 7 (`Map.merge` included).
 - A Rust run that reuses its instrumented build no longer fails with "Rust runtime emitted an unknown obligation" when a `match` has an arm behind a `#[cfg]` no build compiles. The arm stays in the match's table, so selecting a later arm recorded that it passed over the absent one; the first run kept that record and left the arm out of its denominator, and the next run, which reads against that denominator, refused the record and published nothing (serde_json's suite, every run after the first). That record is now left out of both, so the first run and the next answer alike.
 
+**Changed**
+
+- Rust doctests before edition 2024 run a file's worth at a time. Each ran in a rustdoc of its own, so the crate was read once per doctest (168 times for tokio-rs/bytes). The doctests of one file now run in one rustdoc, one after another, each still in a process of its own and named by the line libtest prints as it starts it; a file with one doctest, or a harness the user gives a thread count or uncaptured output, runs each alone as before.
+
 ## 4.29.19
 
 **Fixed**
