@@ -94,6 +94,7 @@ fn publish_captured_output(
     phase: &str,
     failed: bool,
     verbose: bool,
+    keep_failed: bool,
     writer: &mut dyn Write,
 ) {
     if failed || verbose {
@@ -117,7 +118,11 @@ fn publish_captured_output(
             let _ = writeln!(writer, "[supercov] could not read {phase} output: {error}");
         }
     }
-    let _ = fs::remove_file(path);
+    // A failed command whose output is asked to be kept (a strong pass's
+    // round) leaves it where it was written, for whoever reads why.
+    if !(failed && keep_failed) {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn validate(plan: &ExecutionPlan) -> Result<(), OrchestrationError> {
@@ -175,14 +180,28 @@ pub fn execute_plan_with_supervisor(
             Ok(result) => result,
             Err(error) => {
                 if let Some(path) = &phase.command.captured_output {
-                    publish_captured_output(path, &phase.name, true, verbose, writer);
+                    publish_captured_output(
+                        path,
+                        &phase.name,
+                        true,
+                        verbose,
+                        phase.command.keep_failed_output,
+                        writer,
+                    );
                 }
                 return Err(error.into());
             }
         };
         let exit_code = result.exit_code();
         if let Some(path) = &phase.command.captured_output {
-            publish_captured_output(path, &phase.name, exit_code != 0, verbose, writer);
+            publish_captured_output(
+                path,
+                &phase.name,
+                exit_code != 0,
+                verbose,
+                phase.command.keep_failed_output,
+                writer,
+            );
         }
         let interrupted_signal = result.interrupted_signal;
         executions.push(PhaseExecution {
@@ -254,6 +273,7 @@ mod tests {
                 cwd: root.into(),
                 environment: None,
                 captured_output: None,
+                keep_failed_output: false,
                 console: None,
             },
         }
@@ -437,7 +457,7 @@ mod tests {
         output.extend_from_slice(b"the end");
         fs::write(&log, &output).unwrap();
         let mut writer = Vec::new();
-        publish_captured_output(&log, "build", true, false, &mut writer);
+        publish_captured_output(&log, "build", true, false, false, &mut writer);
         let text = String::from_utf8(writer).unwrap();
         assert!(
             text.starts_with("[supercov] build output truncated to the final 1048576 bytes\n"),
@@ -448,7 +468,14 @@ mod tests {
         assert_eq!(text.len(), 61 + CAPTURED_OUTPUT_LIMIT as usize);
         assert!(!log.exists());
         let mut writer = Vec::new();
-        publish_captured_output(&root.join("missing.log"), "build", true, false, &mut writer);
+        publish_captured_output(
+            &root.join("missing.log"),
+            "build",
+            true,
+            false,
+            false,
+            &mut writer,
+        );
         assert!(
             String::from_utf8(writer)
                 .unwrap()
@@ -467,7 +494,7 @@ mod tests {
         }
         for contents in [&output[..], b"short"] {
             fs::write(&log, contents).unwrap();
-            publish_captured_output(&log, "build", true, false, &mut Closed);
+            publish_captured_output(&log, "build", true, false, false, &mut Closed);
             assert!(!log.exists());
         }
         // Its size, the seek to its end, or the read that cannot be made says
@@ -476,7 +503,7 @@ mod tests {
             fs::write(&log, &output).unwrap();
             let mut writer = Vec::new();
             crate::fault::during(fault, || {
-                publish_captured_output(&log, "build", true, false, &mut writer);
+                publish_captured_output(&log, "build", true, false, false, &mut writer);
             });
             assert!(
                 String::from_utf8_lossy(&writer).contains("could not read build output"),
@@ -496,10 +523,32 @@ mod tests {
         for verbose in [false, true] {
             fs::write(&log, "built").unwrap();
             let mut writer = Vec::new();
-            publish_captured_output(&log, "build", false, verbose, &mut writer);
+            publish_captured_output(&log, "build", false, verbose, false, &mut writer);
             assert_eq!(writer, if verbose { &b"built"[..] } else { b"" });
             assert!(!log.exists());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A failed command whose output is asked to be kept (a strong pass's
+    /// round) shows it and leaves it where it was written; one that passed
+    /// is removed all the same.
+    #[test]
+    fn a_failed_output_asked_to_be_kept_is_shown_and_kept() {
+        let root = temporary();
+        let log = root.join("round.log");
+        fs::write(&log, "Process from config.webServer was not able to start").unwrap();
+        let mut writer = Vec::new();
+        publish_captured_output(&log, "test", true, false, true, &mut writer);
+        assert_eq!(
+            writer,
+            b"Process from config.webServer was not able to start"
+        );
+        assert!(log.exists());
+        let mut writer = Vec::new();
+        publish_captured_output(&log, "test", false, false, true, &mut writer);
+        assert!(writer.is_empty());
+        assert!(!log.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

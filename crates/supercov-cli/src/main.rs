@@ -3917,6 +3917,7 @@ fn supervise() -> ExitCode {
         cwd,
         environment: None,
         captured_output: None,
+        keep_failed_output: false,
         console: None,
     };
     let mut stderr = std::io::stderr().lock();

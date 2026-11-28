@@ -117,6 +117,10 @@ pub struct CommandSpec {
     /// When set, stdout and stderr are merged into this newly-created file.
     /// The orchestration layer owns publication and cleanup of the file.
     pub captured_output: Option<PathBuf>,
+    /// Whether a failed command's captured output is kept where it was
+    /// written, once shown: a strong pass keeps its rounds' logs, a failed
+    /// round's above all.
+    pub keep_failed_output: bool,
     /// When set, what the command prints is passed on with these names put
     /// right. A stream that is a terminal is still the command's own.
     pub console: Option<ConsoleNames>,
@@ -2749,6 +2753,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: Some(environment),
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let mut diagnostics = Vec::new();
@@ -2800,6 +2805,7 @@ mod tests {
             cwd: root,
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let mut diagnostics = Vec::new();
@@ -2819,6 +2825,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let mut diagnostics = Vec::new();
@@ -2839,6 +2846,7 @@ mod tests {
             cwd: root,
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let mut diagnostics = Vec::new();
@@ -2888,6 +2896,7 @@ mod tests {
             cwd: root.clone(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let options = SupervisionOptions {
@@ -2944,6 +2953,7 @@ mod tests {
             cwd: root.clone(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let options = SupervisionOptions {
@@ -3005,6 +3015,7 @@ mod tests {
             cwd: root.clone(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let options = SupervisionOptions {
@@ -3114,6 +3125,7 @@ mod tests {
             cwd: root,
             environment: Some(environment),
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let mut diagnostics = Vec::new();
@@ -3210,6 +3222,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         let result = supervise_command(
@@ -3602,6 +3615,7 @@ mod tests {
                 cwd: root.clone(),
                 environment: None,
                 captured_output: None,
+                keep_failed_output: false,
                 console: None,
             };
             let refused =
@@ -3625,6 +3639,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         assert!(matches!(
@@ -3683,6 +3698,7 @@ mod tests {
             cwd: root.clone(),
             environment: None,
             captured_output: None,
+            keep_failed_output: false,
             console: None,
         };
         // A supervisor that cannot forward the user's signals is none.

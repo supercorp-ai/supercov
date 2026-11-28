@@ -2452,6 +2452,7 @@ pub fn run_direct_jvm(
                         &request.run_id,
                     )),
                     captured_output: None,
+                    keep_failed_output: false,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
                 },
             },
@@ -6610,6 +6611,7 @@ fn run_strong_jvm_with(
                 cwd: workspace.clone(),
                 environment: Some(environment),
                 captured_output: Some(log.clone()),
+                keep_failed_output: false,
                 console: None,
             };
             let before = remaining.len();

@@ -1514,6 +1514,27 @@ its own, and leaving it out keeps every handler's mutant from running alone.
 That is the one place the pass trusts that a request's work does not reach
 the tests' through shared state; the controls after each kill check the rest.
 
+That the server would not start says something of the mutant only where it
+starts without it. Each round's reporter marks the pass's directory when a
+test begins in a command with no mutant on everywhere (any round but one
+alone, `started-without-mutant`); an alone round whose command failed
+before any test is a kill only where the mark is there, and an `error`
+otherwise ("no run of it in this pass got as far as a test without a
+mutant"), which a later pass runs again. On a Next.js suite whose pass's
+own build failed (its web server never started, in any round), five
+mutants run alone were `killed` so, by a failure every round had.
+
+**A command that failed before any test ends failed.** The strong
+reporter ends each invocation as passed, as a killed mutant fails its test
+by design, and so a command whose web server never started (or whose
+global setup threw) ended passed too: its output, which says why, was
+removed unread, and the pass left only `its tests did not finish, in two
+rounds` behind for thousands of mutants. An invocation that reported an
+error outside any test and began no test now ends as Playwright ends it,
+failed: the pass records the command's exit code (`commandExitCode`),
+shows the command's output, and keeps it beside the results
+(`results.log`, `restart-<n>.log`), where it stays when the pass ends.
+
 A request that named no test while tests ran is such work, though by time it
 is no test's: with several tests running at once it is credited to none of
 them, and one of them may have sent it from a client that carries no scope

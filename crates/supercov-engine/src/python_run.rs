@@ -488,6 +488,7 @@ fn run_direct_python_in(
                         &evidence_directory,
                     )),
                     captured_output: None,
+                    keep_failed_output: false,
                     console: None,
                 },
             },
