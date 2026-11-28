@@ -50,6 +50,9 @@ const files = {
   'Cargo.toml': '[workspace]\nmembers = ["worker", "host"]\nresolver = "2"\n\n[profile.release]\nopt-level = "s"\n',
   'worker/Cargo.toml': '[package]\nname = "grades-worker"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\nworker = "0.8"\n',
   'worker/wrangler.toml': 'name = "grades-worker"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n\n[build]\ncommand = "./build.sh"\n',
+  // The same Worker, served as it was last built: what a test that starts
+  // it some other way than the project's own build runs.
+  'worker/wrangler.nobuild.toml': 'name = "grades-worker"\nmain = "build/worker/shim.mjs"\ncompatibility_date = "2026-10-01"\n',
   'worker/build.sh': '#!/bin/sh\n# The Worker, as the project builds it: a dev build, which a gate builds in seconds.\nset -e\nworker-build --dev\n',
   'worker/src/lib.rs': `use worker::*;
 
@@ -142,7 +145,7 @@ fn get(port: u16, path: &str) -> Option<String> {
     Some(out)
 }
 
-fn serve_with(wrangler: &str) -> Dev {
+fn serve_with(wrangler: &str, config: &str) -> Dev {
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     // What wrangler said, for the gate to show when a test fails.
     let log = std::fs::File::create(
@@ -151,7 +154,7 @@ fn serve_with(wrangler: &str) -> Dev {
     .unwrap();
     let child = Command::new(wrangler)
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../worker"))
-        .args(["dev", "--local", "--ip", "127.0.0.1", "--port", &port.to_string(), "--show-interactive-dev-session=false"])
+        .args(["dev", "-c", config, "--local", "--ip", "127.0.0.1", "--port", &port.to_string(), "--show-interactive-dev-session=false"])
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
         .stderr(log)
@@ -173,14 +176,14 @@ fn serve_with(wrangler: &str) -> Dev {
 #[test]
 fn a_high_score_passes() {
     let _one = exclusive();
-    let dev = serve_with("wrangler");
+    let dev = serve_with("wrangler", "wrangler.toml");
     assert_eq!(get(dev.port, "/?score=70").as_deref(), Some("pass"));
 }
 
 #[test]
 fn a_low_score_fails() {
     let _one = exclusive();
-    let dev = serve_with("wrangler");
+    let dev = serve_with("wrangler", "wrangler.toml");
     assert_eq!(get(dev.port, "/?score=10").as_deref(), Some("fail"));
 }
 
@@ -188,20 +191,23 @@ fn a_low_score_fails() {
 #[test]
 fn the_worker_shouts() {
     let _one = exclusive();
-    let dev = serve_with("wrangler");
+    let dev = serve_with("wrangler", "wrangler.toml");
     assert!(get(dev.port, "/shout").is_some());
 }
 
 /// Reaches \`hidden\`. During a strong pass it starts the real wrangler by
-/// its own path, past Supercov's: a Worker built apart from the pass.
+/// its own path, past Supercov's, on the Worker as last built: a Worker
+/// served apart from the pass, which never switches a mutant on.
 #[test]
 fn the_hidden_route_answers() {
     let _one = exclusive();
-    let wrangler = match std::env::var_os("SUPERCOV_STRONG_RESULTS") {
-        Some(_) => std::env::var("GATE_REAL_WRANGLER").expect("the gate names the real wrangler"),
-        None => "wrangler".to_owned(),
+    let dev = match std::env::var_os("SUPERCOV_STRONG_RESULTS") {
+        Some(_) => serve_with(
+            &std::env::var("GATE_REAL_WRANGLER").expect("the gate names the real wrangler"),
+            "wrangler.nobuild.toml",
+        ),
+        None => serve_with("wrangler", "wrangler.toml"),
     };
-    let dev = serve_with(&wrangler);
     assert!(get(dev.port, "/hidden?score=1").is_some());
 }
 `,
