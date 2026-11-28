@@ -1387,8 +1387,8 @@ fn keeps(
 /// A run that read its evidence against the unsettled manifest keeps the
 /// same records as one that read it against the settled one, which a reused
 /// build does.
-fn drop_settled_alternatives(
-    results: &mut [RawTestResult],
+fn drop_settled_alternatives<'a>(
+    snapshots: impl IntoIterator<Item = &'a mut RuntimeSnapshot>,
     measured: &CoverageManifest,
     settled: &CoverageManifest,
 ) {
@@ -1401,13 +1401,11 @@ fn drop_settled_alternatives(
     if dropped.is_empty() {
         return;
     }
-    for result in results {
-        for snapshot in &mut result.runtime {
-            snapshot.hits.retain(|id| !dropped.contains(id));
-            snapshot
-                .events
-                .retain(|event| event.event_type != "hit" || !dropped.contains(&event.id));
-        }
+    for snapshot in snapshots {
+        snapshot.hits.retain(|id| !dropped.contains(id));
+        snapshot
+            .events
+            .retain(|event| event.event_type != "hit" || !dropped.contains(&event.id));
     }
 }
 
@@ -2393,7 +2391,11 @@ pub fn run_prepared_rust_tests(
             ..project.clone()
         };
         let mut outcome = outcome;
-        drop_settled_alternatives(&mut outcome.results, measured, &project.manifest);
+        drop_settled_alternatives(
+            outcome.results.iter_mut().flat_map(|result| &mut result.runtime),
+            measured,
+            &project.manifest,
+        );
         report_unmeasured_workers(&unmeasured_workers, diagnostics);
         return Ok(RustFrontendRun {
             declaration: FrontendRunDeclaration {
@@ -2772,7 +2774,11 @@ pub fn run_prepared_rust_tests(
     let ran_libtests = !results.is_empty();
     let ran_doctests = !doctest_results.is_empty();
     results.extend(doctest_results);
-    drop_settled_alternatives(&mut results, measured, &project.manifest);
+    drop_settled_alternatives(
+        results.iter_mut().flat_map(|result| &mut result.runtime),
+        measured,
+        &project.manifest,
+    );
     let mut runners = Vec::new();
     if ran_libtests || !ran_doctests {
         runners.push(rust_runner_declaration("rust-libtest"));
@@ -4584,6 +4590,70 @@ mod tests {
         ));
         assert!(!libtest_skipped(101, "running 0 tests\n"));
         assert!(!libtest_skipped(0, "running 1 test\n"));
+    }
+
+    /// The alternatives the settled gates left out leave the records too: a
+    /// hit on one goes, a hit on one that stayed and any other record stay.
+    #[test]
+    fn records_of_alternatives_the_gates_left_out_are_dropped() {
+        use crate::coverage_report::{BranchAlternativeMeta, BranchMeta};
+        let branch = |id: &str, alternatives: &[&str]| BranchMeta {
+            id: id.into(),
+            kind: "match-arm".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            source: "x".into(),
+            alternatives: alternatives
+                .iter()
+                .map(|alternative| BranchAlternativeMeta {
+                    id: (*alternative).into(),
+                    label: "x".into(),
+                })
+                .collect(),
+        };
+        let measured = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: vec![branch("a", &["a:missed"]), branch("b", &["b:missed"])],
+            limitations: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let mut settled = measured.clone();
+        settled.branches.truncate(1);
+        let event = |kind: &str, id: &str| RuntimeEvent {
+            event_type: kind.into(),
+            id: id.into(),
+            vector: None,
+            timestamp_ms: 0,
+            phase_id: None,
+            environment: "server".into(),
+        };
+        let mut snapshot = RuntimeSnapshot {
+            hits: vec!["a:missed".into(), "b:missed".into()],
+            events: vec![
+                event("hit", "a:missed"),
+                event("hit", "b:missed"),
+                event("decision", "b:missed"),
+            ],
+            ..Default::default()
+        };
+        // Nothing settled away: nothing to look at.
+        drop_settled_alternatives(std::iter::empty(), &measured, &measured);
+        drop_settled_alternatives(std::iter::empty(), &measured, &settled);
+        drop_settled_alternatives([&mut snapshot], &measured, &settled);
+        assert_eq!(snapshot.hits, ["a:missed"]);
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .map(|event| (event.event_type.as_str(), event.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("hit", "a:missed"), ("decision", "b:missed")]
+        );
     }
 
     /// A record naming a probe the manifest does not have, or a decision
