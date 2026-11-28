@@ -37,6 +37,7 @@ jobs:
 
   go:
     needs: build
+    if: false  # experiment: Python only
     name: go ${{ matrix.project }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -104,6 +105,7 @@ jobs:
 
   js:
     needs: build
+    if: false  # experiment: Python only
     name: js ${{ matrix.project }}
     runs-on: ubuntu-24.04
     timeout-minutes: 11
