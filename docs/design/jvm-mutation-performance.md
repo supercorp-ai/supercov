@@ -176,3 +176,55 @@ its compilation about 6 s, the JVMs' first round 4 to 14 s each, then two
 rounds of about 10.5 s for its seven mutants past the short limit, each a
 `timeout` only after the generous limit's 10 s. PIT, set the same way
 (`timeoutConstInMillis = 10000`), waits as long for each of its timeouts.
+
+## Next
+
+### Durations from the measured run
+
+A JVM test's measured duration is 0 in the plan (`OwnedTestEvidence` and
+the JVM runtime's evidence carry none), so each test's limits come from its
+baseline alone. Recording them would not make the limits tighter: a limit
+is 1.5 (or 3) times the longer of the measured time and the baseline, so a
+measured time only ever raises it, and the baseline (a fresh class loader,
+C1 in the pass's own JVMs) is the slower of the two. A tighter limit would
+have to drop the baseline from it, which changes which mutants reach the
+generous round and, there, which of them are timeouts: not a change that
+can keep every verdict. Left as is.
+
+### One build for the measured run and the strong pass
+
+Each shard starts the build twice (three times where the compiler refuses
+a switch). One build would compile the copy with its switches (all off) and
+its value probes, run the suite measured, and keep its test JVM: the JVM
+writes the run's evidence and waits; the engine plans the pass from it and
+writes the plan; the JVM runs the pass. What it takes:
+
+- The switches inserted after the coverage instrumentation, not before:
+  `instrument_workspace(…, Some(&strong))` instruments the switched source
+  today, which would put the switches' own branches in the measured run's
+  coverage. `jvm_schemata::switch_source` works on the source's offsets, so
+  it needs the instrumenter's edit map to place them in instrumented text.
+- `run_direct_jvm` reading the evidence while the build runs (the runtime
+  flushes it at a signal file instead of at the JVM's exit) and writing the
+  plan where the waiting JVM reads it; then waiting for the build as now.
+- A refused switch still needs a second build: the measured run's results
+  stand, and only the strong pass starts again without it.
+- The plan's mutants listed before the build, from the sources, as
+  `mutants` lists them now on demand.
+
+### Reach for Kotlin expression bodies
+
+A Kotlin expression body has no statement point, so a mutant in it is
+linked to no point and every test is its candidate unless a value probe
+recorded where it ran; on kotlinpoet 22 survivors had 857 candidates each,
+more than half of the runs with a mutant. A reach probe, placed only in a
+run measured for mutants (as the value probes are) and not counted as
+coverage: `fun f() = e` written `fun f() = run { Supercov.reach(slot); e }`
+(`run` is inline: the type `e` infers is the body's, a `return` in it still
+returns from `f`, a suspending call still suspends). Each mutant of the body
+takes the body's probe as its `probe`; `js_weak_mutation::pit_mutator`
+reads a reach probe that recorded nothing as `not-reached` and one that
+recorded as reached with infection unknown, so `strong_plan` keeps as
+candidates only the tests that ran the body. The probe's outcomes are one
+(`ran`); `jvm_strong::value_outcomes` and the runtime's probe table gain
+the kind.
