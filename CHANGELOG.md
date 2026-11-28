@@ -19,6 +19,7 @@
 **Changed**
 
 - A strong pass over Vitest Browser Mode tests runs its jobs in a resident Vitest, one per worker, instead of starting the test command, and with it Node, Vitest, Vite and Chromium, for every mutant and test file. Each job gets a new page in a new browser context, as a command's own browser gave it; a job that ran past its limit there runs again as a command before it is a `timeout`, and a project with a global setup, browser commands of its own or a Vite plugin that serves requests itself runs its jobs as commands, as before. On mini-throttle (77 mutants, 4 CPUs) the pass takes 70 s where it took 121 s, with every verdict the same.
+- A strong pass over AVA tests runs its jobs in a resident AVA, one per worker, instead of starting AVA's command for every mutant and test file. AVA's options are worked out once, from the command's own arguments and configuration, and each job is the command's run again, as AVA's watch mode reruns it: every test file in a new worker, with the job's mutant on from the worker's start. A job that starts an AVA shared worker is its host's last, and a command that watches or debugs starts for each job, as before.
 
 ## 4.29.19
 
