@@ -416,12 +416,17 @@ pub fn io<T>(
     }
 }
 
-/// Standard error, held for a run's diagnostics: each line written is a call
-/// at the site `diagnostics`, so `diagnostics@N` fails the run's Nth line.
-pub fn diagnostics() -> Writer<io::StderrLock<'static>> {
+/// Standard error, for a run's diagnostics: each line written is a call at
+/// the site `diagnostics`, so `diagnostics@N` fails the run's Nth line.
+///
+/// Each line takes std's lock on standard error as it is written, and gives
+/// it back. Held for the run, it kept every other thread from writing there:
+/// one that wrote a line (`eprintln!`) waited for the run to end, and a run
+/// that joined it never did.
+pub fn diagnostics() -> Writer<io::Stderr> {
     Writer {
         site: "diagnostics",
-        inner: io::stderr().lock(),
+        inner: io::stderr(),
     }
 }
 
@@ -509,6 +514,27 @@ unsafe fn errno_location() -> *mut i32 {
 
 #[cfg(test)]
 mod tests {
+    /// Another thread writes to standard error while a run's diagnostics are
+    /// open, and the run waits for that thread: it must not wait forever.
+    #[test]
+    fn diagnostics_leave_standard_error_to_other_threads() {
+        use std::io::Write as _;
+        let mut diagnostics = super::diagnostics();
+        writeln!(diagnostics).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = std::io::stderr().lock().write_all(b"");
+            let _ = sender.send(());
+        });
+        let wrote = receiver.recv_timeout(std::time::Duration::from_secs(10));
+        writeln!(diagnostics).unwrap();
+        drop(diagnostics);
+        assert!(
+            wrote.is_ok(),
+            "a thread writing to standard error waited for the run's diagnostics"
+        );
+    }
+
     #[track_caller]
     fn here() -> bool {
         super::injected_here("t", "op")
