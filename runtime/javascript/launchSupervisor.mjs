@@ -618,14 +618,29 @@ function patchBuilder(builder) {
     });
     patchedBuilders.add(builder);
 }
+// DIAGNOSTIC ONLY (never merged): what export inspection does, per process.
+const diagInspect = process.env.SUPERCOV_DIAG_INSPECT_FILE ? { loads: 0, objects: 0, descriptors: 0, primitives: 0, ms: 0, byRequest: new Map() } : undefined;
+if (diagInspect)
+    process.once("exit", () => {
+        try {
+            const top = [...diagInspect.byRequest].sort((a, b) => b[1][0] - a[1][0]).slice(0, 12).map(([request, [ms, objects, descriptors]]) => ({ request, ms: Math.round(ms * 10) / 10, objects, descriptors }));
+            appendFileSync(process.env.SUPERCOV_DIAG_INSPECT_FILE, JSON.stringify({ pid: process.pid, argv: process.argv.slice(1, 3).join(" ").slice(-80), loads: diagInspect.loads, objects: diagInspect.objects, descriptors: diagInspect.descriptors, primitives: diagInspect.primitives, ms: Math.round(diagInspect.ms), top }) + "\n");
+        }
+        catch { }
+    });
 function inspectExports(value, depth = 0) {
     if (((!value || typeof value !== "object") && typeof value !== "function") ||
-        depth > 2)
+        depth > 2) {
+        if (diagInspect && depth > 0)
+            diagInspect.primitives += 1;
         return;
+    }
     const object = value;
     if (exportedValues.has(object))
         return;
     exportedValues.add(object);
+    if (diagInspect)
+        diagInspect.objects += 1;
     if (typeof value === "function")
         patchBuilder(value);
     // What sits below this depth is never inspected: listing it cost every
@@ -637,6 +652,8 @@ function inspectExports(value, depth = 0) {
             continue;
         try {
             const descriptor = Object.getOwnPropertyDescriptor(object, key);
+            if (diagInspect)
+                diagInspect.descriptors += 1;
             if (descriptor && "value" in descriptor)
                 inspectExports(descriptor.value, depth + 1);
         }
@@ -818,7 +835,22 @@ export function installLaunchSupervisor() {
         // newly loaded export graphs (deduplicated by `exportedValues`) so
         // capability discovery remains provider- and runner-neutral.
         // DIAGNOSTIC ONLY (never merged): SUPERCOV_DIAG_SKIP=inspect.
-        if (!(process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").includes("inspect"))
+        if (diagInspect) {
+            const started = performance.now();
+            const before = [diagInspect.objects, diagInspect.descriptors];
+            diagInspect.loads += 1;
+            inspectExports(exports);
+            const ms = performance.now() - started;
+            diagInspect.ms += ms;
+            if (diagInspect.objects !== before[0]) {
+                const entry = diagInspect.byRequest.get(request) ?? [0, 0, 0];
+                entry[0] += ms;
+                entry[1] += diagInspect.objects - before[0];
+                entry[2] += diagInspect.descriptors - before[1];
+                diagInspect.byRequest.set(request, entry);
+            }
+        }
+        else if (!(process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").includes("inspect"))
             inspectExports(exports);
         return exports;
     };
