@@ -118,11 +118,29 @@ preload in every Node process, and the build, each a little:
 | Chrome's browser and network processes | 4.0 | 4.8 | 4.7 |
 
 Switching parts off one at a time moves the total by about a point each:
-telling pages each phase (2), the phase cookies (1.3), reading every module's
-exports for container SDKs (0.9), recording in pages (0.9), and the runtime's
-prelude in each document, whether or not minified (0.6). The source maps of
-instrumented files, Node's `--enable-source-maps`, its compile cache and the
-async hook that keeps a probe's context cost nothing measurable.
+telling pages each phase (2), the phase cookies (1.3), recording in pages
+(0.9), and the runtime's prelude in each document, whether or not minified
+(0.6). The source maps of instrumented files, Node's `--enable-source-maps`,
+its compile cache and the async hook that keeps a probe's context cost nothing
+measurable. Reading what each loaded module exports, for container SDKs, takes
+about 0.1 s of CPU in such a part, and about 4.5 s over a large Vitest suite's
+151 processes.
+
+#### Why each action still waits for the page
+
+Telling a page a new phase is one round trip that the action waits for:
+about 4 to 6 ms, almost all of it the page taking up the message while it
+renders, so sending it through Chrome's protocol directly is no faster. Not
+waiting was considered and declined. An action that checks its element first
+(a click or a fill without `force`) sends those checks on the same protocol
+session as the phase, and Chrome runs a session's messages in order, so it
+would be enough to wait until the phase was sent rather than answered.
+Keyboard and mouse calls, navigation, `force` and the phase cookies have no
+such ordering and would still wait. Knowing when Playwright has sent a message
+means hooking its internals, which change between versions, and an ordering
+assumption that is wrong once credits a page's work to the wrong step. That
+would lose accuracy for about 3% of a browser suite's test time, so every
+action still waits.
 
 The server records every test's first hits in each phase as lines of JSON. It
 writes them through a file kept open, and builds each line directly, which
