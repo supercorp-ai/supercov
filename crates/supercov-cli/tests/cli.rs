@@ -31228,6 +31228,54 @@ fn an_interrupted_ruby_pass_stops_at_once_and_judges_nothing_it_cut_short() {
     }
 }
 
+/// A Ruby mutant whose code runs only while the suite loads (a method a
+/// class body calls) is never evaluated by the pass, which forks the loaded
+/// suite with the mutant on: its tests pass, but never ran the mutated code,
+/// so it is `no-coverage` (`not-reached-mutated`), not a survivor.
+#[cfg(unix)]
+#[test]
+fn a_ruby_mutant_its_tests_never_evaluate_with_it_on_is_not_reached() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong-not-reached");
+    project.write(
+        "lib/calc.rb",
+        "class Calc\n  def self.limit\n    10\n  end\n\n  LIMIT = limit\n\n  def big?(n)\n    n > LIMIT\n  end\nend\n",
+    );
+    project.write(
+        "test/calc_test.rb",
+        "require 'minitest/autorun'\nrequire 'calc'\n\nclass CalcTest < Minitest::Test\n  def test_big\n    assert Calc.new.big?(20)\n    refute Calc.new.big?(3)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/calc_test.rb"])
+        .succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let strong = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    let mutants = strong["data"]["mutants"].as_array().unwrap();
+    let limit = mutants
+        .iter()
+        .filter(|mutant| mutant["id"].as_str().unwrap().starts_with("lib/calc.rb:3:"))
+        .collect::<Vec<_>>();
+    assert!(!limit.is_empty(), "{strong}\n{said}");
+    for mutant in limit {
+        assert_ne!(mutant["strong"]["status"], "survived", "{mutant}\n{said}");
+    }
+    // The pass still judges what its tests do evaluate.
+    assert!(
+        mutants.iter().any(
+            |mutant| mutant["id"].as_str().unwrap().starts_with("lib/calc.rb:9:")
+                && mutant["strong"]["status"] == "killed"
+        ),
+        "{strong}"
+    );
+}
+
 /// Go's strong pass: every Gremlins mutant of a module, run in test
 /// binaries built once, each mutant against the tests that ran its code.
 /// A mutant that does not compile is `unviable`; a constant Go needs as a
