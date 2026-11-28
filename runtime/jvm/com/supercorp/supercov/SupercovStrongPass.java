@@ -498,8 +498,14 @@ public final class SupercovStrongPass {
     // C1 alone: each mutant's classes are loaded afresh, so code the JIT
     // compiles is thrown away with its loader, and C2's compilations of it
     // took as much processor time as the tests did, beside them, on as many
-    // processors as there are JVMs.
-    command.add("-XX:TieredStopAtLevel=1");
+    // processors as there are JVMs. Not in the generous round: it decides
+    // the mutants past the short limit, whose verdict can turn on the JIT's
+    // speed (a mutant that allocates until the heap runs out fails at 8 s
+    // with C2 and passes the 10 s limit with C1 alone), so there each JVM
+    // has the JIT the build's own has, as a round of a new build would.
+    if (!retry && !"1".equals(System.getenv(RETRY))) {
+      command.add("-XX:TieredStopAtLevel=1");
+    }
     command.add("-D" + MINION + "=true");
     File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
     File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
