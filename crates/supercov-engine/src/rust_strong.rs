@@ -4933,7 +4933,7 @@ mod tests {
         // switched in, or, told so, an error at no mutant.
         let prefix = "on(\"src/lib.rs\", 0) { return ";
         let cargo = script(
-            &root.join("bin/wasm-cargo"),
+            &root.join("bin/wasm/cargo"),
             &format!(
                 concat!(
                     "case \" $* \" in *\" wasm32-unknown-unknown \"*) ;; *) exec cargo \"$@\" ;; esac\n",
