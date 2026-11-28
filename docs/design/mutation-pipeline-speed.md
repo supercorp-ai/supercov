@@ -180,7 +180,7 @@ documented CI flow, each job runs `supercov mutants --shard k/n -- <command>`.
 That command measures in the job itself, unless the checkout is unchanged
 since a run it restored. A job cannot tell whether the others planned from
 the run it did. Where they did not, a split by cost puts some mutants in two
-shares and others in none, which is the bug 4.29.20 fixed with the hash. Two
+shares and others in none: the bug the hash split fixed (#348). Two
 variants look exact but are not:
 
 - Cost from a restored run only: jobs of one round restore the latest save
