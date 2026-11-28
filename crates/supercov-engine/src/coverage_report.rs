@@ -3998,9 +3998,28 @@ pub fn analyze_coverage_entries(
     parsed: Option<ParsedResults>,
 ) -> Result<CoverageReport, ReportError> {
     let mut clock = std::time::Instant::now();
+    // DIAGNOSTIC knob: an entry the frontend parsed already is handed over
+    // without its bytes, which the analysis takes from `parsed` instead.
+    let noclone = std::env::var("SUPERCOV_DIAG_SKIP").is_ok_and(|value| value.split(',').any(|part| part == "clone"));
+    let already_parsed = parsed
+        .as_ref()
+        .map(|parsed| parsed.keys().cloned().collect::<std::collections::HashSet<_>>())
+        .unwrap_or_default();
     let (_, normalized, transport, (), mutation) =
         archive_request_from(request, parsed, false, |mut visit| {
-            entries.iter().cloned().try_for_each(&mut visit)
+            entries
+                .iter()
+                .map(|entry| {
+                    if noclone && already_parsed.contains(&entry.path) {
+                        EvidenceArchiveEntry {
+                            path: entry.path.clone(),
+                            contents: Vec::new(),
+                        }
+                    } else {
+                        entry.clone()
+                    }
+                })
+                .try_for_each(&mut visit)
         })
         .map(|(frontend, normalized, transport, digest, mutation, _)| {
             (frontend, normalized, transport, digest, mutation)
@@ -4056,6 +4075,7 @@ fn archive_request_from<D>(
     // bytes dropped: holding the decompressed archive whole beside what was
     // parsed from it was a gigabyte of a 1,100-test run's 3.6 GB.
     const BATCH: usize = 256;
+    let mut arf_clock = std::time::Instant::now();
     let mut entries = Vec::new();
     let mut raw_results = Vec::new();
     let mut journal_results = Vec::new();
@@ -4115,6 +4135,7 @@ fn archive_request_from<D>(
     })
     .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     flush(&mut results, &mut journals, &mut failure);
+    diag_mark(&mut arf_clock, "    request.read-entries");
     if let Some(error) = failure {
         return Err(error);
     }
@@ -4129,6 +4150,7 @@ fn archive_request_from<D>(
             .expect("a read archive holds its manifest, declaration and model")
     };
     let manifest = parse_entry::<CoverageManifest>(held("manifest.json"))?;
+    diag_mark(&mut arf_clock, "    request.manifest");
 
     let scoped = parse_scoped_server_records(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
@@ -4257,6 +4279,7 @@ fn archive_request_from<D>(
         });
     }
     fold_server_values(&mut raw_results)?;
+    diag_mark(&mut arf_clock, "    request.server-join");
 
     // Execution traces are appended by the launch observer inside application
     // processes, so they share the clone hazard of server evidence.
@@ -4299,9 +4322,12 @@ fn archive_request_from<D>(
             frontend.language, coverage_model.language
         )));
     }
+    diag_mark(&mut arf_clock, "    request.execution-model");
     resolve_probe_places(&mut raw_results, &manifest.probe_tables);
+    diag_mark(&mut arf_clock, "    request.resolve-places");
     separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
+    diag_mark(&mut arf_clock, "    request.separate-release");
     // After server work was credited to its tests by time, so a picked test
     // keeps what its requests did.
     if let Some(filter) = request
