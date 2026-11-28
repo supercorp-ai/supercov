@@ -47,7 +47,9 @@ function run(cwd, command, args, label, extra = {}, mayFail = false) {
     cwd,
     env: { ...process.env, CI: 'true', ...extra },
     encoding: 'utf8',
-    timeout: 1_800_000,
+    // SPEED_RUN_TIMEOUT_MS stops a run before its job's own limit, so the
+    // log of one that hangs is kept.
+    timeout: Number(process.env.SPEED_RUN_TIMEOUT_MS ?? 1_800_000),
     maxBuffer: 256 * 1024 * 1024,
   });
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
@@ -282,7 +284,10 @@ export default {
 };
 const application = process.env.SPEED_APP ?? 'bulletproof';
 assert.ok(applications[application], `SPEED_APP names no application: ${application}`);
-const { project, description, suites, reset, outputs = ['.next'], browserProfile = false } = applications[application]();
+const { project, description, suites: allSuites, reset, outputs = ['.next'], browserProfile = false } = applications[application]();
+// SPEED_SUITES (`unit,e2e`) names the suites to run, where a job has time for
+// only some of them.
+const suites = process.env.SPEED_SUITES ? allSuites.filter((suite) => process.env.SPEED_SUITES.split(',').includes(suite.name)) : allSuites;
 
 // The flow's own time from Playwright's report, its mean over the
 // repetitions that passed: the server's build and start are left out, so
@@ -418,7 +423,8 @@ function suiteRun(round, variant, suite, binary) {
   // Every answer the run gives, in its first two rounds: two runs of one
   // binary say how far the suite itself varies, and a binary against
   // another, whether either measures differently (scripts/speed/answers.mjs).
-  if (round <= 2) {
+  // SPEED_ANSWERS=0 leaves them out, where a job measures time alone.
+  if (round <= 2 && process.env.SPEED_ANSWERS !== '0') {
     run(
       project,
       process.execPath,
@@ -441,11 +447,24 @@ function suiteRun(round, variant, suite, binary) {
 for (let round = 1; round <= rounds; round += 1) {
   // A run leaves its copy of the repository in .supercov, and the app's
   // Vitest includes collect the copy's tests: plain starts from none.
-  rmSync(join(project, '.supercov'), { recursive: true, force: true });
-  for (const suite of suites) suiteRun(round, 'plain', suite);
-  const order = binaries.map((_, index) => binaries[(index + round) % binaries.length]);
+  // Plain takes its turn with the binaries, in an order that turns each
+  // round and reverses every other (A B C, then C B A shifted), so no variant
+  // always runs first or on a warmer machine. SPEED_ORDER_OFFSET shifts the
+  // start, so jobs of one matrix start from different variants.
+  // SPEED_PLAIN=0 leaves plain out, and `only` the binaries: for a job
+  // with time for fewer runs, whose others run on machines beside it.
+  const variants = process.env.SPEED_PLAIN === 'only'
+    ? [{ name: 'plain' }]
+    : [...(process.env.SPEED_PLAIN === '0' ? [] : [{ name: 'plain' }]), ...binaries];
+  const shift = (round - 1 + Number(process.env.SPEED_ORDER_OFFSET ?? 0)) % variants.length;
+  let order = variants.map((_, index) => variants[(index + shift) % variants.length]);
+  if (round % 2 === 0) order = order.reverse();
   for (const { name, path } of order) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
+    if (!path) {
+      for (const suite of suites) suiteRun(round, 'plain', suite);
+      continue;
+    }
     for (const suite of suites) suiteRun(round, name, suite, path);
     const { seconds } = run(project, path, ['merge'], `${round}-${name}-merge`);
     sample(round, name, 'merge', seconds);
@@ -457,7 +476,9 @@ for (let round = 1; round <= rounds; round += 1) {
 if (process.env.SPEED_DIAGNOSE === '1') {
   const { name, path } = binaries.at(-1);
   rmSync(join(project, '.supercov'), { recursive: true, force: true });
-  for (const suite of suites) {
+  // SPEED_DIAGNOSE_PASS=0 leaves out the timed pass, for a job that
+  // profiles only.
+  for (const suite of process.env.SPEED_DIAGNOSE_PASS === '0' ? [] : suites) {
     reset(`diagnose-${name}-${suite.name}`);
     if (suite.name === 'e2e' && process.env.SPEED_SAMPLY) {
       // The e2e run's Supercov process alone, natively profiled: its setup,
@@ -510,7 +531,10 @@ if (process.env.SPEED_DIAGNOSE === '1') {
   );
   const profiled = {};
   // Every binary, so one binary's change shows against the other's.
-  for (const [variant, binary] of [['plain'], ...binaries.map((entry) => [entry.name, entry.path])]) {
+  // SPEED_PROFILE_VARIANTS (`plain,new`) names the ones profiled.
+  const profiledVariants = [['plain'], ...binaries.map((entry) => [entry.name, entry.path])]
+    .filter(([variant]) => !process.env.SPEED_PROFILE_VARIANTS || process.env.SPEED_PROFILE_VARIANTS.split(',').includes(variant));
+  for (const [variant, binary] of profiledVariants) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
     for (const suite of suites) {
       reset(`profile-${variant}-${suite.name}`);

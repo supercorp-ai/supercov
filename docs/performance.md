@@ -103,10 +103,56 @@ Most of what the tests add is waiting, not Supercov's own code:
   more with each one. On the suite above, the same test cost about 120 ms more
   late in a whole run than at the start of a run of an eighth of it.
 
+On a generated app with heavy pages and a new context per test
+(`benchmarks/large-app`, sixteenths of its 300 tests), the measured run uses
+about 22% more CPU than plain. Most of that is there with almost nothing
+instrumented (one file measured: +12%): the collector's calls, the runtime's
+preload in every Node process, and the build, each a little:
+
+| Process, CPU s per sixteenth | Plain | Measured | One file measured |
+| --- | --- | --- | --- |
+| `next build` | 23.1 | 26.5 | 24.1 |
+| `next start` | 5.5 | 6.6 | 6.5 |
+| Playwright's runner and worker | 5.3 | 6.9 | 6.9 |
+| Chrome's pages | 4.5 | 5.9 | 6.0 |
+| Chrome's browser and network processes | 4.0 | 4.8 | 4.7 |
+
+Switching parts off one at a time moves the total by about a point each:
+telling pages each phase (2), the phase cookies (1.3), reading every module's
+exports for container SDKs (0.9), recording in pages (0.9), and the runtime's
+prelude in each document, whether or not minified (0.6). The source maps of
+instrumented files, Node's `--enable-source-maps`, its compile cache and the
+async hook that keeps a probe's context cost nothing measurable.
+
 The server records every test's first hits in each phase as lines of JSON. It
 writes them through a file kept open, and builds each line directly, which
 takes about a third of the time it did before. The collector reads each page's
 evidence in the columns it stores, which takes about a quarter of the time.
+
+### Where a unit suite's time goes
+
+Excalidraw's Vitest suite (7,052 test records, jsdom, on a 4-CPU runner)
+retires about 25% more instructions measured than plain, and takes 190 to
+205 s against 150 to 160 s. Almost none of that is the instrumented code
+running: with every probe still called but recording nothing, the suite
+retires 2% more than plain. It is the evidence:
+
+- **In the test workers**, each statement's first hit in each phase of a
+  test (each assertion is a phase), each decision vector and each selection
+  is recorded, and the test's record is written when it ends: 779 MB of
+  JSON for the suite, mostly hit ids (190 MB), decisions (138 MB), assertion
+  phases (87 MB) and the events that say which phase first hit each point.
+- **After the tests**, Supercov reads those records (1.4 s), names each
+  probe by its point (1.9 s), builds the views (6 s) and publishes the run
+  (3.8 s): about 13 s on the run's critical path, beside its compression.
+
+Writing the records smaller does not make it faster: numbered ids and
+vectors as text cut the evidence by 46% and the run retired 2.4% more
+instructions, because each item costs about the same whichever way it is
+written. What a unit suite pays is per item recorded, not per byte.
+
+`scripts/speed/evidence-composition.mjs` says what a run's evidence is made
+of, field by field.
 
 ### Prove a speed-up changes nothing
 
