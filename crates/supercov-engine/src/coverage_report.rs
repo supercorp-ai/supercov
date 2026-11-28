@@ -1563,18 +1563,19 @@ impl From<AnalysisError> for ReportError {
 #[derive(Clone, Default)]
 struct OrderedVectors {
     values: Vec<McdcVector>,
-    indexes: HashMap<String, usize>,
+    /// Each vector's place in `values`, by the vector itself, not by a text
+    /// key made for each one.
+    indexes: FastMap<McdcVector, usize>,
 }
 
 impl OrderedVectors {
     fn insert(&mut self, vector: &McdcVector) -> usize {
-        let key = vector_key(vector);
-        if let Some(index) = self.indexes.get(&key) {
+        if let Some(index) = self.indexes.get(vector) {
             return *index;
         }
         let index = self.values.len();
         self.values.push(vector.clone());
-        self.indexes.insert(key, index);
+        self.indexes.insert(vector.clone(), index);
         index
     }
 }
@@ -1605,7 +1606,9 @@ struct MutableTest {
     /// Hit numbers as they arrive, repeats included: sorted and made unique
     /// once, when the view is written.
     hits: Vec<usize>,
-    decisions: BTreeMap<String, OrderedVectors>,
+    /// By the decision's slot (`decision_indexes`): put in id order when the
+    /// view is written.
+    decisions: FastMap<usize, OrderedVectors>,
 }
 
 #[derive(Clone)]
@@ -1622,18 +1625,6 @@ struct MutablePhase {
     inferred_browser_events: usize,
     explicit_server_events: usize,
     inferred_server_events: usize,
-}
-
-fn vector_key(vector: &McdcVector) -> String {
-    let mut key = String::with_capacity(vector.values.len() + 2);
-    key.extend(vector.values.iter().map(|value| match value {
-        None => '-',
-        Some(false) => 'F',
-        Some(true) => 'T',
-    }));
-    key.push(':');
-    key.push(if vector.outcome { 'T' } else { 'F' });
-    key
 }
 
 fn sorted<T: Clone + Ord>(values: &BTreeSet<T>) -> Vec<T> {
@@ -2000,14 +1991,52 @@ pub fn blocking_limitation(limitation: &Value) -> bool {
 /// The observation of `vector` of the decision `id`, by the decision's slot
 /// (`decision_indexes`) and the index of each slot's vectors.
 fn observation_of<'o>(
-    (decision_indexes, vector_indexes): (&FastMap<String, usize>, &[FastMap<String, usize>]),
+    (decision_indexes, vector_indexes): (&FastMap<String, usize>, &[FastMap<McdcVector, usize>]),
     vectors_by_decision: &'o mut [Vec<MutableObservation>],
     id: &str,
     vector: &McdcVector,
 ) -> Option<&'o mut MutableObservation> {
     let slot = *decision_indexes.get(id)?;
-    let index = *vector_indexes[slot].get(&vector_key(vector))?;
+    let index = *vector_indexes[slot].get(vector)?;
     vectors_by_decision[slot].get_mut(index)
+}
+
+/// The index of `vector` among a decision's observations, the observation
+/// added the first time the vector is seen, keyed by the vector itself.
+fn observation_index(
+    indexes: &mut FastMap<McdcVector, usize>,
+    observations: &mut Vec<MutableObservation>,
+    vector: &McdcVector,
+) -> usize {
+    if let Some(index) = indexes.get(vector) {
+        return *index;
+    }
+    observations.push(MutableObservation {
+        vector: vector.clone(),
+        tests: Vec::new(),
+        phases: Vec::new(),
+        explicit_phases: Vec::new(),
+    });
+    let index = observations.len() - 1;
+    indexes.insert(vector.clone(), index);
+    index
+}
+
+/// A test's decisions, gathered by slot, in the order of their ids: the
+/// order a map by id gave them. A slot is one id's (`decision_indexes`).
+fn decisions_in_id_order(
+    decisions: FastMap<usize, OrderedVectors>,
+    slot_ids: &[String],
+) -> Vec<TestDecisionResult> {
+    let mut decisions = decisions.into_iter().collect::<Vec<_>>();
+    decisions.sort_unstable_by(|(left, _), (right, _)| slot_ids[*left].cmp(&slot_ids[*right]));
+    decisions
+        .into_iter()
+        .map(|(slot, vectors)| TestDecisionResult {
+            id: slot_ids[slot].clone(),
+            vectors: vectors.values,
+        })
+        .collect()
 }
 
 fn tree_slot<'m, V: Default>(map: &'m mut BTreeMap<String, V>, key: &str) -> &'m mut V {
@@ -2448,7 +2477,7 @@ fn create_coverage_view_with_model(
     // three maps by id were each looked up again.
     let slots = decision_metadata.len();
     let mut vectors_by_decision = vec![Vec::<MutableObservation>::new(); slots];
-    let mut vector_indexes = vec![FastMap::<String, usize>::default(); slots];
+    let mut vector_indexes = vec![FastMap::<McdcVector, usize>::default(); slots];
     let mut tests_by_decision = vec![Vec::<u32>::new(); slots];
     let mut tests_by_hit = References::default();
     let mut hit_ids = HitIds::default();
@@ -2477,7 +2506,7 @@ fn create_coverage_view_with_model(
                     role: raw.role.clone(),
                     attribution: raw.attribution.clone(),
                     hits: Vec::new(),
-                    decisions: BTreeMap::new(),
+                    decisions: FastMap::default(),
                 },
             );
         }
@@ -2528,26 +2557,22 @@ fn create_coverage_view_with_model(
                     continue;
                 };
                 for vector in &decision.vectors {
-                    let key = vector_key(vector);
-                    let indexes = &mut vector_indexes[slot];
+                    let observation_index = observation_index(
+                        &mut vector_indexes[slot],
+                        &mut vectors_by_decision[slot],
+                        vector,
+                    );
                     let observations = &mut vectors_by_decision[slot];
-                    let observation_index = *indexes.entry(key).or_insert_with(|| {
-                        observations.push(MutableObservation {
-                            vector: vector.clone(),
-                            tests: Vec::new(),
-                            phases: Vec::new(),
-                            explicit_phases: Vec::new(),
-                        });
-                        observations.len() - 1
-                    });
                     observations[observation_index]
                         .tests
                         .push(tests_by_hit.number(&id, ids));
-                    tree_slot(
-                        &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
-                        &decision.id,
-                    )
-                    .insert(vector);
+                    tests_by_id
+                        .get_mut(&id)
+                        .expect("registered test")
+                        .decisions
+                        .entry(slot)
+                        .or_default()
+                        .insert(vector);
                 }
                 if !decision.vectors.is_empty() {
                     tests_by_decision[slot].push(tests_by_hit.number(&id, ids));
@@ -2685,26 +2710,22 @@ fn create_coverage_view_with_model(
                     let Some(&slot) = decision_indexes.get(decision) else {
                         continue;
                     };
-                    let key = vector_key(vector);
-                    let indexes = &mut vector_indexes[slot];
+                    let index = observation_index(
+                        &mut vector_indexes[slot],
+                        &mut vectors_by_decision[slot],
+                        vector,
+                    );
                     let observations = &mut vectors_by_decision[slot];
-                    let index = *indexes.entry(key).or_insert_with(|| {
-                        observations.push(MutableObservation {
-                            vector: vector.clone(),
-                            tests: Vec::new(),
-                            phases: Vec::new(),
-                            explicit_phases: Vec::new(),
-                        });
-                        observations.len() - 1
-                    });
                     observations[index]
                         .tests
                         .push(tests_by_hit.number(&id, ids));
-                    tree_slot(
-                        &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
-                        decision,
-                    )
-                    .insert(vector);
+                    tests_by_id
+                        .get_mut(&id)
+                        .expect("registered test")
+                        .decisions
+                        .entry(slot)
+                        .or_default()
+                        .insert(vector);
                     tests_by_decision[slot].push(tests_by_hit.number(&id, ids));
                     (decision, Some(vector))
                 } else if record.record_type == "hit" {
@@ -2922,6 +2943,11 @@ fn create_coverage_view_with_model(
     let (declined, declared_branches, hit_ids) = (&declined, &declared_branches, &hit_ids);
     let hit_ranks = &hit_ranks;
     let decision_indexes = &decision_indexes;
+    // Each slot's decision id, for a test's decisions in id order.
+    let slot_ids = decision_metadata
+        .iter()
+        .map(|meta| meta.id.clone())
+        .collect::<Vec<_>>();
     let decide = move || -> Result<(Vec<DecisionResult>, Vec<BranchResult>), ReportError> {
         let (mut vectors_by_decision, mut tests_by_decision) =
             (vectors_by_decision, tests_by_decision);
@@ -3215,14 +3241,7 @@ fn create_coverage_view_with_model(
                     role: test.role,
                     attribution: test.attribution,
                     hits: hit_ids.names_of(&hits),
-                    decisions: test
-                        .decisions
-                        .into_iter()
-                        .map(|(id, vectors)| TestDecisionResult {
-                            id,
-                            vectors: vectors.values,
-                        })
-                        .collect(),
+                    decisions: decisions_in_id_order(test.decisions, &slot_ids),
                     lines,
                 }
             })
@@ -7108,7 +7127,7 @@ mod tests {
             role: "test".into(),
             attribution: "exact".into(),
             hits: Vec::new(),
-            decisions: BTreeMap::new(),
+            decisions: FastMap::default(),
         };
         for raw in &results {
             record_attempt(&mut test, raw);
