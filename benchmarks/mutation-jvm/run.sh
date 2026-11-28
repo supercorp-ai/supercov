@@ -288,7 +288,8 @@ case "$scenario" in
     cp -r .supercov/strong/* "$results/strong/" 2>/dev/null || true
     if [ "${PROFILE:-}" = 1 ]; then
       mkdir -p "$results/profile"
-      cp build/reports/profile/*.html "$results/profile/" 2>/dev/null || true
+      find . -path '*/reports/profile/*' -name 'profile-*.html' -exec cp {} "$results/profile/" \; 2>/dev/null || true
+      find . -maxdepth 3 -path '*/build/reports*' > "$results/profile/where.txt" 2>/dev/null || true
     fi
     # PIT's full matrix where it ran, else its report as a team runs it:
     # both say which mutants PIT detects.
