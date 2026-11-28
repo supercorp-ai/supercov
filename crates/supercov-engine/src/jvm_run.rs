@@ -5766,6 +5766,8 @@ e: /w/copy/src/A.kt: (x, 2): no line
         Results::new(&request.results)
             .lines()
             .iter()
+            // The pass's summary of its builds is no verdict.
+            .filter(|line| line["summary"] != true)
             .map(|line| {
                 (
                     line["id"].as_str().unwrap_or_default().to_owned(),
@@ -5979,7 +5981,11 @@ e: /w/copy/src/A.kt: (x, 2): no line
             crate::jvm_strong::mutant_id(API, &api[api_last.2]),
             crate::jvm_strong::mutant_id(OTHER, &other[other_first.2]),
         ];
-        let lines = Results::new(&request.results).lines();
+        let lines = Results::new(&request.results)
+            .lines()
+            .into_iter()
+            .filter(|line| line["summary"] != true)
+            .collect::<Vec<_>>();
         assert_eq!(lines.len(), refused.len(), "{lines:?}");
         for line in &lines {
             assert!(
@@ -6015,7 +6021,12 @@ e: /w/copy/src/A.kt: (x, 2): no line
             diagnostics.contains("the strong copy did not compile, at code that holds no switch:\n  src/main/java/app/Unswitched.java:1:1: boom"),
             "{diagnostics}"
         );
-        assert!(Results::new(&request.results).lines().is_empty());
+        assert!(
+            Results::new(&request.results)
+                .lines()
+                .iter()
+                .all(|line| line["summary"] == true)
+        );
         // The refused switches' file cannot be written again.
         let unwritable = root.with_extension("unwritable");
         fs::create_dir_all(&unwritable).unwrap();
