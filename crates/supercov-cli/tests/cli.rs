@@ -2132,7 +2132,10 @@ fn a_match_guard_holding_a_let_is_measured_both_ways() {
     let decision = project
         .supercov(&["runs", "latest", "decision", "src/lib.rs:3"])
         .succeeds();
-    contains_all(&decision, &["let Some(y) = x.checked_sub(5)", "T -> T", "F -> F"]);
+    contains_all(
+        &decision,
+        &["let Some(y) = x.checked_sub(5)", "T -> T", "F -> F"],
+    );
 }
 
 #[test]
