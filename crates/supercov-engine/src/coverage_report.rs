@@ -2438,6 +2438,7 @@ fn create_coverage_view_with_model(
     coverage_model: &CoverageModelDeclaration,
     ids: &mut Interner,
 ) -> Result<CoverageView, ReportError> {
+    let mut view_clock = std::time::Instant::now();
     let settled;
     let manifest = match whole_files_unmeasured(manifest) {
         Some(applied) => {
@@ -2774,6 +2775,7 @@ fn create_coverage_view_with_model(
             .then(left.line.cmp(&right.line))
             .then(left.column.cmp(&right.column))
     });
+    diag_mark(&mut view_clock, "    view.records-loop");
     let tests_by_hit = tests_by_hit.into_relation();
     let phases_by_hit = phases_by_hit.into_relation();
     let explicit_phases_by_hit = explicit_phases_by_hit.into_relation();
@@ -3995,6 +3997,7 @@ pub fn analyze_coverage_entries(
     entries: &[EvidenceArchiveEntry],
     parsed: Option<ParsedResults>,
 ) -> Result<CoverageReport, ReportError> {
+    let mut clock = std::time::Instant::now();
     let (_, normalized, transport, (), mutation) =
         archive_request_from(request, parsed, false, |mut visit| {
             entries.iter().cloned().try_for_each(&mut visit)
@@ -4002,7 +4005,10 @@ pub fn analyze_coverage_entries(
         .map(|(frontend, normalized, transport, digest, mutation, _)| {
             (frontend, normalized, transport, digest, mutation)
         })?;
-    finish_archive_analysis(normalized, transport, mutation)
+    diag_mark(&mut clock, "  analysis.archive-request");
+    let finished = finish_archive_analysis(normalized, transport, mutation);
+    diag_mark(&mut clock, "  analysis.views");
+    finished
 }
 
 /// The results of a run's `mcdc.json` and `.mcdc.jsonl` entries, by path, as
@@ -7780,4 +7786,16 @@ mod tests {
             "{unknown}"
         );
     }
+}
+
+/// DIAGNOSTIC ONLY (never merged): how long since the last mark, appended to
+/// the file `SUPERCOV_DIAG_TIMING_FILE` names.
+pub(crate) fn diag_mark(clock: &mut std::time::Instant, label: &str) {
+    if let Some(file) = std::env::var_os("SUPERCOV_DIAG_TIMING_FILE") {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+            let _ = writeln!(file, "{label} {:.1}ms", clock.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    *clock = std::time::Instant::now();
 }

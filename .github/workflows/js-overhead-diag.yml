@@ -47,12 +47,6 @@ jobs:
         include:
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'new' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'events' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'events' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'write' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'write' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, variants: 'phases' }
-          - { app: excalidraw, suites: unit, node: 22, offset: 1, rounds: 1, diagnose: 0, variants: 'phases' }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -115,6 +109,9 @@ jobs:
           SPEED_PLAIN: ${{ matrix.only == 'plain' && 'only' || '0' }}
           SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs
+      - if: always()
+        continue-on-error: true
+        run: node scripts/speed/evidence-composition.mjs "$RUNNER_TEMP/speed/evidence-unit/evidence.raw.gz" > "$RUNNER_TEMP/speed/logs/composition.txt" 2>&1
       - if: always()
         uses: actions/upload-artifact@v4
         with:

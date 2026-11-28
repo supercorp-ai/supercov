@@ -1039,7 +1039,9 @@ pub(crate) fn publish_run_with_fault(
     if fs::symlink_metadata(&staging).is_ok() {
         clear_staging(root, &staging)?;
     }
+    let mut clock = std::time::Instant::now();
     let evidence_sha256 = file_sha256(evidence_source)?;
+    crate::coverage_report::diag_mark(&mut clock, "  publish.sha256");
     // fault-site: lifecycle.publish-run-with-fault.create-dir-all
     fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
     let copied = copy_regular_file(evidence_source, &staging.join("evidence.raw.gz"))?;
@@ -1061,6 +1063,7 @@ pub(crate) fn publish_run_with_fault(
         clear_staging(root, &staging)?;
         return Err(LifecycleError::EvidenceChanged);
     }
+    crate::coverage_report::diag_mark(&mut clock, "  publish.copy+sha256");
     let mut json = serde_json::to_vec_pretty(metadata).expect("plain data serializes");
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
@@ -1125,10 +1128,13 @@ pub(crate) fn publish_run_with_fault(
             // report analyses the evidence when a file is missing.
             [
                 scope.spawn(move || {
+                    let mut clock = std::time::Instant::now();
                     let sections = early_sections.map_or_else(
                         || crate::coverage_index::coverage_index_sections(report),
                         |early| early.join().unwrap_or_else(crate::threads::rethrow),
                     );
+                    crate::coverage_report::diag_mark(&mut clock, "  publish.index-sections-wait");
+                    let _diag_written = DiagOnDrop(clock, "  publish.index-write");
                     if crate::run_store::write_query_index_with(
                         derived,
                         sections,
@@ -1166,9 +1172,11 @@ pub(crate) fn publish_run_with_fault(
             analysed.as_deref(),
             archived_inputs,
         );
+        crate::coverage_report::diag_mark(&mut clock, "  publish.prepare-publication");
         for written in index.into_iter().flatten() {
             written.join().unwrap_or_else(crate::threads::rethrow);
         }
+        crate::coverage_report::diag_mark(&mut clock, "  publish.derived-files-wait");
         prepared
     });
     // Everything publication derives from the analysis is written. It is
@@ -4053,5 +4061,14 @@ mod tests {
             assert!(!root.join("tree").exists(), "{threads}");
             fs::remove_dir_all(root).unwrap();
         }
+    }
+}
+
+/// DIAGNOSTIC ONLY (never merged): a mark made when it is dropped.
+struct DiagOnDrop(std::time::Instant, &'static str);
+
+impl Drop for DiagOnDrop {
+    fn drop(&mut self) {
+        crate::coverage_report::diag_mark(&mut self.0, self.1);
     }
 }
