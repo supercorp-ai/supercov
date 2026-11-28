@@ -26,6 +26,10 @@
 - A strong pass over AVA tests runs its jobs in a resident AVA, one per worker, instead of starting AVA's command for every mutant and test file. AVA's options are worked out once, from the command's own arguments and configuration, and each job is the command's run again, as AVA's watch mode reruns it: every test file in a new worker, with the job's mutant on from the worker's start. A job that starts an AVA shared worker is its host's last, and a command that watches or debugs starts for each job, as before. On dot-prop (590 mutants, 4 CPUs) the pass takes 116 s where it took 185 s, with every verdict the same.
 - `docs/performance.md` says where a measured unit suite's time goes (the evidence each test writes, and reading and publishing it after the tests) and, for a browser suite with a new context per test, which processes the rest of the overhead is in, with each part switched off in turn. The speed benchmark (`scripts/speed-benchmark.mjs`) runs plain in turns with the binaries it compares, in an order that turns and reverses each round, and can run one suite, leave out plain or the answers, or stop a run that hangs with its log kept; `scripts/speed/evidence-composition.mjs` says what a run's evidence is made of.
 
+**Changed**
+
+- A measured Ruby suite spends less time in Supercov's probes: a decision evaluation a test has already recorded returns at once, observing a condition allocates nothing, a decision vector's record is built directly instead of through the encoder (still written at once, so a test whose process ends during it keeps it), and a phase's end settles only its own operator-assignment arrivals instead of reading every earlier phase's. rack's suite (1092 tests) on an Actions runner: the test command took 6.62 s measured before and 5.64 s after (plain 3.61 s for the whole run), every answer the same.
+
 ## 4.29.19
 
 **Fixed**

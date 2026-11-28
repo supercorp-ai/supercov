@@ -447,6 +447,11 @@ module Supercov
       @id_numbers = {}
       @line_ids = {}
       @seen_vectors = {}
+      # Decision ids as JSON strings, for their records (see vector).
+      @encoded_ids = {}
+      # Per context and decision probe, the evaluations already recorded,
+      # by their condition values and outcome (see probe_decision).
+      @finished_decisions = {}
       # Per context, each value record's outcomes seen, as bits.
       @value_bits = {}
       # Per context, the value probes whose every kind has differed there.
@@ -1281,7 +1286,13 @@ module Supercov
         count_key = [context, decision_id]
         @vector_counts[count_key] = (@vector_counts[count_key] || 0) + 1
       end
-      record("t" => "dec", "ctx" => context, "id" => decision_id, "v" => digits, "o" => outcome ? 1 : 0)
+      # Written at once, so a test whose process ends during it (`exit!`, a
+      # signal) keeps its decisions. The record is the one the encoder writes,
+      # built directly: the encoder's walk was most of a decision-heavy
+      # suite's evidence cost. Digits are 0, 1 and 2 only; the id is encoded
+      # once.
+      id = @encoded_ids[decision_id] ||= Encode.string(decision_id, +"")
+      record_json(%({"t":"dec","ctx":#{Integer(context)},"id":#{id},"v":"#{digits}","o":#{outcome ? 1 : 0}}))
     end
 
     def limitation(id, reason, file = nil, obligation = nil)
@@ -1299,37 +1310,52 @@ module Supercov
 
     # Condition leaf: records the operand's truthiness and passes it through.
     def probe_condition(key, index, value)
-      target = @probes[key]
-      frame_key = [current_context, key]
-      stack = (@open[frame_key] ||= [])
-      last = stack.last
-      if last.nil? || index <= last[:last]
-        stack.shift if stack.length >= MAX_OPEN_EVALUATIONS
-        last = { values: Array.new(target["width"]), last: -1 }
-        stack << last
+      # An open evaluation is two integers on its context's and decision's
+      # stack: the last condition index it observed, and two bits per
+      # condition (0 not evaluated, 1 false, 2 true). Integers, so observing
+      # a condition allocates nothing.
+      stack = ((@open[current_context] ||= {})[key] ||= [])
+      if stack.empty? || index <= stack[-2]
+        stack.shift(2) if stack.length >= MAX_OPEN_EVALUATIONS * 2
+        stack.push(-1, 0)
       end
-      last[:last] = index
-      last[:values][index] = value ? true : false
+      stack[-2] = index
+      stack[-1] |= (value ? 2 : 1) << (2 * index)
       value
     end
 
     # Decision outcome: closes the innermost open evaluation.
     def probe_decision(key, value)
-      target = @probes[key]
-      frame_key = [current_context, key]
-      stack = @open[frame_key]
-      frame = stack && stack.pop
+      context = current_context
       truthy = value ? true : false
-      values = if frame
-                 frame[:values]
-               elsif target["width"] == 1
-                 # A lone condition carries no c() wrapper: its value is the
-                 # outcome, read back through the condition's own negation.
-                 [target["not"][0] ? !truthy : truthy]
-               else
-                 Array.new(target["width"])
-               end
+      evaluations = @open[context]
+      stack = evaluations && evaluations[key]
+      bits =
+        if stack && !stack.empty?
+          frame = stack.pop
+          stack.pop
+          frame
+        elsif @probes[key]["width"] == 1
+          # A lone condition carries no c() wrapper: its value is the
+          # outcome, read back through the condition's own negation.
+          (@probes[key]["not"][0] ? !truthy : truthy) ? 2 : 1
+        else
+          0
+        end
+      # What an evaluation records follows from its condition values and
+      # outcome alone, and within one context each record is written once: a
+      # combination this context has already finished records nothing new.
+      code = (bits << 1) | (truthy ? 1 : 0)
+      finished = ((@finished_decisions[context] ||= {})[key] ||= {})
+      return value if finished[code]
+
+      target = @probes[key]
+      values = Array.new(target["width"]) do |index|
+        digit = (bits >> (2 * index)) & 3
+        digit.zero? ? nil : digit == 2
+      end
       finish_decision(target, values, truthy)
+      finished[code] = true
       value
     end
 
@@ -1760,14 +1786,17 @@ module Supercov
       hit(context, target["shortCircuit"]) if state[0] > state[1]
     end
 
+    # Arrival states by context, then by probe: a phase's end settles its own
+    # without reading every phase's before it.
     def arrival_state(context, key)
-      @arrivals[[context, key]] || @settle_lock.synchronize { @arrivals[[context, key]] ||= [0, 0] }
+      by_key = @arrivals[context]
+      (by_key && by_key[key]) || @settle_lock.synchronize { (@arrivals[context] ||= {})[key] ||= [0, 0] }
     end
 
     def settle_arrivals(context)
-      arrivals = @settle_lock.synchronize { @arrivals.select { |(ctx, _), _| ctx == context } }
-      arrivals.each do |(ctx, key), state|
-        settle_arrival(ctx, @probes[key], state)
+      arrivals = @settle_lock.synchronize { @arrivals[context]&.dup }
+      arrivals&.each do |key, state|
+        settle_arrival(context, @probes[key], state)
       end
     end
 
