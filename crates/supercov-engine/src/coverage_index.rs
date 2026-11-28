@@ -7011,7 +7011,8 @@ mod tests {
         let mut run = report();
         let base = run.view.tests[0].clone();
         assert!(!base.lines.is_empty() && !base.hits.is_empty() && !base.decisions.is_empty());
-        let changes: Vec<(&str, Box<dyn Fn(&mut TestCoverageResult)>)> = vec![
+        type Change = Box<dyn Fn(&mut TestCoverageResult)>;
+        let changes: Vec<(&str, Change)> = vec![
             ("alike", Box::new(|_| {})),
             (
                 "a line more",
