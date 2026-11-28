@@ -40,12 +40,12 @@
 //! evidence to a guess.
 
 use crate::fault_fs as fs;
-use crate::fault_process::Launch;
+use crate::fault_process::{Launch, Reap};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -76,6 +76,9 @@ pub const CHILD_BINARY_ENV: &str = "SUPERCOV_DOCTEST_CHILD_BINARY";
 /// rustdoc's own protocol for merged doctest harnesses.
 pub const RUSTDOC_BIN_PATH_ENV: &str = "RUSTDOC_DOCTEST_BIN_PATH";
 pub const RUSTDOC_RUN_NB_TEST_ENV: &str = "RUSTDOC_DOCTEST_RUN_NB_TEST";
+/// Where a batch's runtools ask which doctest they were handed (see
+/// `run_batched`).
+pub const BATCH_DIR_ENV: &str = "SUPERCOV_DOCTEST_BATCH_DIR";
 /// The argument that puts this program in runtool mode.
 pub const RUNTOOL_MODE_ARGUMENT: &str = "__doctest-runner";
 
@@ -607,6 +610,155 @@ fn isolate(name: &str, names: &[String]) -> Option<(String, Vec<String>)> {
     best
 }
 
+/// Whether the user's harness arguments let a batch run one doctest at a
+/// time and print each name as it starts it: not with their own thread
+/// count, and not with output shown as it is written, which would come
+/// between a name and its result.
+fn batches_allowed(passthrough: &[String]) -> bool {
+    !passthrough.iter().any(|argument| {
+        argument.starts_with("--test-threads")
+            || matches!(
+                argument.as_str(),
+                "--nocapture" | "--no-capture" | "--show-output"
+            )
+    })
+}
+
+/// The selected doctests grouped by the file that holds them, `(file,
+/// names)`, for each file whose name is a filter that selects exactly
+/// them and that holds more than one; and every other selected doctest,
+/// alone.
+fn file_batches(
+    selected: &[String],
+    all: &[String],
+    allowed: bool,
+) -> (Vec<(String, Vec<String>)>, Vec<String>) {
+    let mut by_file = BTreeMap::<&str, Vec<String>>::new();
+    for name in selected {
+        let file = name.split_once(" - ").map_or(name.as_str(), |(file, _)| file);
+        by_file.entry(file).or_default().push(name.clone());
+    }
+    let mut batches = Vec::new();
+    let mut singles = Vec::new();
+    for (file, names) in by_file {
+        let filter_selects_them = !file.contains(char::is_whitespace)
+            && all.iter().filter(|name| name.contains(file)).count() == names.len();
+        if allowed && names.len() > 1 && filter_selects_them {
+            batches.push((file.to_owned(), names));
+        } else {
+            singles.extend(names);
+        }
+    }
+    (batches, singles)
+}
+
+/// The doctest a pass printed `test NAME ... ` for and no result yet: the
+/// one running, when one runs at a time.
+fn started_doctest(text: &str) -> Option<String> {
+    text.rsplit('\n')
+        .next()
+        .and_then(|line| line.strip_prefix("test "))
+        .and_then(|rest| rest.strip_suffix(" ... "))
+        .map(|name| without_test_mode(name).to_owned())
+}
+
+/// One rustdoc running a batch of doctests, its output as `launch_output`
+/// gives it. The output is read as it is written, so each runtool that asks
+/// in `batch` which doctest it was handed is told (`answer_runtools`).
+fn run_batched(command: &mut Command, batch: &Path) -> Result<Output, RustTestRunnerError> {
+    // A runtool asks here; one that cannot finds no answer and fails its
+    // doctest, and the batch's check says so.
+    // fault-site: rust-owned-doctests.run-batched.create-dir-all
+    let _ = fs::create_dir_all(batch);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // fault-site: rust-owned-doctests.run-batched.launch
+        .launch()
+        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    let mut stdout = child.stdout.take().expect("rustdoc's output is piped");
+    let mut stderr = child.stderr.take().expect("rustdoc's errors are piped");
+    let printed = Mutex::new(Vec::new());
+    let errors = std::thread::scope(|scope| {
+        let errors = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        });
+        let reading = scope.spawn(|| {
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let read = stdout.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                printed
+                    .lock()
+                    .expect("doctest output lock")
+                    .extend_from_slice(&chunk[..read]);
+            }
+        });
+        while !reading.is_finished() {
+            let text = String::from_utf8_lossy(&printed.lock().expect("doctest output lock"))
+                .into_owned();
+            answer_runtools(batch, &text);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        errors.join().unwrap_or_default()
+    });
+    let status = child
+        // fault-site: rust-owned-doctests.run-batched.reap
+        .reap()
+        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    Ok(Output {
+        status,
+        stdout: printed.into_inner().expect("doctest output lock"),
+        stderr: errors,
+    })
+}
+
+/// Tells each runtool waiting in `batch` which doctest it was handed: the
+/// one rustdoc's harness started and has not finished. A batch runs one
+/// doctest at a time; libtest prints and flushes `test NAME ... ` before it
+/// starts one, and the doctest waits for its runtool, so the line of the
+/// runtool that asks is in the pipe already. Until it is read, nothing is
+/// started and the runtool waits.
+fn answer_runtools(batch: &Path, text: &str) {
+    let Some(started) = started_doctest(text) else {
+        return;
+    };
+    // fault-site: rust-owned-doctests.answer-runtools.read-dir
+    for entry in fs::read_dir(batch).into_iter().flatten().flatten() {
+        let asked = entry.path();
+        if asked.extension().is_some_and(|extension| extension == "want") {
+            let answer = asked.with_extension("name");
+            let pending = asked.with_extension("answer");
+            // Whole or not at all: written beside, then renamed.
+            // fault-site: rust-owned-doctests.answer-runtools.write
+            let _ = fs::write(&pending, started.as_bytes())
+                .and_then(|()| fs::rename(&pending, &answer))
+                .and_then(|()| fs::remove_file(&asked));
+        }
+    }
+}
+
+/// Which doctest the wrapper says this runtool was handed: asked in the
+/// batch's directory, under this process's id, and waited for.
+fn asked_name() -> Result<String, RustTestRunnerError> {
+    let batch = std::env::var_os(BATCH_DIR_ENV).map(PathBuf::from).unwrap_or_default();
+    let stem = batch.join(std::process::id().to_string());
+    // fault-site: rust-owned-doctests.asked-name.write
+    fs::write(stem.with_extension("want"), b"").map_err(io_error)?;
+    loop {
+        // fault-site: rust-owned-doctests.asked-name.read
+        if let Ok(name) = fs::read_to_string(stem.with_extension("name")) {
+            return Ok(name);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// The lines libtest prints for each test, as `(name, status)`.
 fn harness_lines(text: &str) -> Vec<(String, String)> {
     text.lines()
@@ -806,7 +958,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
     let package_dir = root.join("packages").join(format!("{sequence:08}"));
     fs::create_dir_all(package_dir.join("invocations")).map_err(io_error)?;
 
-    let rustdoc = |harness_arguments: &[String], mode: &str, environment: &[(&str, &str)]| {
+    let command_for = |harness_arguments: &[String], mode: &str, environment: &[(&str, &str)]| {
         let mut command = Command::new(&real);
         command
             .args(&parsed.crate_arguments)
@@ -824,6 +976,9 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             command.env(key, value);
         }
         command
+    };
+    let rustdoc = |harness_arguments: &[String], mode: &str, environment: &[(&str, &str)]| {
+        command_for(harness_arguments, mode, environment)
             // fault-site: rust-owned-doctests.rustdoc-wrapper-inner.launch-output
             .launch_output()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))
@@ -948,8 +1103,11 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
         }
     }
 
-    // Standalone passes: one rustdoc invocation per selected name, in
-    // parallel, each isolating its doctest with a substring filter and skips
+    // Standalone passes, in parallel. The doctests of one file run in one
+    // rustdoc, one after another, its file the filter, each named by the
+    // line libtest prints as it starts it (`run_batched`): the crate is read
+    // once per file rather than once per doctest. Any other doctest has a
+    // rustdoc of its own, isolated with a substring filter and skips
     // (rustdoc splits harness arguments on whitespace, so the name itself
     // can never be a filter) and named in the runtool's environment.
     let selected_standalone = standalone
@@ -957,8 +1115,17 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
         .filter(|name| harness.selects(name))
         .cloned()
         .collect::<Vec<_>>();
-    let mut plans = Vec::new();
-    for name in &selected_standalone {
+    let batching = !only_ignored && merged_set.is_empty() && batches_allowed(&harness.passthrough);
+    let (batches, singles) = file_batches(&selected_standalone, &all_names, batching);
+    let mut plans = batches
+        .into_iter()
+        .map(|(file, names)| {
+            let mut arguments = harness.passthrough.clone();
+            arguments.extend([file, "--test-threads".to_owned(), "1".to_owned()]);
+            (names, arguments)
+        })
+        .collect::<Vec<_>>();
+    for name in &singles {
         let Some((filter, skips)) = isolate(name, &all_names) else {
             return fail_package(
                 &package_dir,
@@ -971,9 +1138,9 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             arguments.push("--skip".to_owned());
             arguments.push(skip);
         }
-        plans.push((name.clone(), arguments));
+        plans.push((vec![name.clone()], arguments));
     }
-    let outputs = Mutex::new(Vec::<(String, Output)>::new());
+    let outputs = Mutex::new(Vec::<(Vec<String>, Output)>::new());
     let next = AtomicUsize::new(0);
     let workers = std::thread::available_parallelism()
         .map(usize::from)
@@ -985,14 +1152,22 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             scope.spawn(|| {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((name, arguments)) = plans.get(index) else {
+                    let Some((names, arguments)) = plans.get(index) else {
                         break;
                     };
-                    match rustdoc(arguments, "named", &[(NAME_ENV, name)]) {
+                    let batch = package_dir.join("batches").join(format!("{index:08}"));
+                    let ran = if let [name] = names.as_slice() {
+                        rustdoc(arguments, "named", &[(NAME_ENV, name)])
+                    } else {
+                        let batch_text = batch.to_string_lossy();
+                        let environment = [(BATCH_DIR_ENV, batch_text.as_ref())];
+                        run_batched(&mut command_for(arguments, "batched", &environment), &batch)
+                    };
+                    match ran {
                         Ok(output) => outputs
                             .lock()
                             .expect("doctest outputs lock")
-                            .push((name.clone(), output)),
+                            .push((names.clone(), output)),
                         Err(error) => {
                             *launch_error.lock().expect("doctest error lock") = Some(error);
                         }
@@ -1014,7 +1189,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             return fail_package(&package_dir, format!("doctest {name} ran more than once"));
         }
     }
-    for (name, output) in &outputs {
+    for (names, output) in &outputs {
         let text = String::from_utf8_lossy(&output.stdout);
         let lines = harness_lines(&text);
         // Under `--ignored` libtest leaves out every doctest that is not
@@ -1027,6 +1202,35 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
         if !output.status.success() {
             exit_code = output.status.code().unwrap_or(1);
         }
+        // A batch must have run each of its doctests once and nothing else.
+        let [name] = names.as_slice() else {
+            let mut expected = names.clone();
+            expected.sort();
+            let mut ran = lines
+                .iter()
+                .map(|(printed, _)| printed.clone())
+                .collect::<Vec<_>>();
+            ran.sort();
+            if ran != expected {
+                return fail_package(
+                    &package_dir,
+                    format!(
+                        "the pass for {} doctest(s) of one file ran {} instead: {}",
+                        expected.len(),
+                        ran.len(),
+                        ran.join(", ")
+                    ),
+                );
+            }
+            for (name, status) in lines {
+                cases.push(DoctestCase {
+                    evidence: standalone_evidence.remove(&name),
+                    name,
+                    status,
+                });
+            }
+            continue;
+        };
         // The pass must have run this doctest and nothing else; the filter
         // is a substring, so check rather than trust.
         let [(printed, status)] = lines.as_slice() else {
@@ -1266,7 +1470,14 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             relay(&output);
             Ok(output.status.code().unwrap_or(1))
         }
-        "named" => {
+        "named" | "batched" => {
+            // Asked before the binary runs, while the harness's line for it
+            // is the last it printed (see `answer_runtools`).
+            let asked = if mode == "batched" {
+                Some(asked_name()?)
+            } else {
+                None
+            };
             let evidence = directory.join("evidence");
             fs::create_dir_all(&evidence).map_err(io_error)?;
             let output = Command::new(&binary)
@@ -1283,11 +1494,14 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                 // fault-site: rust-owned-doctests.doctest-runtool-inner.write-record-2
                 write_record(&record_path, &Invocation::EmptyHarness)?;
             } else {
-                let name = std::env::var(NAME_ENV).map_err(|_| {
-                    RustTestRunnerError::Context(
-                        "a per-name doctest pass did not name its doctest".into(),
-                    )
-                })?;
+                let name = match asked {
+                    Some(name) => name,
+                    None => std::env::var(NAME_ENV).map_err(|_| {
+                        RustTestRunnerError::Context(
+                            "a per-name doctest pass did not name its doctest".into(),
+                        )
+                    })?,
+                };
                 write_record(
                     &record_path,
                     &Invocation::Standalone {
@@ -1422,6 +1636,96 @@ pub fn rustdoc_wrapper_root(arguments: &[String]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's doctests run in one rustdoc when its name selects exactly
+    /// them and it holds more than one; every other doctest runs alone.
+    #[test]
+    fn doctests_are_batched_by_a_file_that_selects_exactly_them() {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let all = names(&[
+            "src/lib.rs - a (line 1)",
+            "src/lib.rs - b (line 5)",
+            "src/one.rs - c (line 1)",
+            "src/x.rs - d (line 1)",
+            "src/x.rs - e (line 9)",
+            "src/x.rs.bak - f (line 1)",
+            "my file.rs - g (line 1)",
+            "my file.rs - h (line 4)",
+        ]);
+        let (batches, singles) = file_batches(&all, &all, true);
+        assert_eq!(
+            batches,
+            [(
+                "src/lib.rs".to_owned(),
+                names(&["src/lib.rs - a (line 1)", "src/lib.rs - b (line 5)"])
+            )]
+        );
+        // One doctest; a file name another holds; a file name with a space.
+        assert_eq!(singles.len(), 6);
+        let (batches, singles) = file_batches(&all, &all, false);
+        assert!(batches.is_empty());
+        assert_eq!(singles.len(), all.len());
+        // A name with no file is its own group.
+        assert_eq!(file_batches(&names(&["x"]), &names(&["x"]), true).1, ["x"]);
+    }
+
+    #[test]
+    fn a_batch_needs_one_doctest_at_a_time_with_nothing_printed_between() {
+        assert!(batches_allowed(&["--ignored".to_owned()]));
+        for argument in [
+            "--test-threads",
+            "--test-threads=2",
+            "--nocapture",
+            "--no-capture",
+            "--show-output",
+        ] {
+            assert!(!batches_allowed(&[argument.to_owned()]), "{argument}");
+        }
+    }
+
+    #[test]
+    fn the_started_doctest_is_the_last_line_with_no_result() {
+        let done = "running 2 tests\ntest src/lib.rs - a (line 1) ... ok\n";
+        assert_eq!(
+            started_doctest(&format!("{done}test src/lib.rs - b (line 5) - should panic ... ")),
+            Some("src/lib.rs - b (line 5)".to_owned())
+        );
+        assert_eq!(started_doctest(done), None);
+        assert_eq!(started_doctest("running 2 tests\ntest src/lib.rs - a"), None);
+        assert_eq!(started_doctest(""), None);
+    }
+
+    /// A runtool waiting in a batch is told the doctest started, once it is,
+    /// and a file that is not a question is left alone.
+    #[test]
+    fn a_waiting_runtool_is_told_the_doctest_started() {
+        let batch = std::env::temp_dir().join(format!(
+            "supercov-doctest-batch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&batch).unwrap();
+        fs::write(batch.join("7.want"), b"").unwrap();
+        fs::write(batch.join("note.txt"), b"").unwrap();
+        answer_runtools(&batch, "running 1 test\n");
+        assert!(!batch.join("7.name").exists());
+        answer_runtools(&batch, "running 1 test\ntest src/lib.rs - a (line 1) ... ");
+        assert_eq!(
+            fs::read_to_string(batch.join("7.name")).unwrap(),
+            "src/lib.rs - a (line 1)"
+        );
+        assert!(!batch.join("7.want").exists());
+        assert!(batch.join("note.txt").exists());
+        fs::remove_dir_all(&batch).ok();
+    }
 
     #[test]
     fn a_doctest_child_names_what_its_environment_lacks() {
