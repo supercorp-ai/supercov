@@ -30,6 +30,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     evidence_archive::write_archive,
@@ -348,6 +349,151 @@ pub struct DirectJvmRunResult {
     pub build: JvmBuild,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
+}
+
+/// What one copy keeps from its last run so the build compiles only what
+/// changed: each Maven module's `target` (or Gradle project's `build`, and
+/// Gradle's `.gradle`), and the digest of every Java and Kotlin source of
+/// those modules as that run left it.
+///
+/// A copy is refreshed from the project for every run, so every source in
+/// it, and every source the instrumentation rewrites, was newer than any
+/// class the last run compiled, and Maven compiled every module again where
+/// the project's own build compiled nothing. Carrying the output over is
+/// not enough on its own: the instrumentation writes its sources after the
+/// output is copied. A source whose bytes are those the last run compiled
+/// is given a time before the copy (`restore_source_times`); one that
+/// changed keeps its new time, and Maven recompiles its module, as it would
+/// in the project. Only a module whose output was carried is touched: a
+/// module's output copied from the project is the project's own build,
+/// uninstrumented, and must never look current.
+#[derive(Default)]
+struct CarriedBuild {
+    /// Build outputs, relative to the copy.
+    outputs: Vec<PathBuf>,
+    /// Module directories whose output is carried, relative to the copy.
+    modules: Vec<PathBuf>,
+    /// Sources of those modules, relative to the copy, by SHA-256.
+    digests: BTreeMap<PathBuf, [u8; 32]>,
+}
+
+/// The build outputs and source digests of `previous`, the copy as the last
+/// run left it, for a Maven or Gradle project. Anything that cannot be read
+/// is left out: what is not carried is built again.
+fn carried_build(build: JvmBuild, previous: &Path) -> CarriedBuild {
+    let mut carried = CarriedBuild::default();
+    let (output, build_files): (&str, &[&str]) = match build {
+        JvmBuild::Maven => ("target", &["pom.xml"]),
+        JvmBuild::Gradle => ("build", &["build.gradle", "build.gradle.kts"]),
+        JvmBuild::Ant | JvmBuild::Plain => return carried,
+    };
+    if build == JvmBuild::Gradle && previous.join(".gradle").is_dir() {
+        carried.outputs.push(PathBuf::from(".gradle"));
+    }
+    let mut pending = vec![PathBuf::new()];
+    let mut sources = Vec::new();
+    while let Some(relative) = pending.pop() {
+        let directory = previous.join(&relative);
+        let has_build_file = build_files
+            .iter()
+            .any(|name| directory.join(name).is_file());
+        if has_build_file && directory.join(output).is_dir() {
+            carried.outputs.push(relative.join(output));
+            carried.modules.push(relative.clone());
+        }
+        // fault-site: jvm-run.carried-build.read-dir
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                // Outputs, dependencies and tools' own directories hold no
+                // source the build compiles from here.
+                if name.starts_with('.') || name == output || name == "node_modules" {
+                    continue;
+                }
+                pending.push(relative.join(&*name));
+            } else if kind.is_file() && (name.ends_with(".java") || name.ends_with(".kt")) {
+                sources.push(relative.join(&*name));
+            }
+        }
+    }
+    for source in sources {
+        let Some(module) = owning_module(&source, previous, build_files) else {
+            continue;
+        };
+        if !carried.modules.contains(&module) {
+            continue;
+        }
+        // fault-site: jvm-run.carried-build.read
+        let Ok(bytes) = fs::read(previous.join(&source)) else {
+            continue;
+        };
+        carried.digests.insert(source, Sha256::digest(&bytes).into());
+    }
+    carried
+}
+
+/// The nearest directory above `source` that holds a build file: the module
+/// that compiles it.
+fn owning_module(source: &Path, copy: &Path, build_files: &[&str]) -> Option<PathBuf> {
+    source
+        .ancestors()
+        .skip(1)
+        .find(|directory| {
+            build_files
+                .iter()
+                .any(|name| copy.join(directory).join(name).is_file())
+        })
+        .map(Path::to_path_buf)
+}
+
+/// Gives each source the last run compiled from the same bytes a time before
+/// `copied_at`, so the output carried over, copied after it, is current for
+/// it. A source that cannot be read or touched keeps its new time and is
+/// compiled again.
+fn restore_source_times(
+    workspace: &Path,
+    carried: &CarriedBuild,
+    copied_at: std::time::SystemTime,
+) {
+    let Some(before) = copied_at.checked_sub(std::time::Duration::from_secs(2)) else {
+        return;
+    };
+    for (source, digest) in &carried.digests {
+        let path = workspace.join(source);
+        // fault-site: jvm-run.restore-source-times.read
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        if <[u8; 32]>::from(Sha256::digest(&bytes)) != *digest {
+            continue;
+        }
+        // fault-site: jvm-run.restore-source-times.open
+        if let Ok(file) = fs::open_with(std::fs::OpenOptions::new().write(true), &path) {
+            let _ = file.set_modified(before);
+        }
+    }
+}
+
+/// Where a run's modules write their evidence: beside the copy, the same
+/// for every run of it, so the test configuration that names it compiles to
+/// the same bytes. Only the run holding the copy's lock writes here, and it
+/// empties it first.
+fn stable_evidence_directory(root: &Path, workspace: &Path) -> PathBuf {
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".{name}.jvm-evidence"))
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -2250,6 +2396,8 @@ pub fn run_direct_jvm(
     // evidence worth keeping; one that failed after has evidence that cost the
     // suite its wall clock.
     let measured = std::cell::Cell::new(false);
+    // Where the modules write their evidence, once the copy is known.
+    let evidence_path = std::cell::RefCell::new(None::<PathBuf>);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -2282,9 +2430,22 @@ pub fn run_direct_jvm(
 
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
-        let workspace =
-            prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
-        let evidence_directory = work_directory.join("jvm");
+        let carried = carried_build(
+            detect_build(&root),
+            &crate::workspace::cached_workspace_path(&root, &lock),
+        );
+        let copied_at = std::time::SystemTime::now();
+        let workspace = prepare_cached_workspace(&root, &lock, &carried.outputs)
+            .map_err(|error| error.to_string())?;
+        let evidence_directory = stable_evidence_directory(&root, &workspace);
+        evidence_path.replace(Some(evidence_directory.clone()));
+        // What an earlier run of this copy left is not this run's: a module
+        // that writes nothing now must not be read as having written that.
+        match fs::remove_dir_all(&evidence_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", evidence_directory.display())),
+        }
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         let ambient = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
         let roots = crate::source_discovery::ExplicitSourceRoots::from_environment_in(
@@ -2298,6 +2459,7 @@ pub fn run_direct_jvm(
             roots.as_ref(),
             None,
         )?;
+        restore_source_times(&workspace, &carried, copied_at);
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
         let _ = writeln!(
@@ -2699,7 +2861,10 @@ pub fn run_direct_jvm(
         if !measured.get() {
             return error;
         }
-        note_kept_evidence(&root, &work_directory.join("jvm"), &request.run_id, error)
+        let Some(evidence) = evidence_path.borrow().clone() else {
+            return error;
+        };
+        note_kept_evidence(&root, &evidence, &request.run_id, error)
     });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
@@ -3121,6 +3286,7 @@ mod tests {
         );
     }
 
+<<<<<<< HEAD
     /// The runtime class compiles with the project's main sources, under the
     /// project's own `--release`: gson builds for Java 7, where a lambda or
     /// a method reference does not compile and the whole build failed.
@@ -3138,6 +3304,65 @@ mod tests {
                 number + 1
             );
         }
+=======
+    /// A Maven module's output is carried to the next run with the digest of
+    /// each of its sources; a source rewritten to the same bytes is dated
+    /// before the copy, so Maven finds the carried classes current for it,
+    /// and one that changed keeps its new time. A module whose output was not
+    /// carried is never touched.
+    #[test]
+    fn a_module_s_output_is_carried_and_only_unchanged_sources_look_compiled() {
+        let base = std::env::temp_dir().join(format!(
+            "supercov-carried-build-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous = base.join("previous");
+        let file = |root: &Path, relative: &str, text: &str| {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        file(&previous, "pom.xml", "<project/>");
+        file(&previous, "target/classes/A.class", "class");
+        file(&previous, "src/main/java/A.java", "class A {}");
+        file(&previous, "src/main/java/B.java", "class B {}");
+        // A module of its own with no output to carry.
+        file(&previous, "tool/pom.xml", "<project/>");
+        file(&previous, "tool/src/main/java/T.java", "class T {}");
+
+        let carried = carried_build(JvmBuild::Maven, &previous);
+        assert_eq!(carried.outputs, [PathBuf::from("target")]);
+        assert_eq!(
+            carried.digests.keys().cloned().collect::<Vec<_>>(),
+            [
+                PathBuf::from("src/main/java/A.java"),
+                PathBuf::from("src/main/java/B.java"),
+            ]
+        );
+        assert!(carried_build(JvmBuild::Ant, &previous).outputs.is_empty());
+
+        let workspace = base.join("workspace");
+        file(&workspace, "src/main/java/A.java", "class A {}");
+        file(&workspace, "src/main/java/B.java", "class B { int b; }");
+        file(&workspace, "tool/src/main/java/T.java", "class T {}");
+        let copied_at = std::time::SystemTime::now();
+        restore_source_times(&workspace, &carried, copied_at);
+        let modified = |relative: &str| {
+            fs::metadata(workspace.join(relative))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        let recent = copied_at - std::time::Duration::from_secs(1);
+        assert!(modified("src/main/java/A.java") < copied_at);
+        assert!(modified("src/main/java/B.java") >= recent);
+        assert!(modified("tool/src/main/java/T.java") >= recent);
+        fs::remove_dir_all(&base).ok();
+>>>>>>> 6b114fa8 (A Maven or Gradle run compiles only what changed since the copy's last run)
     }
 
     #[test]
