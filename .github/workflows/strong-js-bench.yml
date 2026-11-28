@@ -14,9 +14,14 @@ on:
   workflow_dispatch:
     inputs:
       projects:
-        description: "Space-separated project names of the corpus"
+        description: "The corpus projects to measure, a JSON array (`[]` for none)"
         required: false
-        default: "mini-throttle"
+        default: '["mini-throttle", "ms", "dot-prop"]'
+      e2e:
+        description: "Also Rallly's Playwright suite"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -61,13 +66,14 @@ jobs:
   # moves with no change at all.
   measure:
     needs: build
+    if: github.event_name != 'workflow_dispatch' || inputs.projects != '[]'
     name: ${{ matrix.project }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        project: [mini-throttle, ms, dot-prop]
+        project: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.projects || '["mini-throttle", "ms", "dot-prop"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -107,7 +113,7 @@ jobs:
   # the `strong-bench-e2e` label as well.
   e2e:
     needs: build
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'strong-bench-e2e')
+    if: (github.event_name == 'workflow_dispatch' && inputs.e2e) || contains(github.event.pull_request.labels.*.name, 'strong-bench-e2e')
     name: rallly ${{ matrix.variant }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
