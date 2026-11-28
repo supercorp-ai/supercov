@@ -855,6 +855,29 @@ Supercov detects. The five Supercov detects alone each fail the suite as
 written when applied by hand: mutmut does not switch on a mutant in a module
 run with `-m`, or in a decorator applied as the test modules load.
 
+markupsafe 3.0.3 (a C extension beside the pure Python code, every test run
+against both) and semver 3.0.4 (heavily parametrized tests and doctests),
+1,101 mutants, against the same matrix on 4-CPU GitHub-hosted Linux runners,
+2026-11-27 and 2026-11-28: every mutant the matrix detects, Supercov detects,
+with no `error`. The four Supercov detects alone end the test process as it
+runs: in markupsafe's module `__getattr__`, and in semver's `deprecated`
+decorator, applied as the modules load.
+
+The same two projects under other interpreters and launchers, each pass's
+verdicts against those under CPython 3.12 and `python -m pytest`:
+
+| Pass | markupsafe (336) | semver (765) |
+| --- | ---: | ---: |
+| CPython 3.10 | 335 same | 765 same |
+| CPython 3.13 | 336 same | 765 same |
+| pip's `pytest` script | 336 same | 765 same |
+| `uv run` | 336 same | 765 same |
+| `poetry run` | 336 same | 765 same |
+| with the value probes | 336 same | 765 same |
+
+The one difference is a mutant that passes `None` to `str.splitlines`:
+3.10's test fails with it, 3.12's passes.
+
 Wall time with mutmut at one child per CPU and Supercov's forks one per CPU,
 each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
 2026-11-22, parse's pytest-cov off for both:
@@ -865,6 +888,9 @@ each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
 | cachetools 8.0.2 | 1,660 | 44.8 s | 1.6 + 43.6 s |
 | parse 1.22.4 | 1,306 | 56.5 s | 1.4 + 12.6 s |
 | humanize 4.17.0 | 1,348 | 152.3 s | 4.6 + 19.8 s |
+
+On the GitHub-hosted runners above: markupsafe, mutmut 7.8 s, Supercov
+0.8 + 1.4 s; semver, mutmut 23.6 s, Supercov 2.0 + 10.3 s.
 
 ### Rust, against cargo-mutants 27.1.0
 
