@@ -273,6 +273,20 @@ fn stable_evidence_directory(root: &Path, workspace: &Path) -> PathBuf {
         .join(format!(".{name}.go-evidence"))
 }
 
+/// `directory`, emptied: what an earlier run of this copy left is not this
+/// run's, and a package that writes nothing now must not be read as having
+/// written that.
+fn fresh_evidence_directory(root: &Path, directory: &Path) -> Result<(), String> {
+    crate::lifecycle::remove_scratch_tree_deferred(root, directory)
+        .map_err(said)
+        .and_then(|_| fs::create_dir_all(directory).map_err(said))
+}
+
+/// An error as its message.
+fn said(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
 fn evidence_name(directory: &str) -> String {
     let slug = directory
         .chars()
@@ -833,11 +847,7 @@ pub fn run_direct_go(
             prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
         let evidence_directory = stable_evidence_directory(&root, &workspace);
         evidence_path.replace(Some(evidence_directory.clone()));
-        // What an earlier run of this copy left is not this run's: a package
-        // that writes nothing now must not be read as having written that.
-        crate::lifecycle::remove_scratch_tree_deferred(&root, &evidence_directory)
-            .map_err(|error| error.to_string())?;
-        fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
+        fresh_evidence_directory(&root, &evidence_directory)?;
         // Decided before instrumenting, because whether a parallel test can be
         // announced depends on whether anything will be running beside it.
         let command = request.command.clone();
@@ -1408,6 +1418,28 @@ mod tests {
     }
 
     use super::*;
+
+    /// The copy's evidence directory is emptied before a run: an earlier
+    /// run's file is gone. One outside the project's store is refused.
+    #[test]
+    fn the_evidence_directory_starts_each_run_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-go-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = root.join(".supercov/workspaces/workspace/.p.go-evidence");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("old.bin"), b"earlier").unwrap();
+        fresh_evidence_directory(&root, &directory).unwrap();
+        assert!(directory.is_dir());
+        assert!(!directory.join("old.bin").exists());
+        assert!(fresh_evidence_directory(&root, &root.join("elsewhere")).is_err());
+        fs::remove_dir_all(&root).ok();
+    }
 
     /// A file that does not parse is named for the project as it stands.
     #[test]
