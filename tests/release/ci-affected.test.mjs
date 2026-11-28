@@ -139,3 +139,22 @@ test("the merge queue's commit runs as its pull request does, on what the group 
     assert.equal(triage('merge_group', group(), null, workflow).mode, 'full');
   }
 });
+
+test('a map a few merges old misses no test: the files changed since its commit have their tests picked', async () => {
+  const { unmapped } = await import('../../scripts/ci-affected.mjs');
+  // The pull request changes one file; main gained a test file after the map was measured.
+  const pull = ['crates/engine/src/plan.rs'];
+  const sinceMap = ['crates/engine/src/plan.rs', 'crates/cli/tests/added_on_main.rs', 'docs/cli.md'];
+  assert.deepEqual(unmapped(pull, sinceMap), ['crates/engine/src/plan.rs', 'crates/cli/tests/added_on_main.rs', 'docs/cli.md']);
+  // With a map of the base itself, only the pull request's files.
+  assert.deepEqual(unmapped(pull, []), pull);
+  const files = {
+    'crates/engine/src/plan.rs': 'pub fn plan() {}\n',
+    'crates/cli/tests/added_on_main.rs': '#[test]\nfn written_after_the_map() {}\n',
+    'docs/cli.md': '# CLI\n',
+  };
+  const read = (file) => files[file];
+  // The map cannot name the test written on main after it; its file does.
+  assert.deepEqual(testsInFiles(pull, read), []);
+  assert.deepEqual(testsInFiles(unmapped(pull, sinceMap), read), ['written_after_the_map']);
+});

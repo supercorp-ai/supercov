@@ -2860,18 +2860,28 @@ fn diff_snapshot(
     let picks = |tests: &[String]| {
         selected.is_none_or(|selected| tests.iter().any(|test| selected.contains(test)))
     };
-    let lines = index
-        .lines(view)?
+    // Two whole runs are compared by what each covered: which tests covered
+    // it is read only to tell which of them a filter picks.
+    let lines = if selected.is_none() {
+        index.line_places(view)?
+    } else {
+        index.lines(view)?
+    };
+    let lines = lines
         .into_iter()
         .filter(|line| line.covered && picks(&line.tests))
         .map(|line| format!("{}:{}", line.file, line.line))
         .collect();
-    let branches = index
+    let branches = if selected.is_none() {
         // fault-site: coverage-query.diff-snapshot.hit-metadata
-        .hit_metadata(view)?
+        index.hit_places(view)?
+    } else {
+        index.hit_metadata(view)?
+    };
+    let branches = branches
         .into_iter()
         .filter(|metadata| {
-            metadata.obligation == "branch" && !metadata.tests.is_empty() && picks(&metadata.tests)
+            metadata.obligation == "branch" && metadata.reached_by > 0 && picks(&metadata.tests)
         })
         .map(|metadata| {
             // The index Supercov wrote names each branch outcome's branch.

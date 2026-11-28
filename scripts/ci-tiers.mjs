@@ -219,12 +219,14 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     // A merge group's commit is the event's, not the head of the pull
     // request it was made for.
     const sha = name === 'merge_group' ? process.env.GITHUB_SHA : (payload.pull_request?.head?.sha ?? process.env.GITHUB_SHA);
-    // Each night measures main again, but for Self Coverage: a push to main
-    // measured this commit already, and the map it keeps is the measurement.
+    // Each night measures main again, but for Self Coverage when this commit
+    // has a map already: Self Coverage's own schedule (every three hours) or
+    // an older push measured it, and the map it keeps is the measurement.
     let selfCoverage = decision.run;
     if (process.env.GITHUB_EVENT_NAME === 'schedule') {
       const measured = gh('run', 'list', '--repo', repository(), '--workflow', 'self-coverage.yml', '--commit', sha,
-        '--event', 'push', '--status', 'success', '--limit', '1', '--json', 'databaseId', '--jq', 'length').trim();
+        '--status', 'success', '--limit', '20', '--json', 'event',
+        '--jq', '[.[] | select(.event == "schedule" or .event == "push")] | length').trim();
       if (measured !== '0') selfCoverage = false;
     }
     if (decision.pending) post(sha, SLOW, 'pending', decision.pending);

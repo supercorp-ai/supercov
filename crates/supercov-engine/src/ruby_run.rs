@@ -1422,6 +1422,14 @@ pub fn run_strong_ruby(
         "baseline": baseline,
         "sets": sets,
         "results": pass.strong.results.display().to_string(),
+        // Where the CLI says a stop (its budget, a signal), before it signals
+        // the pass (`supercov_strong.rb`, `Pass#stopped?`).
+        "stopped": pass
+            .strong
+            .results
+            .with_file_name(crate::strong_driver::STOPPED_AT)
+            .display()
+            .to_string(),
         "timeouts": pass.strong.timeouts_path().display().to_string(),
         "hitLimit": crate::strong_driver::DEFAULT_HIT_LIMIT,
         "jobs": jobs,

@@ -1075,6 +1075,53 @@ impl<'a> RustObligationCollector<'a> {
         self.manifest.unmeasured = declined.into_iter().collect();
     }
 
+    /// A match guard that holds a `let` and that `let_guard_measured` does
+    /// not measure carries no probe. Its decision, the decision's outcome and
+    /// each `&&` whose left side holds a `let` are declared unmeasured,
+    /// rather than read as never evaluated while the code around them ran.
+    fn decline_let_guards(&mut self, root: &ra_ap_syntax::SyntaxNode) {
+        let mut declined = Vec::new();
+        for condition in root
+            .descendants()
+            .filter_map(ast::MatchGuard::cast)
+            .filter(|guard| !let_guard_measured(guard))
+            .filter_map(|guard| guard.condition())
+            .filter(has_let)
+        {
+            let range = condition.syntax().text_range();
+            let id = stable_id(self.file, "decision", range, "match-guard");
+            declined.push(format!("{id}:outcome"));
+            declined.push(id);
+            declined.extend(
+                condition
+                    .syntax()
+                    .descendants()
+                    .filter_map(ast::BinExpr::cast)
+                    .filter(|binary| {
+                        matches!(binary.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And)))
+                            && binary.lhs().is_some_and(|left| has_let(&left))
+                    })
+                    .filter_map(|binary| binary.rhs())
+                    .map(|right| {
+                        stable_id(
+                            self.file,
+                            "branch",
+                            right.syntax().text_range(),
+                            "logical-and",
+                        )
+                    }),
+            );
+            self.site_limitation(
+                "rust-let-guard-not-measured",
+                range,
+                "A match guard whose arm has alternatives (`A | B if let ...`), or whose lone `let` matches a place (`if let Some(y) = self.field`), cannot carry probes: the guard may run once per alternative, and a place cannot pass through a call without being moved. Its decision is not measured".into(),
+            );
+        }
+        self.manifest.unmeasured.extend(declined);
+        self.manifest.unmeasured.sort();
+        self.manifest.unmeasured.dedup();
+    }
+
     /// One limitation for one kind in this file, at the first site it hides.
     /// The report can then point at a line, and the file listing counts it
     /// against the file it belongs to. `kind` is "source-scope", which the
@@ -1364,6 +1411,7 @@ impl<'a> RustObligationCollector<'a> {
         }
 
         self.decline_unreachable_obligations(root);
+        self.decline_let_guards(root);
         self.leave_out_test_code();
         self.gate_obligations();
 
@@ -2109,6 +2157,28 @@ fn range_after_attributes(node: &impl HasAttrs) -> TextRange {
     })
 }
 
+/// Whether a match guard holding a `let` is measured (`instrument_let_guards`):
+/// its arm has one pattern, so the guard runs at most once per match, and
+/// it is a chain (`a && let P = e`, which only edition 2024 compiles, so a
+/// marker can join it), or a lone `let` whose value is a call's, so the
+/// value can pass through a tuple with the marker without moving a place.
+fn let_guard_measured(guard: &ast::MatchGuard) -> bool {
+    let one_pattern = guard
+        .syntax()
+        .parent()
+        .and_then(ast::MatchArm::cast)
+        .and_then(|arm| arm.pat())
+        .is_some_and(|pattern| !matches!(pattern, ast::Pat::OrPat(_)));
+    let markable = match guard.condition() {
+        Some(ast::Expr::LetExpr(lone)) => matches!(
+            lone.expr(),
+            Some(ast::Expr::CallExpr(_) | ast::Expr::MethodCallExpr(_))
+        ),
+        _ => true,
+    };
+    one_pattern && markable
+}
+
 fn has_let(expression: &ast::Expr) -> bool {
     expression
         .syntax()
@@ -2189,6 +2259,152 @@ fn own_breaks(body: &ast::BlockExpr, label: Option<ast::Label>) -> Vec<TextRange
         })
         .map(|expression| expression.syntax().text_range())
         .collect()
+}
+
+/// The measured `let` guards of a match (`let_guard_measured`), by arm:
+/// `(arm index, frame, operators table)`. Each guard's frame and `&&` table
+/// live in a block around the match, made anew each time it runs. Inside
+/// the guard, a chain gets the markers an `if let` chain gets
+/// (`instrument_let_chain`): `reached` before each `let` and the chain, and
+/// `condition` around every other operand; a lone `let` is marked by a
+/// tuple, `let (true, P) = (reached(..), e)`, which evaluates the marker
+/// first and matches `e` as before. The arms decide the frame: its own arm's
+/// entry as taken, every later arm's as failed, which is where a match goes
+/// when a guard fails.
+fn instrument_let_guards(
+    insertions: &mut Vec<Insertion>,
+    runtime_path: &str,
+    file: &str,
+    expression: &ast::MatchExpr,
+    arms: &[ast::MatchArm],
+    identifiers: &mut BTreeSet<String>,
+) -> Vec<(usize, String, String)> {
+    let mut guards = Vec::new();
+    let mut frames = String::new();
+    for (index, arm) in arms.iter().enumerate() {
+        let Some(guard) = arm.guard() else {
+            continue;
+        };
+        let condition = guard
+            .condition()
+            .expect("a parsed match guard has a condition");
+        if !has_let(&condition) || !let_guard_measured(&guard) {
+            continue;
+        }
+        let range = condition.syntax().text_range();
+        let id = stable_id(file, "decision", range, "match-guard");
+        let mut atoms = Vec::new();
+        RustObligationCollector::atomic_condition_ranges(&condition, &mut atoms);
+        let lets = condition
+            .syntax()
+            .descendants()
+            .filter_map(ast::LetExpr::cast)
+            .map(|expression| expression.syntax().text_range())
+            .collect::<Vec<_>>();
+        let frame = allocate_frame_name(file, &condition, "match-guard", identifiers);
+        let table = allocate_chain_table_name(file, &condition, identifiers);
+        let mut operators = Vec::new();
+        for binary in condition
+            .syntax()
+            .descendants()
+            .filter_map(ast::BinExpr::cast)
+            .filter(|binary| matches!(binary.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And))))
+        {
+            let (left, right) = (
+                binary
+                    .lhs()
+                    .expect("a tree parsed without errors has every part its syntax requires"),
+                binary
+                    .rhs()
+                    .expect("a tree parsed without errors has every part its syntax requires"),
+            );
+            if !has_let(&left) {
+                continue;
+            }
+            let branch = stable_id(file, "branch", right.syntax().text_range(), "logical-and");
+            let right_range = right.syntax().text_range();
+            let first = atoms
+                .iter()
+                .position(|atom| right_range.contains_range(*atom))
+                .expect("every operand holds a condition");
+            operators.push(format!(
+                "({first}, {}, {})",
+                hit_ordinal(&format!("{branch}:short-circuit")),
+                hit_ordinal(&format!("{branch}:evaluated"))
+            ));
+        }
+        frames.push_str(&format!(
+            "const {table}: &[(usize, u32, u32)] = &[{}]; let mut {frame} = {runtime_path}::DecisionFrame::new({}, {}); ",
+            operators.join(", "),
+            decision_ordinal(&id),
+            atoms.len()
+        ));
+        if let ast::Expr::LetExpr(lone) = &condition {
+            let pattern = lone
+                .pat()
+                .expect("a tree parsed without errors has every part its syntax requires")
+                .syntax()
+                .text_range();
+            let value = lone
+                .expr()
+                .expect("a tree parsed without errors has every part its syntax requires")
+                .syntax()
+                .text_range();
+            push_wrapper(
+                insertions,
+                pattern,
+                pattern,
+                1,
+                "(true, ".into(),
+                ")".into(),
+            );
+            push_wrapper(
+                insertions,
+                value,
+                value,
+                1,
+                format!("({runtime_path}::reached(&mut {frame}, 0), "),
+                ")".into(),
+            );
+        } else {
+            push_direct(
+                insertions,
+                usize::from(range.start()),
+                format!("{runtime_path}::reached(&mut {frame}, 0) && "),
+            );
+            atoms.iter().enumerate().for_each(|(position, atom)| {
+                if !lets.contains(atom) {
+                    push_wrapper(
+                        insertions,
+                        *atom,
+                        *atom,
+                        1,
+                        format!("{runtime_path}::condition(("),
+                        format!("), &mut {frame}, {position})"),
+                    );
+                } else if position > 0 {
+                    push_direct(
+                        insertions,
+                        usize::from(atom.start()),
+                        format!("{runtime_path}::reached(&mut {frame}, {position}) && "),
+                    );
+                }
+            });
+        }
+        guards.push((index, frame, table));
+    }
+    if !frames.is_empty() {
+        let host = range_after_attributes(expression);
+        push_wrapper(
+            insertions,
+            host,
+            host,
+            1,
+            format!("{{ {frames}"),
+            " }".into(),
+        );
+    }
+    guards
 }
 
 /// A decision whose condition holds a `let`. A `let` cannot pass through a
@@ -2860,12 +3076,31 @@ fn numbered_file(
             // doctest further down the file is reported.
             format!(" const {table}: &[u32] = &[{entries}];"),
         );
+        // Its measured `let` guards: a frame each, around the match, decided
+        // at the entry of its own arm (taken) and of every arm after it (the
+        // guard failed, if it ran: a frame no guard reached records nothing).
+        let guards = instrument_let_guards(
+            &mut insertions,
+            runtime_path,
+            file,
+            &expression,
+            &arms,
+            &mut identifiers,
+        );
         // Not empty: a match with no arm was passed over above.
         arms.iter().enumerate().for_each(|(index, arm)| {
             let body = arm
                 .expr()
                 .expect("a tree parsed without errors has every part its syntax requires");
-            let call = format!("{runtime_path}::arms({table}, {index});");
+            let mut call = format!("{runtime_path}::arms({table}, {index});");
+            for (guarded, frame, operators) in &guards {
+                if *guarded <= index {
+                    call.push_str(&format!(
+                        " {runtime_path}::decision_chain(&mut {frame}, {}, {operators});",
+                        *guarded == index
+                    ));
+                }
+            }
             match &body {
                 ast::Expr::BlockExpr(block) if plain_block(block) => {
                     push_direct(&mut insertions, block_entry(block), format!(" {call}"));
@@ -5621,6 +5856,135 @@ fn main() {
         );
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stdout, b"8\n");
+    }
+
+    /// A match guard holding a `let` is measured where it runs at most once
+    /// per match and can be marked: a chain, or a lone `let` of a call's
+    /// value. Otherwise -- an arm of several patterns, a lone `let` of a
+    /// place -- it is declared unmeasured with the `&&` whose left side
+    /// holds the `let`, rather than read as never evaluated while the lines
+    /// around it ran. A guard without a `let` is measured as before.
+    #[test]
+    fn a_match_guard_holding_a_let_is_measured_or_declared() {
+        let source = r#"pub fn pick(value: Option<u32>, other: Option<u32>, ready: bool) -> u32 {
+    match value {
+        Some(x) if let Some(y) = x.checked_sub(1) => y,
+        Some(x) if ready && let Some(y) = x.checked_add(1) && y > 2 => y,
+        Some(1) | Some(2) if let Some(y) = other.map(|o| o + 1) && y > 3 => y,
+        Some(x) if let Some(y) = other => x + y,
+        Some(x) if x > 3 || ready => x,
+        _ => 0,
+    }
+}
+"#;
+        let manifest = build_rust_manifest("src/lib.rs", source).unwrap();
+        let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+        let guards = manifest
+            .decisions
+            .iter()
+            .filter(|decision| decision.kind == "match-guard")
+            .map(|decision| (decision.source.as_str(), declined.contains(&decision.id)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            guards,
+            BTreeSet::from([
+                ("let Some(y) = x.checked_sub(1)", false),
+                ("ready && let Some(y) = x.checked_add(1) && y > 2", false),
+                ("let Some(y) = other.map(|o| o + 1) && y > 3", true),
+                ("let Some(y) = other", true),
+                ("x > 3 || ready", false),
+            ])
+        );
+        for decision in &manifest.decisions {
+            let outcome = format!("{}:outcome", decision.id);
+            assert_eq!(
+                declined.contains(&outcome),
+                declined.contains(&decision.id),
+                "{}",
+                decision.source
+            );
+        }
+        // The `&&` after the `let` goes with its declared guard.
+        let declined_operators = manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "logical-and" && declined.contains(&branch.id))
+            .map(|branch| branch.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(declined_operators, ["y > 3"]);
+        // Placed where measured, and nowhere else.
+        let transformed =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert_eq!(
+            transformed.code.matches("const __SUPERCOV_CHAIN_").count(),
+            2
+        );
+        assert!(
+            manifest
+                .limitations
+                .iter()
+                .any(|limitation| limitation["id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("rust-let-guard-not-measured"))),
+            "{:?}",
+            manifest.limitations
+        );
+    }
+
+    /// A measured `let` guard keeps what the match does: which arm runs, with
+    /// which bindings, a guard failing to the arms after it.
+    #[test]
+    fn let_guards_keep_their_behavior() {
+        let source = r#"fn pick(value: Option<u32>, ready: bool) -> u32 {
+    match value {
+        Some(x) if let Some(y) = x.checked_sub(5) => y,
+        Some(x) if ready && let Some(y) = x.checked_mul(3) && y > 2 => y + 100,
+        Some(x) if x > 1 => x + 1000,
+        Some(x) => x + 10_000,
+        None => 0,
+    }
+}
+
+fn names(values: &[&str]) -> usize {
+    let mut total = 0;
+    for value in values {
+        total += match value.len() {
+            0 => 0,
+            n if let Some(first) = value.chars().next() && first.is_uppercase() => n * 2,
+            n => n,
+        };
+    }
+    total
+}
+
+fn main() {
+    for value in [Some(9), Some(4), Some(1), Some(0), None] {
+        for ready in [true, false] {
+            println!("{value:?} {ready} {}", pick(value, ready));
+        }
+    }
+    println!("{}", names(&["Ab", "cd", "", "Xyz"]));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert!(
+            transformed.manifest.unmeasured.is_empty(),
+            "{:?}",
+            transformed.manifest.unmeasured
+        );
+        assert_eq!(
+            transformed.code.matches("const __SUPERCOV_CHAIN_").count(),
+            3
+        );
+        let original = compile_and_run(source, "original-let-guards");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-let-guards",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
     }
 
     #[test]

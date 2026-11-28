@@ -27,7 +27,9 @@ starts:
   a forked baseline of the tests the pass needs, then one forked process per
   mutant with the mutant on, running its candidate tests in collection order
   and stopping at the first that fails. Each mutant's verdict is appended to
-  `SUPERCOV_STRONG_RESULTS` as it is decided.
+  `SUPERCOV_STRONG_RESULTS` as it is decided. A pass told to stop (its
+  budget or a signal: `stopped-at` beside the results, an interrupt or a
+  SIGTERM) ends its processes and judges nothing they said from then on.
 
 Stdlib only, CPython 3.9 or newer, POSIX (the driver forks).
 """
@@ -48,6 +50,9 @@ LIMIT_ENV = "SUPERCOV_MUTANT_HIT_LIMIT"
 WORKERS_ENV = "SUPERCOV_STRONG_WORKERS"
 ONLY_ENV = "SUPERCOV_STRONG_ONLY"
 TIMEOUT_CODE = "SUPERCOV_MUTANT_TIMEOUT"
+# Beside the results: when the pass began to stop (its budget, a signal),
+# written by Supercov before it signals the command.
+STOPPED_AT = "stopped-at"
 DEFAULT_LIMIT = 1_000_000
 SCHEMATA_VERSION = 1
 
@@ -658,6 +663,10 @@ def _workers() -> int:
         return max(1, os.cpu_count() or 1)
 
 
+class _Stopped(Exception):
+    """The pass was told to stop: nothing more is judged."""
+
+
 class _Child:
     """A forked process running tests, and what it reported so far."""
 
@@ -670,7 +679,21 @@ class _Child:
         self.buffer = b""
         self.events: list = []
         self.ended = False
+        # It heard the pass's stop (an interrupt, a SIGTERM) and ended.
+        self.stopped = False
         self.status = None
+
+    def take(self, lines) -> None:
+        """What the process wrote: a test's place, outcome and time, `end`
+        once its tests ended, or `stopped`."""
+        for line in lines:
+            if line == b"end":
+                self.ended = True
+            elif line == b"stopped":
+                self.stopped = True
+            elif line:
+                place, outcome, ms = line.decode().split(" ")
+                self.events.append((int(place), outcome, int(ms)))
 
 
 class Driver:
@@ -687,6 +710,7 @@ class Driver:
         self.runner = runner
         self.results = results
         self.timeouts = results + ".timeouts.jsonl"
+        self.stopped_at = os.path.join(os.path.dirname(results), STOPPED_AT)
         self.position = {runner.test_id(item): at for at, item in enumerate(runner.items)}
         # Whether a test fails without a mutant after given tests, by the
         # tests before it and it: what a confirmation found.
@@ -700,6 +724,7 @@ class Driver:
             "confirmations": 0,
             "overturned": 0,
             "baselineMs": 0,
+            "aloneReruns": 0,
         }
 
     # A test's place in collection order, or None where this runner did not
@@ -723,6 +748,9 @@ class Driver:
                 "reason": reason,
             }
         )
+
+    def _stopping(self) -> bool:
+        return os.path.exists(self.stopped_at)
 
     def _timed_out(self, mutant) -> bool:
         name = f"{mutant['file']}#{mutant['index']}"
@@ -758,6 +786,11 @@ class Driver:
 
                 self.runner.run(items, report, stop_at_failure)
                 os.write(writer, b"end\n")
+            except KeyboardInterrupt:
+                # The pass's stop reached this process before the pass's
+                # own: what its test was doing says nothing of the mutant.
+                os.write(writer, b"stopped\n")
+                code = 1
             except BaseException:  # noqa: BLE001 - the parent reads the missing end
                 code = 1
             finally:
@@ -805,12 +838,7 @@ class Driver:
                 break
             child.buffer += chunk
         *lines, child.buffer = child.buffer.split(b"\n")
-        for line in lines:
-            if line == b"end":
-                child.ended = True
-                continue
-            place, outcome, ms = line.decode().split(" ")
-            child.events.append((int(place), outcome, int(ms)))
+        child.take(lines)
         process = getattr(child, "process", None)
         if process is not None:
             done = process.poll()
@@ -835,12 +863,7 @@ class Driver:
                 break
             child.buffer += chunk
         *lines, child.buffer = child.buffer.split(b"\n")
-        for line in lines:
-            if line == b"end":
-                child.ended = True
-            elif line:
-                place, outcome, ms = line.decode().split(" ")
-                child.events.append((int(place), outcome, int(ms)))
+        child.take(lines)
         os.close(child.reader)
         return True
 
@@ -876,10 +899,7 @@ class Driver:
             if not chunk:
                 break
             child.buffer += chunk
-        for line in child.buffer.split(b"\n"):
-            if line and line != b"end":
-                place, outcome, ms = line.decode().split(" ")
-                child.events.append((int(place), outcome, int(ms)))
+        child.take(child.buffer.split(b"\n"))
         os.close(child.reader)
 
     def _run_jobs(self, jobs, on_done) -> None:
@@ -890,34 +910,53 @@ class Driver:
         running: list = []
         try:
             self._loop(pending, running, workers, on_done)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, _Stopped):
             # The forks are process groups of their own, which the
-            # interrupt did not reach.
+            # interrupt may not have reached.
             for child in running:
                 self._kill(child)
             raise
 
+    def _start(self, job):
+        job.setdefault("began", time.monotonic())
+        if job.get("fresh"):
+            return self._spawn_fresh(job, job["places"], job["limit"])
+        return self._fork(job, job["places"], job["stop"], job["limit"])
+
     def _loop(self, pending, running, workers, on_done) -> None:
-        while pending or running:
+        # Jobs that run with nothing beside them (`alone`), once every other
+        # job has ended: a mutant's tests that ran past their limit beside
+        # others, run again where a busier machine cannot be the reason.
+        alone: list = []
+
+        def queue(more):
+            for job in reversed(more or []):
+                (alone if job.get("alone") else pending).insert(0, job)
+
+        while pending or running or alone:
+            if self._stopping():
+                raise _Stopped()
             while pending and len(running) < workers:
-                job = pending.pop(0)
-                job.setdefault("began", time.monotonic())
-                if job.get("fresh"):
-                    running.append(self._spawn_fresh(job, job["places"], job["limit"]))
-                else:
-                    running.append(self._fork(job, job["places"], job["stop"], job["limit"]))
+                running.append(self._start(pending.pop(0)))
+            if not pending and not running and alone:
+                running.append(self._start(alone.pop(0)))
             time.sleep(0.002)
             still = []
-            for child in running:
+            for at, child in enumerate(running):
                 if self._poll(child):
-                    more = on_done(child.job, child, False)
-                    pending[0:0] = more or []
+                    ended = True
                 elif time.monotonic() - child.started > child.limit_s:
                     self._kill(child)
-                    more = on_done(child.job, child, True)
-                    pending[0:0] = more or []
+                    ended = False
                 else:
                     still.append(child)
+                    continue
+                # A process that heard the stop, or ended once the pass was
+                # stopping, says nothing of its mutant.
+                if child.stopped or self._stopping():
+                    running[:] = still + running[at + 1 :]
+                    raise _Stopped()
+                queue(on_done(child.job, child, not ended))
             running[:] = still
 
     def run(self) -> None:
@@ -996,6 +1035,8 @@ class Driver:
             )
 
         def on_mutant(job, child, timed_out):
+            if job.get("rebaseline"):
+                return self._rebaselined(job["rebaseline"], child, timed_out)
             mutant = job["mutant"]
             ran = len(child.events)
             failure = next((event for event in child.events if event[1] == "failed"), None)
@@ -1031,7 +1072,29 @@ class Driver:
                 self._verdict(mutant, "killed", killed_by=self.runner.test_id(self.runner.items[place]), tests=ran, started=job["began"])
                 return None
             if timed_out:
-                self._verdict(mutant, "timeout", tests=ran, started=job["began"], reason="its tests ran past their time limit")
+                if not job.get("alone"):
+                    # Past its limit beside other forks: the machine may have
+                    # been busier than when the baseline ran. Its tests run
+                    # again alone, first without the mutant, whose time sets
+                    # the limit, then with it.
+                    self.summary["aloneReruns"] += 1
+                    return [
+                        {
+                            "mutant": None,
+                            "rebaseline": job,
+                            "places": job["places"],
+                            "stop": False,
+                            "limit": max(600.0, job["limit"]),
+                            "alone": True,
+                        }
+                    ]
+                self._verdict(
+                    mutant,
+                    "timeout",
+                    tests=ran,
+                    started=job["began"],
+                    reason=f"its tests ran past their time limit ({job['limit']:.1f} s), run alone after a run without the mutant",
+                )
                 return None
             if not child.ended:
                 at = job["places"][ran] if ran < len(job["places"]) else None
@@ -1051,6 +1114,23 @@ class Driver:
         self._run_jobs(jobs, on_mutant)
         self.summary["durationMs"] = int((time.monotonic() - started) * 1000)
         self._write(self.summary)
+
+    def _rebaselined(self, job, child, timed_out):
+        """The mutant's tests, run alone without it after they ran past their
+        limit with it: their time sets the limit of the mutant's run alone."""
+        if timed_out or not child.ended:
+            self._verdict(
+                job["mutant"],
+                "error",
+                tests=len(child.events),
+                started=job["began"],
+                reason="its tests ran past their time limit with it, and did not finish without it either",
+            )
+            return None
+        took = sum(ms for _, _, ms in child.events)
+        fresh = 5 if job.get("fresh") else 0
+        limit = max(job["limit"], 3 * took / 1000 + 10 + fresh)
+        return [dict(job, limit=limit, alone=True)]
 
     def _confirmed(self, confirming, child, failure):
         job = confirming["confirming"]
@@ -1087,7 +1167,11 @@ def _only():
 
 def run_only(runner) -> None:
     """Runs one mutant's tests in this interpreter, the mutant on from its
-    start, and reports each to the driver that started it."""
+    start, and reports each to the driver that started it. A SIGTERM, as an
+    interrupt, says it heard the pass's stop."""
+    import signal
+
+    signal.signal(signal.SIGTERM, _interrupt)
     only = _only()
     os.environ.pop(PLAN_ENV, None)
     os.environ.pop(ONLY_ENV, None)
@@ -1107,7 +1191,11 @@ def run_only(runner) -> None:
     def report(at, outcome, ms):
         os.write(writer, f"{places[at]} {outcome} {ms}\n".encode())
 
-    runner.run(items, report, True)
+    try:
+        runner.run(items, report, True)
+    except KeyboardInterrupt:
+        os.write(writer, b"stopped\n")
+        raise
     os.write(writer, b"end\n")
 
 
@@ -1177,12 +1265,21 @@ def run_pytest(session) -> bool:
     return True
 
 
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt()
+
+
 def _drive(runner) -> None:
-    """The pass; an interrupt ends the process at once, with no runner's
-    report of it, as Supercov says the pass was interrupted."""
+    """The pass; an interrupt, a SIGTERM or the pass's stop ends the process
+    at once, with no runner's report of it, as Supercov says the pass was
+    stopped. Its forks inherit the SIGTERM handler, so each says it heard
+    the stop rather than ending as a test would that a mutant killed."""
+    import signal
+
+    signal.signal(signal.SIGTERM, _interrupt)
     try:
         Driver(Plan(os.environ[PLAN_ENV]), runner, os.environ[RESULTS_ENV]).run()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, _Stopped):
         os._exit(130)
 
 

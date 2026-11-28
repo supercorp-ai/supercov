@@ -2113,6 +2113,31 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
     assert!(!lines.contains(&absent));
 }
 
+/// A match guard holding a `let` is measured both ways: taken at its arm,
+/// failed at the arm the match went to instead. It was read as never
+/// evaluated in either direction while the lines around it ran.
+#[test]
+fn a_match_guard_holding_a_let_is_measured_both_ways() {
+    let project = Project::empty("let-guard");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"guards\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn pick(value: Option<u32>) -> u32 {\n    match value {\n        Some(x) if let Some(y) = x.checked_sub(5) => y,\n        Some(x) => x + 10,\n        None => 0,\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn both_ways() {\n        assert_eq!(super::pick(Some(9)), 4);\n        assert_eq!(super::pick(Some(1)), 11);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let decision = project
+        .supercov(&["runs", "latest", "decision", "src/lib.rs:3"])
+        .succeeds();
+    contains_all(
+        &decision,
+        &["let Some(y) = x.checked_sub(5)", "T -> T", "F -> F"],
+    );
+}
+
 #[test]
 fn a_closure_in_a_static_is_measured_and_a_const_block_is_declined_in_a_counted_file() {
     let project = Project::empty("const-contexts");
@@ -13625,6 +13650,19 @@ fn the_wrangler_shim_hands_over_or_says_why_it_cannot() {
     );
     assert_eq!(handed.code(), 3, "{}", handed.stderr());
     assert_eq!(handed.stdout(), "wrangler deploy --name it\n");
+    // In a strong pass's test, as asked where it is no local `wrangler dev`;
+    // and the reach poller wants its five arguments.
+    let strong = project.supercov_with(
+        &["__wrangler", "deploy", "--name", "it"],
+        &[
+            ("SUPERCOV_WRANGLER", real),
+            ("SUPERCOV_STRONG_WORKER", "b1"),
+            ("SUPERCOV_ACTIVE_MUTANT", "src/lib.rs#0"),
+        ],
+    );
+    assert_eq!(strong.code(), 3, "{}", strong.stderr());
+    assert_eq!(strong.stdout(), "wrangler deploy --name it\n");
+    assert_eq!(project.supercov(&["__wrangler-reach", "1"]).code(), 2);
     // The poller wants a process, a port and where to write; given a
     // process already gone, it ends.
     assert_eq!(project.supercov(&["__wrangler-poll"]).code(), 2);
@@ -15069,6 +15107,9 @@ case "$mode" in
     fi
     if [ -f "$fake/named.out" ]; then cat "$fake/named.out"; else printf 'test %s ... ok\n' "$SUPERCOV_DOCTEST_NAME"; fi
     exit "$(cat "$fake/named.status" 2>/dev/null || echo 0)" ;;
+  batched)
+    cat "$fake/batched.out" 2>/dev/null
+    exit 0 ;;
 esac
 "#;
 
@@ -15325,6 +15366,8 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
         recorded.starts_with("the pass for doctest src/lib.rs - s (line 3) ran 2 doctest(s)"),
         "{recorded}"
     );
+    // Run alone (a thread count of the user's own keeps a file's doctests
+    // from running as one batch).
     let (ran, recorded) = wrap_rustdoc(
         &project,
         "alike",
@@ -15332,12 +15375,30 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
             "standalone",
             "src/lib.rs - a b (line 3): test\nsrc/lib.rs - b a (line 3): test\n",
         )],
-        &["--test", "src/lib.rs"],
+        &["--test", "src/lib.rs", "--test-args", "--test-threads=2"],
     );
     ran.exits(101);
     assert_eq!(
         recorded,
         "doctest src/lib.rs - a b (line 3) cannot be told apart from another doctest by a filter"
+    );
+    // A file's batch must run each of its doctests, once.
+    let (ran, recorded) = wrap_rustdoc(
+        &project,
+        "batch-short",
+        &[
+            (
+                "standalone",
+                "src/lib.rs - s (line 3): test\nsrc/lib.rs - t (line 7): test\n",
+            ),
+            ("batched.out", "test src/lib.rs - s (line 3) ... ok\n"),
+        ],
+        &["--test", "src/lib.rs"],
+    );
+    ran.exits(101);
+    assert_eq!(
+        recorded,
+        "the pass for 2 doctest(s) of one file ran 1 instead: src/lib.rs - s (line 3)"
     );
     // Under `--ignored` a pass that runs and reports nothing passed over a
     // doctest that is not ignored...
@@ -15403,6 +15464,82 @@ fn a_per_name_doctest_pass_must_run_its_doctest_alone_and_once() {
     );
     let output = ran.exits(101);
     assert!(output.contains("could not launch"), "{output}");
+}
+
+/// The doctests of one file run in one rustdoc, one after another, each
+/// named by the line its harness printed as it started it: every doctest
+/// is a test of its own, with its own evidence, as when each ran alone. A
+/// file with one doctest runs it alone. A step of the batch that fails is
+/// named.
+#[test]
+fn doctests_of_one_file_run_in_one_rustdoc_each_named() {
+    let crate_with_doctests = |label: &str| {
+        let project = Project::empty(label);
+        project.write(
+            "Cargo.toml",
+            "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        );
+        project.write(
+            "src/lib.rs",
+            "pub mod one;\n\n/// ```\n/// assert_eq!(w::double(1), 2);\n/// ```\npub fn double(n: u32) -> u32 {\n    if n == 0 { 0 } else { n * 2 }\n}\n\n/// ```\n/// assert_eq!(w::half(4), 2);\n/// ```\n///\n/// ```should_panic\n/// w::half(1);\n/// ```\npub fn half(n: u32) -> u32 {\n    assert!(n % 2 == 0, \"odd\");\n    n / 2\n}\n",
+        );
+        project.write(
+            "src/one.rs",
+            "/// ```\n/// assert_eq!(w::one::one(), 1);\n/// ```\npub fn one() -> u32 {\n    1\n}\n",
+        );
+        project.write(".gitignore", "target/\n");
+        project.git(&["init", "-q"]);
+        project.commit("fixture");
+        project
+    };
+    let project = crate_with_doctests("doctest-batches");
+    let ran = project.supercov(&["--", "cargo", "test", "-q"]);
+    assert_eq!(ran.code(), 0, "{}", ran.stderr());
+    assert!(
+        ran.stderr().contains("Rust coverage: 4 test(s)"),
+        "{}",
+        ran.stderr()
+    );
+    // Each doctest reached its own function, and no other doctest's.
+    let half = project
+        .supercov(&["runs", "latest", "test", "src/lib.rs - half (line 14)"])
+        .succeeds();
+    assert!(half.contains("passed"), "{half}");
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/lib.rs:18"])
+        .succeeds();
+    assert!(
+        line.contains("src/lib.rs - half (line 10)")
+            && line.contains("src/lib.rs - half (line 14)")
+            && !line.contains("double (line 3)"),
+        "{line}"
+    );
+
+    let stand_in = "env:SUPERCOV_DOCTEST_WRAPPER_ROOT/";
+    for (fault, place) in [
+        (
+            format!("{stand_in}spawn#rust-owned-doctests.run-batched.launch"),
+            "rust-owned-doctests.run-batched.launch",
+        ),
+        (
+            format!("{stand_in}wait#rust-owned-doctests.run-batched.reap"),
+            "rust-owned-doctests.run-batched.reap",
+        ),
+        (
+            "__doctest-runner/fs.write#rust-owned-doctests.asked-name.write".to_owned(),
+            "rust-owned-doctests.asked-name.write",
+        ),
+    ] {
+        let project = crate_with_doctests("doctest-batch-steps");
+        let ran = project.supercov_with(
+            &["--", "cargo", "test", "-q"],
+            &[("SUPERCOV_TEST_FAULT", fault.as_str())],
+        );
+        let said = format!("{}{}", ran.stdout(), ran.stderr());
+        assert_ne!(ran.code(), 0, "{fault}: {said}");
+        assert!(fired_at(&said, place), "{fault}: {said}");
+        assert!(!said.contains("panicked at"), "{fault}: {said}");
+    }
 }
 
 #[cfg(unix)]
@@ -28004,6 +28141,7 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     project
         .supercov_with(&["--", "node", "e2e.mjs"], &roots)
         .succeeds();
+    let measuring_ms = measuring.elapsed().as_millis();
     let measuring = measuring.elapsed().as_secs();
     let _ = std::fs::remove_file(&listed);
     let planning = std::time::Instant::now();
@@ -28078,10 +28216,17 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         listings.iter().all(|(count, _)| *count == "30"),
         "{counts}\n{context}"
     );
-    // The main pass's three processes each began its tests within seconds
-    // of being started (a second apart, after the list), whatever the
-    // plan's size: each runner's status says when (one whose tests' mutants
-    // were all decided by then runs none of them).
+    // The main pass's three processes each began its tests about as soon
+    // after the list as the measured run's processes ran theirs, whatever
+    // the plan's size: each runner's status says when (one whose tests'
+    // mutants were all decided by then runs none of them). The yardstick is
+    // the measured run of the same suite on the same machine, the list and
+    // all three processes with their servers: a process that read the
+    // whole plan, or made every copy of every test as it loaded, spent
+    // minutes before its first test, many times that run. A fixed 20 s was
+    // the machine's speed more than the pass's: under self-coverage on a
+    // loaded runner the processes began at 32-34 s, where the measured run
+    // was as slow.
     let listed_at = listings[0].1.parse::<i64>().unwrap();
     let status = std::fs::read_dir(project.root.join(".supercov/strong"))
         .unwrap()
@@ -28106,9 +28251,10 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .map(|started| started - listed_at)
         .collect::<Vec<_>>();
     eprintln!("first test of each process, ms after the list: {waits:?}");
+    let bound = 20_000_i64.max(2 * i64::try_from(measuring_ms).unwrap_or(i64::MAX / 2));
     assert!(
-        waits.iter().all(|wait| *wait < 20_000),
-        "{waits:?}\n{context}"
+        waits.iter().all(|wait| *wait < bound),
+        "{waits:?} against {bound} ms (twice the measured run's {measuring_ms} ms)\n{context}"
     );
     // One verdict a mutant, and none an error: no baseline went missing.
     assert_eq!(reply["summary"]["error"], 0, "{context}");
@@ -30988,6 +31134,98 @@ fn ruby_mutants_are_mutant_gems_and_the_strong_pass_runs_them_in_minitest() {
         "no-coverage",
         "{strong}"
     );
+}
+
+/// Ctrl-C during a Ruby strong pass, sent to Supercov's process group as a
+/// terminal sends it, ends the pass at once, though the suite only notes the
+/// signal (as RSpec's handler does), and judges nothing it cut short: the
+/// mutant whose test was running gets no verdict.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_ruby_pass_stops_at_once_and_judges_nothing_it_cut_short() {
+    use std::os::unix::process::CommandExt;
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong-interrupted");
+    project.write(
+        "lib/calc.rb",
+        "class Calc\n  def big?(n)\n    n > 10\n  end\nend\n",
+    );
+    // With a mutant on, the test says which processes run it, then waits.
+    project.write(
+        "test/calc_test.rb",
+        "require 'minitest/autorun'\nrequire 'calc'\n\n# As RSpec's handler does, these only note the signal.\ntrap('INT') {}\ntrap('TERM') {}\n\nclass CalcTest < Minitest::Test\n  def test_big\n    assert Calc.new.big?(20)\n    mutant = ENV['SUPERCOV_ACTIVE_MUTANT'].to_s\n    return if mutant.empty? || mutant == '-'\n\n    marker = ENV.fetch('SUPERCOV_TEST_MARKER')\n    File.write(\"#{marker}.#{Process.pid}\", \"#{Process.pid} #{Process.ppid}\")\n    File.rename(\"#{marker}.#{Process.pid}\", marker)\n    sleep 60\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/calc_test.rb"])
+        .succeeds();
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["runs", "latest", "mutants", "test"])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(240),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    let interrupted = std::time::Instant::now();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    supercov.wait().unwrap();
+    let stopped_in = interrupted.elapsed();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..20).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
+    // The CLI ends a pass that has not stopped after 8 s: this one stopped
+    // when it was told.
+    assert!(
+        stopped_in < std::time::Duration::from_secs(5),
+        "the pass took {stopped_in:?} to stop"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    for mutant in listed["data"]["mutants"].as_array().unwrap() {
+        let strong = &mutant["strong"];
+        assert!(
+            strong["status"] != "timeout"
+                && !strong["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("before its tests did"),
+            "a mutant the stop cut short was judged: {mutant}"
+        );
+    }
 }
 
 /// Go's strong pass: every Gremlins mutant of a module, run in test

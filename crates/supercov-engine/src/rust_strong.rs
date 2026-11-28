@@ -510,6 +510,21 @@ fn pass(
     // The switched build, with every mutant it can hold.
     let places = Places::under(&root);
     let mut unviable = BTreeMap::<usize, String>::new();
+    // A Rust Worker a test starts with `wrangler dev`: its wasm must build
+    // with the switches, and each test's `wrangler dev` serves it built once
+    // from the switched copy, with the test's mutant switched on.
+    let worker_packages = crate::rust_worker::worker_packages(&root);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let worker_build = format!("{}-{nonce}", std::process::id());
+    let mut switched_environment = runner_environment.clone();
+    switched_environment.extend(crate::rust_worker::strong_environment(
+        &root,
+        &places.switched_target.join("supercov-wrangler"),
+        &std::env::var_os("PATH").unwrap_or_default(),
+        &worker_build,
+    )?);
     let built = build_switched(
         &root,
         &places,
@@ -518,7 +533,11 @@ fn pass(
         &mut alone,
         &mut unviable,
         &build_invocation,
-        &runner_environment,
+        &switched_environment,
+        &Workers {
+            packages: worker_packages,
+            build: worker_build,
+        },
         diagnostics,
         stop,
     )?;
@@ -978,6 +997,10 @@ fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
                 if crate::fault_fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
                     crate::fault_fs::write(&target, &bytes)?;
                 }
+                // As executable as the project's: a Worker's `./build.sh`,
+                // a test's script, run from the copy. (Its time stays.)
+                let _ = std::fs::metadata(entry.path())
+                    .and_then(|metadata| std::fs::set_permissions(&target, metadata.permissions()));
             }
         }
         Ok(())
@@ -1153,6 +1176,87 @@ fn switched_build(
     Ok((prepared, built))
 }
 
+/// The Rust Workers of a strong pass: their Cargo packages, and the id of
+/// the switched build each is built for.
+struct Workers {
+    packages: BTreeSet<String>,
+    build: String,
+}
+
+/// The Workers' wasm, built from the switched copy `prepared` holds: the
+/// switched mutants whose code does not compile for wasm, which leave the
+/// switched build and are built on their own, where the Worker's own build
+/// of each fails as it would. Where none is to blame, the wasm does not
+/// build here: each Worker is served as its tests' wrangler builds it, with
+/// no mutant (`runner_environment` loses Supercov's `wrangler`), and a
+/// mutant none of them runs switched on is said not reached. Otherwise each
+/// Worker is built once for the tests, in the same target as the check;
+/// one that does not build is served the same way.
+#[allow(clippy::too_many_arguments)]
+fn check_workers(
+    prepared: &crate::rust_project::StrongWorkspace,
+    places: &Places,
+    jobs: &[Job],
+    switchable: &[usize],
+    invocation: &CargoTestInvocation,
+    workers: &Workers,
+    runner_environment: &mut Vec<(String, String)>,
+    diagnostics: &mut dyn Write,
+) -> Result<BTreeSet<usize>, String> {
+    let cargo = WasmCargo {
+        program: invocation.program.clone(),
+        rustflags: std::env::var("RUSTFLAGS").unwrap_or_default(),
+    };
+    let target = places.switched_target.join("wasm");
+    let errors = wasm_check(
+        &cargo,
+        &prepared.project.workspace_root,
+        &target,
+        &workers.packages,
+    )?;
+    let ordinal_of = switchable
+        .iter()
+        .map(|at| (key(&jobs[*at]), *at))
+        .collect::<HashMap<_, _>>();
+    let mut out = BTreeSet::new();
+    let mut unexplained = Vec::new();
+    for error in &errors {
+        let (own, at_switch) = attribute(error, &prepared.switched);
+        let theirs = own
+            .iter()
+            .chain(&at_switch)
+            .map(|ordinal| ordinal_of[ordinal])
+            .collect::<Vec<_>>();
+        unexplained.extend(theirs.is_empty().then(|| first_line(&error.rendered)));
+        out.extend(theirs);
+    }
+    if !out.is_empty() {
+        return Ok(out);
+    }
+    let failed = (!unexplained.is_empty())
+        .then(|| format!("they do not build for wasm: {}", unexplained.join("; ")))
+        .or_else(|| {
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] building the Workers with the mutants switched in"
+            );
+            crate::rust_worker::rust_worker_configs(&prepared.project.workspace_root)
+                .iter()
+                .find_map(|config| {
+                    crate::rust_worker::build_worker(config, &workers.build, Some(&target)).err()
+                })
+        });
+    if let Some(reason) = failed {
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] the Workers are served as their tests build them, without the mutants ({reason})"
+        );
+        runner_environment
+            .retain(|(name, _)| !crate::rust_worker::STRONG_ENVIRONMENT.contains(&name.as_str()));
+    }
+    Ok(out)
+}
+
 /// Builds the switched copy with the mutants in `switchable`, taking out
 /// those its errors come from until it builds: the unviable ones into
 /// `unviable`, the ones to build on their own into `alone`.
@@ -1166,10 +1270,13 @@ fn build_switched(
     unviable: &mut BTreeMap<usize, String>,
     invocation: &CargoTestInvocation,
     runner_environment: &[(String, String)],
+    workers: &Workers,
     diagnostics: &mut dyn Write,
     stop: &Stop,
 ) -> Result<Built, String> {
     let mut builds = 0usize;
+    let mut runner_environment = runner_environment.to_vec();
+    let mut workers_checked = workers.packages.is_empty();
     loop {
         builds += 1;
         let _ = writeln!(
@@ -1193,6 +1300,30 @@ fn build_switched(
             });
             continue;
         }
+        // The Workers' wasm, built from the same switched copy, then each
+        // Worker once for the tests (`check_workers`).
+        if built.is_ok() && !workers_checked {
+            let out = check_workers(
+                &prepared,
+                places,
+                jobs,
+                switchable,
+                invocation,
+                workers,
+                &mut runner_environment,
+                diagnostics,
+            )?;
+            alone.extend(
+                out.iter()
+                    .filter(|at| !jobs[**at].check_only)
+                    .map(|at| (*at, "wasm-error")),
+            );
+            switchable.retain(|at| !out.contains(at));
+            workers_checked = out.is_empty();
+            if !workers_checked {
+                continue;
+            }
+        }
         let errors = match built {
             Ok(artifacts) => {
                 let launcher = crate::rust_test_runner::ArtifactLauncher::for_invocation(
@@ -1201,7 +1332,7 @@ fn build_switched(
                     &places.switched_target.join("supercov-hooks"),
                 )
                 .map_err(|error| error.to_string())?
-                .with_environment(runner_environment);
+                .with_environment(&runner_environment);
                 let target_libdir =
                     crate::rust_test_runner::rustc_target_libdir(&prepared.project, invocation)
                         .map_err(|error| error.to_string())?;
@@ -4724,5 +4855,142 @@ mod tests {
         for (id, verdict) in apart {
             assert_eq!(verdict["status"], "survived", "{id}: {verdict}");
         }
+    }
+
+    /// The copy's files are as executable as the project's: a Worker's
+    /// `./build.sh` runs from the copy, and a mode changed since is
+    /// followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_keeps_each_file_s_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-modes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let copy = root.join("copy");
+        std::fs::create_dir_all(project.join("worker")).unwrap();
+        std::fs::write(project.join("worker/build.sh"), "worker-build\n").unwrap();
+        std::fs::write(project.join("worker/notes.txt"), "notes\n").unwrap();
+        let set = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        set(&project.join("worker/build.sh"), 0o755);
+        set(&project.join("worker/notes.txt"), 0o644);
+        sync_project(&project, &copy).unwrap();
+        assert_eq!(mode(&copy.join("worker/build.sh")), 0o755);
+        assert_eq!(mode(&copy.join("worker/notes.txt")), 0o644);
+        set(&project.join("worker/build.sh"), 0o700);
+        sync_project(&project, &copy).unwrap();
+        assert_eq!(mode(&copy.join("worker/build.sh")), 0o700);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Rust Worker's wasm is checked from the switched copy: a mutant
+    /// whose code does not compile for wasm is built on its own, and the
+    /// Worker is then built once for the tests, in the check's target. Where
+    /// no mutant is to blame for the wasm not building, or the Worker's build
+    /// fails, the Workers are served as their tests build them, and the pass
+    /// says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_s_wasm_is_checked_and_the_worker_built_once() {
+        let (root, mut request) = crate_with(
+            "workers",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+                ),
+                ("src/lib.rs", "pub fn one(v: u32) -> u32 {\n    v + 1\n}\n"),
+                (
+                    "tests/t.rs",
+                    "#[test] fn one() { assert_eq!(fixture::one(1), 2); }\n",
+                ),
+                (
+                    "wrangler.toml",
+                    "name = \"w\"\nmain = \"build/worker/shim.mjs\"\n\n[build]\ncommand = \"sh build.sh\"\n",
+                ),
+            ],
+            &["src/lib.rs"],
+        );
+        let build = |exit: u32| {
+            std::fs::write(
+                root.join("build.sh"),
+                format!(
+                    "echo worker-build >/dev/null\nmkdir -p build/worker\necho shim > build/worker/shim.mjs\necho \"$CARGO_TARGET_DIR\" >> '{log}'\nexit {exit}\n",
+                    log = root.join("built.log").display()
+                ),
+            )
+            .unwrap();
+        };
+        // The wasm build: an error in mutant 0's own code while it is
+        // switched in, or, told so, an error at no mutant.
+        let prefix = "on(\"src/lib.rs\", 0) { return ";
+        let cargo = script(
+            &root.join("bin/wasm/cargo"),
+            &format!(
+                concat!(
+                    "case \" $* \" in *\" wasm32-unknown-unknown \"*) ;; *) exec cargo \"$@\" ;; esac\n",
+                    "at() {{ o=$(grep -boF \"$2\" \"$1\" | head -1 | cut -d: -f1); echo $((o + $3)); }}\n",
+                    "if [ -f \"{broken}\" ]; then printf '{{\"reason\":\"compiler-message\",\"message\":{{\"level\":\"error\",\"code\":null,\"message\":\"unplaced\",\"rendered\":\"error: unplaced\",\"spans\":[],\"children\":[]}}}}\\n'; exit 101; fi\n",
+                    "if grep -qF 'on(\"src/lib.rs\", 0)' src/lib.rs; then o=$(at src/lib.rs '{prefix}' {length}); printf '{{\"reason\":\"compiler-message\",\"message\":{{\"level\":\"error\",\"code\":{{\"code\":\"E0308\"}},\"message\":\"mismatched\",\"rendered\":\"error: mismatched\",\"spans\":[{{\"file_name\":\"src/lib.rs\",\"byte_start\":%s,\"byte_end\":%s}}],\"children\":[]}}}}\\n' \"$o\" \"$((o + 1))\"; exit 101; fi\n",
+                    "exit 0\n",
+                ),
+                broken = root.join("broken").display(),
+                prefix = prefix,
+                length = prefix.len(),
+            ),
+        );
+        request.command = vec![cargo, "test".into()];
+        let pass = |results: &str| {
+            let mut request = request.clone();
+            request.results = root.join(results);
+            let mut said = Vec::new();
+            assert_eq!(run_strong_rust(&request, &mut said), Ok(0));
+            (String::from_utf8(said).unwrap(), verdicts(&request))
+        };
+        // Mutant 0 does not compile for wasm: built on its own; the Worker
+        // is built once, in the check's target, for the switched build.
+        build(0);
+        let (said, found) = pass("checked.jsonl");
+        assert!(
+            said.contains("[supercov] building the Workers with the mutants switched in"),
+            "{said}"
+        );
+        assert!(!said.contains("served as their tests build them"), "{said}");
+        // Built once, in the check's target (the copy goes with the pass).
+        let built = std::fs::read_to_string(root.join("built.log")).unwrap_or_default();
+        assert_eq!(built.lines().count(), 1, "{built}\n{said}");
+        assert!(built.trim().ends_with("switched-target/wasm"), "{built}");
+        assert!(!found.is_empty(), "{found:?}\n{said}");
+        assert!(
+            found.values().all(|verdict| verdict["status"] != "error"),
+            "{found:?}\n{said}"
+        );
+        // The Worker's build fails: served as its tests build it.
+        build(1);
+        let (said, _) = pass("unbuilt.jsonl");
+        assert!(
+            said.contains(
+                "served as their tests build them, without the mutants (`sh build.sh` failed"
+            ),
+            "{said}"
+        );
+        // The wasm does not build for no mutant's sake: the same.
+        build(0);
+        std::fs::write(root.join("broken"), "").unwrap();
+        let (said, _) = pass("broken.jsonl");
+        assert!(
+            said.contains("without the mutants (they do not build for wasm: unplaced"),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

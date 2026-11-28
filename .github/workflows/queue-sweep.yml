@@ -1,0 +1,39 @@
+name: Merge queue sweep
+
+# Cancels the merge queue's superseded runs (scripts/queue-sweep.mjs): when
+# the queue rebuilds its groups -- a pull request jumps ahead, leaves, or
+# turns unmergeable -- each group behind gets a new commit and new runs, and
+# GitHub leaves the old commit's CI and Slow tier runs queued and running,
+# ahead of the runs the queue waits for. It runs with every new group, and
+# every twenty minutes for a group the queue dropped with nothing behind it.
+# It posts no status: the queue never waits on it.
+on:
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One sweep at a time: a newer one reads a newer queue.
+concurrency:
+  group: queue-sweep
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Cancelling the superseded runs.
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - run: node scripts/queue-sweep.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -8,19 +8,16 @@
 
 use crate::fault_fs::{self as fs, OpenOptions};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
-pub const QUERY_INDEX_SCHEMA_VERSION: u32 = 6;
+pub const QUERY_INDEX_SCHEMA_VERSION: u32 = 7;
 pub const QUERY_INDEX_HEADER_SIZE: usize = 4_096;
 pub const QUERY_INDEX_PAGE_SIZE: usize = 64 * 1_024;
 pub const QUERY_INDEX_MAX_SECTIONS: usize = 48;
@@ -344,7 +341,12 @@ pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError
 pub struct QueryIndex {
     mmap: Mmap,
     descriptors: Vec<SectionDescriptor>,
-    verified_pages: Mutex<BTreeSet<(u32, usize)>>,
+    /// Each section's place in `descriptors`, by its kind.
+    positions: Vec<Option<usize>>,
+    /// Each section's pages checked against their digests, a bit a page: a
+    /// read of a record takes no lock. A set behind a mutex was the most of
+    /// reading every record of a large index.
+    verified_pages: Vec<Box<[AtomicU64]>>,
 }
 
 impl QueryIndex {
@@ -456,40 +458,61 @@ impl QueryIndex {
         if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
             return Err(QueryIndexError::InvalidHeader("overlapping sections"));
         }
+        let kinds = descriptors
+            .iter()
+            .map(|descriptor| descriptor.kind as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut positions = vec![None; kinds];
+        for (position, descriptor) in descriptors.iter().enumerate() {
+            positions[descriptor.kind as usize] = Some(position);
+        }
+        let verified_pages = descriptors
+            .iter()
+            .map(|descriptor| {
+                (0..(descriptor.digest_count as usize).div_ceil(64))
+                    .map(|_| AtomicU64::new(0))
+                    .collect()
+            })
+            .collect();
         Ok(Self {
             mmap,
             descriptors,
-            verified_pages: Mutex::new(BTreeSet::new()),
+            positions,
+            verified_pages,
         })
     }
 
     pub fn descriptor(&self, kind: u32) -> Result<SectionDescriptor, QueryIndexError> {
-        self.descriptors
-            .iter()
-            .find(|descriptor| descriptor.kind == kind)
+        self.position(kind)
+            .map(|position| self.descriptors[position])
+    }
+
+    fn position(&self, kind: u32) -> Result<usize, QueryIndexError> {
+        self.positions
+            .get(kind as usize)
             .copied()
+            .flatten()
             .ok_or(QueryIndexError::MissingSection(kind))
     }
 
     /// Authenticate every section page before a disposable index is accepted.
     pub fn verify_all(&self) -> Result<(), QueryIndexError> {
-        self.descriptors.iter().try_for_each(|descriptor| {
-            (0..descriptor.digest_count as usize)
-                .try_for_each(|page| self.verify_page(*descriptor, page))
+        (0..self.descriptors.len()).try_for_each(|position| {
+            (0..self.descriptors[position].digest_count as usize)
+                .try_for_each(|page| self.verify_page(position, page))
         })
     }
 
     /// One page of a section `open` accepted: its data and its digest lie
     /// inside the mapping, so only the digest can be wrong.
-    fn verify_page(
-        &self,
-        descriptor: SectionDescriptor,
-        page: usize,
-    ) -> Result<(), QueryIndexError> {
-        let key = (descriptor.kind, page);
-        if self.verified_pages.lock().unwrap().contains(&key) {
+    fn verify_page(&self, position: usize, page: usize) -> Result<(), QueryIndexError> {
+        let word = &self.verified_pages[position][page / 64];
+        let bit = 1_u64 << (page % 64);
+        if word.load(Ordering::Acquire) & bit != 0 {
             return Ok(());
         }
+        let descriptor = self.descriptors[position];
         let page_start = descriptor.offset as usize + page * QUERY_INDEX_PAGE_SIZE;
         let section_end = (descriptor.offset + descriptor.length) as usize;
         let page_end = (page_start + QUERY_INDEX_PAGE_SIZE).min(section_end);
@@ -502,12 +525,13 @@ impl QueryIndex {
                 page,
             });
         }
-        self.verified_pages.lock().unwrap().insert(key);
+        word.fetch_or(bit, Ordering::Release);
         Ok(())
     }
 
     pub fn bytes(&self, kind: u32, offset: u64, length: u64) -> Result<&[u8], QueryIndexError> {
-        let descriptor = self.descriptor(kind)?;
+        let position = self.position(kind)?;
+        let descriptor = self.descriptors[position];
         let end = checked_end(offset, length)?;
         if end > descriptor.length {
             return Err(QueryIndexError::OutOfBounds {
@@ -519,7 +543,7 @@ impl QueryIndex {
         if length > 0 {
             let first = offset as usize / QUERY_INDEX_PAGE_SIZE;
             let last = (end - 1) as usize / QUERY_INDEX_PAGE_SIZE;
-            (first..=last).try_for_each(|page| self.verify_page(descriptor, page))?;
+            (first..=last).try_for_each(|page| self.verify_page(position, page))?;
         }
         let start = (descriptor.offset + offset) as usize;
         let end = (descriptor.offset + end) as usize;

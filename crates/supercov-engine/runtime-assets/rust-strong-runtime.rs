@@ -117,6 +117,15 @@ mod __SUPERCOV_MODULE__ {
         ACTIVE.store(if index < NONE { index } else { NONE }, Ordering::Relaxed);
     }
 
+    /// How often the active mutant was evaluated in this instance: the
+    /// host of a Worker reads it after each call into the module, as a
+    /// Worker has no file to say so in.
+    #[cfg(target_arch = "wasm32")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __SUPERCOV_HITS_EXPORT__() -> u64 {
+        HITS.load(Ordering::Relaxed)
+    }
+
     fn set_file(file: &str) {
         let mut held = match FILE.lock() {
             Ok(held) => held,

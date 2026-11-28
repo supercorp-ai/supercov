@@ -26,8 +26,10 @@ permissions:
 jobs:
   # Nothing is published that did not pass both tiers in full: the `Fast
   # tier` and `Slow tier` statuses GitHub Actions posted, each saying "Passed
-  # in full", on this commit or on another of the same tree -- the release
-  # pull request's head, whose squash merge this is. Its results stand for
+  # in full", on this commit -- the merge queue's commit, which both tiers
+  # ran on in full before the queue merged it -- or on another of the same
+  # tree: the release pull request's head, which a release queued up to date
+  # with main, and alone, merges into main unchanged. Their results stand for
   # this tree, and nothing runs again on main. With none, nothing is
   # published (scripts/ci-tiers.mjs verify-release says what is missing).
   verified:
@@ -48,7 +50,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   # The release pull request built this tree's native matrix while its CI ran
-  # (release-native.yml); a squash merge leaves main with that tree. A run of
+  # (release-native.yml); the merge queue's commit of a release queued up to
+  # date with main, and alone, leaves main with that tree. A run of
   # it that succeeded on the same tree is reused, and nothing is built again.
   # A run id given by hand wins; with none found, the matrix is built here.
   prebuilt:
