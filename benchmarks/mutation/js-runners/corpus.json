@@ -512,6 +512,89 @@
         }
       },
       "note": "Jest 27: its configuration (roots, testRegex) is in package.json, which StrykerJS's Jest runner does not read from Jest 27, so it is given to StrykerJS as written there"
+    },
+    {
+      "name": "ufo",
+      "runner": "vitest",
+      "repo": "https://github.com/unjs/ufo",
+      "commit": "f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6",
+      "install": [
+        "npx",
+        "-y",
+        "pnpm@10.33.2",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "test": [
+        "npx",
+        "vitest",
+        "run"
+      ],
+      "sources": "src",
+      "mutate": [
+        "src/**/*.ts"
+      ],
+      "stryker": {
+        "testRunner": "vitest",
+        "coverageAnalysis": "perTest"
+      },
+      "note": "Vitest's own strong pass (the continuous pass), as in benchmarks/mutation/corpus.json: the strong pass speed workflow's Vitest projects."
+    },
+    {
+      "name": "pathe",
+      "runner": "vitest",
+      "repo": "https://github.com/unjs/pathe",
+      "commit": "bc7477a01f0bd60ada017add8142c9f9d69ccdc5",
+      "install": [
+        "npx",
+        "-y",
+        "pnpm@11.10.0",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "test": [
+        "npx",
+        "vitest",
+        "run"
+      ],
+      "sources": "src/_path.ts,src/utils.ts,src/_internal.ts",
+      "mutate": [
+        "src/_path.ts",
+        "src/utils.ts",
+        "src/_internal.ts"
+      ],
+      "stryker": {
+        "testRunner": "vitest",
+        "coverageAnalysis": "perTest"
+      },
+      "note": "Vitest's own strong pass (the continuous pass), as in benchmarks/mutation/corpus.json: the strong pass speed workflow's Vitest projects."
+    },
+    {
+      "name": "cookie-es",
+      "runner": "vitest",
+      "repo": "https://github.com/unjs/cookie-es",
+      "commit": "f89ede8b60204adfa84a97fb833e0cbae75d0478",
+      "install": [
+        "npx",
+        "-y",
+        "pnpm@10.33.0",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "test": [
+        "npx",
+        "vitest",
+        "run"
+      ],
+      "sources": "src",
+      "mutate": [
+        "src/**/*.ts"
+      ],
+      "stryker": {
+        "testRunner": "vitest",
+        "coverageAnalysis": "perTest"
+      },
+      "note": "Vitest's own strong pass (the continuous pass), as in benchmarks/mutation/corpus.json: the strong pass speed workflow's Vitest projects."
     }
   ]
 }

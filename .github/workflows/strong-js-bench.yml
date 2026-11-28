@@ -67,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [mini-throttle, ms, dot-prop]
+        project: [ufo, pathe, cookie-es]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

@@ -71,7 +71,7 @@ function diff(before, after) {
 const olds = oldDirs.map((directory) => ({ verdicts: verdicts(directory), summary: summary(directory) }));
 const news = (newDirs ?? []).map((directory) => ({ verdicts: verdicts(directory), summary: summary(directory) }));
 const seconds = (run) => run.summary.seconds?.supercovStrong;
-const driver = (run) => (run.summary.driver ?? []).find((entry) => entry?.driver === "jobs") ?? null;
+const driver = (run) => (run.summary.driver ?? []).find((entry) => entry?.driver === "jobs") ?? (run.summary.driver ?? [])[0] ?? null;
 const mean = (values) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined);
 const project = news[0]?.summary.project ?? olds[0]?.summary.project ?? "?";
 const ran = news[0]?.summary.supercovSummary?.ran ?? olds[0]?.summary.supercovSummary?.ran;
@@ -81,11 +81,19 @@ const times = (runs) => runs.map(seconds).filter(Number.isFinite);
 lines.push(`| strong pass, s (each run) | ${times(olds).map((value) => value.toFixed(1)).join(", ")} | ${times(news).map((value) => value.toFixed(1)).join(", ")} |`);
 if (ran)
     lines.push(`| ms per mutant run (${ran}), mean | ${Math.round(mean(times(olds)) * 1000 / ran)} | ${Math.round(mean(times(news)) * 1000 / ran)} |`);
-for (const field of ["jobs", "baselines", "confirmations", "stopped", "alone", "jobMs", "residentJobs", "residentFallbacks"]) {
+for (const field of ["jobs", "copies", "baselines", "confirmations", "stopped", "alone", "jobMs", "residentJobs", "residentFallbacks"]) {
     const was = olds.map((run) => driver(run)?.[field]).filter((value) => value !== undefined);
     const is = news.map((run) => driver(run)?.[field]).filter((value) => value !== undefined);
     if (was.length || is.length)
         lines.push(`| driver ${field} | ${was.join(", ") || "-"} | ${is.join(", ") || "-"} |`);
+}
+// Copies (files) a decided mutant ran, by its verdict (the Vitest pass).
+for (const status of ["killed", "timeout", "survived"]) {
+    const perMutant = (run) => { const entry = driver(run)?.filesByStatus?.[status]; return entry?.mutants ? `${entry.files} for ${entry.mutants} (${(entry.files / entry.mutants).toFixed(2)})` : undefined; };
+    const was = olds.map(perMutant).filter(Boolean);
+    const is = news.map(perMutant).filter(Boolean);
+    if (was.length || is.length)
+        lines.push(`| files run by ${status} mutants | ${was.join("; ") || "-"} | ${is.join("; ") || "-"} |`);
 }
 const jobMs = (runs) => mean(runs.map((run) => { const one = driver(run); return one?.jobs ? one.jobMs / one.jobs : undefined; }).filter(Number.isFinite));
 if (jobMs(olds) !== undefined || jobMs(news) !== undefined)

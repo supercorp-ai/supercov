@@ -291,6 +291,18 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
 - **A mutant's files one after another**, the likeliest killer first (a
   file's kills over its runs so far, over its cost), and its chain stops at
   its first kill, as StrykerJS runs a mutant's covering files with `bail`.
+  A file's kills are counted for mutants of the mutant's own source file:
+  a test file that exercises one module kills that module's mutants, and
+  its kills of every mutant say little of a module it only passes through.
+  Where it ran few mutants of that source file, its chance there starts at
+  its chance anywhere (`PAIR_PRIOR` runs' worth). The first file is chosen
+  this way too, so once a source file's mutants have shown which file kills
+  them, the next one runs it first. The order decides only which file runs
+  first: a kill is a kill and a survivor ran every file whatever the
+  order, and each copy is a module graph of its own. A mutant that one
+  file times out and another kills can be a kill where it was a `timeout`,
+  as whichever runs first decides; the benchmark's comparison counts such
+  changes apart.
   Parallelism comes from many mutants at once; of the mutants ready, the
   cheapest goes first (see "The order of a pass, its shares and its
   budget"). A worker no ready mutant takes goes to the one with the most
