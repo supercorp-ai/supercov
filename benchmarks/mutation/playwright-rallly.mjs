@@ -71,7 +71,7 @@ const command = ["npx", "playwright", "test", "--config", "playwright.bench.conf
 reset("measure");
 run("supercov-measure", [supercov, "--", ...command], { cwd: project, env: { SUPERCOV_MUTANTS: "1" }, mayFail: true });
 reset("strong");
-const strong = run("supercov-strong", [supercov, "runs", "latest", "mutants", "test", "--budget", budget, "--json"], { cwd: project, env: { SUPERCOV_STRONG_KEEP: "1" }, mayFail: true });
+const strong = run("supercov-strong", [supercov, "runs", "latest", "mutants", "test", "--budget", budget, "--json"], { cwd: project, env: { SUPERCOV_STRONG_KEEP: "1", SUPERCOV_VERBOSE: "1" }, mayFail: true });
 run("supercov-export", [supercov, "runs", "latest", "mutants", "--format", "jsonl", "--output", join(out, "supercov-mutants.jsonl")], { cwd: project, mayFail: true });
 let pass = {};
 try {
