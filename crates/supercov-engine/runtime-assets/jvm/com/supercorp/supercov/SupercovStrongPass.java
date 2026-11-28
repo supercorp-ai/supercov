@@ -50,6 +50,15 @@ public final class SupercovStrongPass {
    */
   static final String SLOW = "SUPERCOV_STRONG_SLOW";
   static final String RETRY = "SUPERCOV_STRONG_RETRY";
+  /**
+   * Where the JVMs of a pass share their baselines, one line a test:
+   * {@code index, passed, ms, unrepeatable}. A test's baseline is run once
+   * for the whole pass, every round included, not once in each JVM: each
+   * JVM runs a test in a fresh class loader and a working directory of its
+   * own, so another JVM's baseline is what its own would be, and a kill is
+   * still confirmed in the JVM that saw it.
+   */
+  static final String BASELINES = "SUPERCOV_STRONG_BASELINES";
   /** Set in a JVM a driver started to share the pass. */
   static final String MINION = "supercov.strong.minion";
 
@@ -159,8 +168,11 @@ public final class SupercovStrongPass {
   /** A test thread that ran past the short limit and was left running. */
   private Thread abandoned;
   private final File claims;
+  private final File baselines;
   private final String module;
   private final Executor executor;
+  /** Where this JVM's time went, written as the pass's summary line. */
+  private final Profile profile = new Profile();
 
   SupercovStrongPass(Executor executor, String module) throws IOException {
     this.executor = executor;
@@ -171,6 +183,8 @@ public final class SupercovStrongPass {
     this.retry = "1".equals(System.getenv(RETRY));
     String claimed = System.getenv(CLAIMS);
     this.claims = claimed == null ? null : new File(claimed);
+    String shared = System.getenv(BASELINES);
+    this.baselines = shared == null ? null : new File(shared);
     String limit = System.getenv("SUPERCOV_MUTANT_HIT_LIMIT");
     if (limit != null) {
       try {
@@ -431,6 +445,15 @@ public final class SupercovStrongPass {
   }
 
   void run() throws IOException {
+    profile.begin();
+    try {
+      runMutants();
+    } finally {
+      profile.write(results, module);
+    }
+  }
+
+  private void runMutants() throws IOException {
     for (Mutant mutant : mutants) {
       if (!mutant.modules.contains(module)) {
         continue;
@@ -477,14 +500,20 @@ public final class SupercovStrongPass {
   private boolean runMutant(Mutant mutant, List<Test> candidates, List<String> missing)
       throws IOException {
     long started = System.nanoTime();
+    profile.mutants++;
     ClassLoader mutated = fresh();
     int ran = 0;
     String unrepeatable = null;
     for (Test test : candidates) {
+      if (test.baseline == null && sharedBaseline(test)) {
+        profile.sharedBaselines++;
+      }
       if (test.baseline == null) {
         long before = System.nanoTime();
         Outcome baseline = execute(test, false, -1, -1);
         test.baselineMillis = (System.nanoTime() - before) / 1_000_000L;
+        profile.baselines++;
+        profile.baselineNanos += System.nanoTime() - before;
         if (baseline.timedOut) {
           write(mutant, "error", null, ran, started,
               "its test " + test.name + " ran past its time without a mutant");
@@ -495,7 +524,10 @@ public final class SupercovStrongPass {
           // Once more: a test that leaves what fails it the next time (a
           // file it makes and never deletes) cannot tell a mutant from its
           // own leftovers. It is no candidate, and says so.
+          long second = System.nanoTime();
           Outcome again = execute(test, false, -1, -1);
+          profile.baselines++;
+          profile.baselineNanos += System.nanoTime() - second;
           if (again.failed || again.timedOut) {
             test.baseline = false;
             test.unrepeatable = true;
@@ -503,6 +535,7 @@ public final class SupercovStrongPass {
                 "supercov: " + test.name + " fails when run a second time: " + again.reason);
           }
         }
+        shareBaseline(test);
       }
       if (!test.baseline) {
         if (test.unrepeatable && unrepeatable == null) {
@@ -511,7 +544,13 @@ public final class SupercovStrongPass {
         continue;
       }
       ran++;
+      long run = System.nanoTime();
       Outcome outcome = execute(test, true, mutant.file, mutant.index, mutated);
+      profile.runs++;
+      profile.runNanos += System.nanoTime() - run;
+      if (ran == 1) {
+        profile.firstRunNanos += System.nanoTime() - run;
+      }
       if (outcome.timedOut && !retry && slow != null) {
         // Past the short limit: tried again alone, with the generous one,
         // in a round of its own. Its thread is left running; one such
@@ -537,7 +576,10 @@ public final class SupercovStrongPass {
         return true;
       }
       if (outcome.failed) {
+        long confirm = System.nanoTime();
         Outcome confirmation = execute(test, false, -1, -1);
+        profile.confirmations++;
+        profile.confirmNanos += System.nanoTime() - confirm;
         if (confirmation.failed || confirmation.timedOut) {
           // The mutant left the JVM so that the test fails without it: no
           // verdict here, and a fresh JVM for the rest.
@@ -563,6 +605,128 @@ public final class SupercovStrongPass {
     }
     write(mutant, "survived", null, ran, started, reason);
     return true;
+  }
+
+  /**
+   * Where this JVM's time went: from its start to the pass's, the
+   * baselines, the runs with a mutant (the first test of each, in a loader
+   * of its own, apart), the confirmations, the classes loaded and the time
+   * the JIT took. One JSON line beside the verdicts, {@code summary} set.
+   */
+  static final class Profile {
+    long began;
+    long uptimeAtBegin;
+    long classesAtBegin;
+    long compileAtBegin;
+    int mutants;
+    int baselines;
+    int sharedBaselines;
+    long baselineNanos;
+    int runs;
+    long runNanos;
+    long firstRunNanos;
+    int confirmations;
+    long confirmNanos;
+
+    void begin() {
+      began = System.nanoTime();
+      try {
+        uptimeAtBegin = java.lang.management.ManagementFactory.getRuntimeMXBean().getUptime();
+        classesAtBegin =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean().getTotalLoadedClassCount();
+        compileAtBegin = compileMillis();
+      } catch (Throwable e) {
+        // No management API: those fields stay 0.
+      }
+    }
+
+    private static long compileMillis() {
+      java.lang.management.CompilationMXBean compiler =
+          java.lang.management.ManagementFactory.getCompilationMXBean();
+      return compiler != null && compiler.isCompilationTimeMonitoringSupported()
+          ? compiler.getTotalCompilationTime()
+          : 0;
+    }
+
+    void write(String results, String module) {
+      if (results == null) {
+        return;
+      }
+      long classes = 0;
+      long compile = 0;
+      try {
+        classes =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean().getTotalLoadedClassCount()
+                - classesAtBegin;
+        compile = compileMillis() - compileAtBegin;
+      } catch (Throwable e) {
+        // No management API.
+      }
+      StringBuilder line = new StringBuilder("{\"summary\":true,\"driver\":\"jvm\",\"module\":");
+      json(line, module);
+      line.append(",\"minion\":").append(Boolean.getBoolean(MINION));
+      line.append(",\"jvmStartMs\":").append(uptimeAtBegin);
+      line.append(",\"passMs\":").append((System.nanoTime() - began) / 1_000_000L);
+      line.append(",\"mutants\":").append(mutants);
+      line.append(",\"baselines\":").append(baselines);
+      line.append(",\"baselineMs\":").append(baselineNanos / 1_000_000L);
+      line.append(",\"sharedBaselines\":").append(sharedBaselines);
+      line.append(",\"runs\":").append(runs);
+      line.append(",\"runMs\":").append(runNanos / 1_000_000L);
+      line.append(",\"firstRunMs\":").append(firstRunNanos / 1_000_000L);
+      line.append(",\"confirmations\":").append(confirmations);
+      line.append(",\"confirmMs\":").append(confirmNanos / 1_000_000L);
+      line.append(",\"classesLoaded\":").append(classes);
+      line.append(",\"jitMs\":").append(compile);
+      line.append("}\n");
+      try (FileOutputStream out = new FileOutputStream(results, true)) {
+        out.write(line.toString().getBytes(StandardCharsets.UTF_8));
+      } catch (IOException e) {
+        // The profile is for reading, not for verdicts.
+      }
+    }
+  }
+
+  /** Takes another JVM's baseline of {@code test}, where one ran: whether it did. */
+  private boolean sharedBaseline(Test test) {
+    if (baselines == null || !baselines.isFile()) {
+      return false;
+    }
+    String prefix = test.index + "\t";
+    try (BufferedReader reader =
+        new BufferedReader(
+            new InputStreamReader(new FileInputStream(baselines), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        String[] parts = line.split("\t", -1);
+        // A line cut short by a JVM still writing it says nothing yet.
+        if (!line.startsWith(prefix) || parts.length < 4) {
+          continue;
+        }
+        test.baselineMillis = Long.parseLong(parts[2]);
+        test.unrepeatable = parts[3].equals("1");
+        test.baseline = parts[1].equals("1");
+        return true;
+      }
+    } catch (IOException | NumberFormatException e) {
+      // Run it here instead.
+    }
+    return false;
+  }
+
+  /** Gives this JVM's baseline of {@code test} to the others, in one write. */
+  private void shareBaseline(Test test) {
+    if (baselines == null) {
+      return;
+    }
+    String line =
+        test.index + "\t" + (test.baseline ? "1" : "0") + "\t" + test.baselineMillis + "\t"
+            + (test.unrepeatable ? "1" : "0") + "\n";
+    try (FileOutputStream out = new FileOutputStream(baselines, true)) {
+      out.write(line.getBytes(StandardCharsets.UTF_8));
+    } catch (IOException e) {
+      // The others run it themselves.
+    }
   }
 
   /** Lists the mutant for the retry round. */

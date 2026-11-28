@@ -109,6 +109,10 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
+      # The instrumented workspace's build beside Supercov's own.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL > /dev/null 2>&1 &
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
@@ -138,12 +142,33 @@ jobs:
           name: supercov-self-${{ matrix.os }}
           path: target/measure/supercov
           retention-days: 3
+      # The instrumented copy of the workspace and its test build, once for
+      # every slice: each slice instrumented and built the same workspace
+      # itself, a minute and three and a half, half of a slice's time but
+      # its tests. Supercov keys a build on its sources, its own build and the
+      # command before `--`, which every slice shares (the tests after it
+      # choose what runs), and reuses a build whose artifacts it
+      # authenticates; one it cannot reuse it builds again, as before.
+      # Run with a test no slice has: it builds, and runs nothing.
+      - name: Build the measured workspace
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          ./target/measure/supercov -- cargo test --config "target.$host.runner=\"$GITHUB_WORKSPACE/scripts/ci-time-test.sh\"" --workspace \
+            -- --include-ignored --exact no_test_was_dealt_to_this_slice 2>&1 | tail -5 || true
+          ls .supercov/workspaces/*/*/.supercov/rust-build-cache.json
+          tar -cf - --exclude='incremental' .supercov/workspaces .supercov/cache/rust-target | zstd -T0 -3 -q -o "$RUNNER_TEMP/workspace.tar.zst"
+          du -h "$RUNNER_TEMP/workspace.tar.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: measured-workspace-${{ matrix.os }}
+          path: ${{ runner.temp }}/workspace.tar.zst
+          compression-level: 0
+          retention-days: 1
 
-  # Beside the build, not after it: a slice's setup takes as long as the
-  # build, and the slice waits for the build only where it needs it, at its
-  # tests (below).
+  # After the build: each slice measures with the workspace it built.
+  # Started beside it, a slice held its runner idle for the build.
   measure:
-    needs: [plan, platforms]
+    needs: [plan, platforms, build]
     name: Measure ${{ matrix.os }} slice ${{ matrix.slice }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -292,34 +317,19 @@ jobs:
             ~/.cache/ms-playwright
             ~/Library/Caches/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
-      # The build job's Supercov, once it has kept it: this slice started
-      # beside the build. A build that failed fails the slice. An artifact
-      # is listed a few seconds before it can be fetched (a slice found it
-      # 3 s after it was made and could not fetch it), so the fetch is the
-      # test, tried until it comes whole.
-      - name: Wait for the build
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT: supercov-self-${{ matrix.os }}
-          BUILD: Build on ${{ matrix.os }}
+      # The build job's Supercov, and the instrumented workspace it built.
+      - uses: actions/download-artifact@v5
+        with:
+          name: supercov-self-${{ matrix.os }}
+          path: ${{ runner.temp }}/self
+      - uses: actions/download-artifact@v5
+        with:
+          name: measured-workspace-${{ matrix.os }}
+          path: ${{ runner.temp }}/workspace
+      - name: Restore the measured workspace
         run: |
-          for attempt in $(seq 1 120); do
-            rm -rf "$RUNNER_TEMP/self"
-            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D "$RUNNER_TEMP/self" 2>/dev/null \
-              && [ -s "$RUNNER_TEMP/self/supercov" ]; then
-              echo "Fetched $ARTIFACT after $attempt attempt(s)."
-              exit 0
-            fi
-            # A job of a called workflow is named after its caller's job too.
-            build=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
-              --jq ".jobs[] | select(.name == \"$BUILD\" or (.name | endswith(\"/ $BUILD\"))) | .conclusion // \"\"" 2>/dev/null | head -1)
-            case "$build" in
-              failure|cancelled|skipped) echo "$BUILD ended $build: there is no Supercov to measure with."; exit 1 ;;
-            esac
-            sleep 10
-          done
-          echo "$BUILD kept no Supercov in twenty minutes."
-          exit 1
+          zstd -d -q -c "$RUNNER_TEMP/workspace/workspace.tar.zst" | tar -xf -
+          rm -rf "$RUNNER_TEMP/workspace"
       # The plan's selection, and the test seconds every slice deals by: the
       # same file for every slice, or a test could be dealt to none.
       - uses: actions/download-artifact@v5
@@ -435,33 +445,9 @@ jobs:
           echo "${{ steps.tests.outputs.command }}"
           mkdir -p "$RUNNER_TEMP/out"
           log="$RUNNER_TEMP/out/measure.log"
-          # Supercov runs each test as its binary given `--exact NAME`, through
-          # the target runner a command configures: this one times each.
-          # Given only on the command line, it reaches no project a test
-          # runs Cargo in itself.
-          timer="$RUNNER_TEMP/time-test.sh"
-          cat > "$timer" <<'EOF'
-          #!/usr/bin/env bash
-          name=""; previous=""
-          for argument in "$@"; do
-            [ "$argument" = --list ] && exec "$@"
-            [ "$previous" = --exact ] && name=$argument
-            previous=$argument
-          done
-          [ -n "$name" ] || exec "$@"
-          # Its seconds and the processor seconds it and its children used:
-          # tests run side by side, so what one costs a slice is the latter.
-          TIMEFORMAT='%R %U %S'
-          report=$(mktemp)
-          { time "$@" 2>&3; } 3>&2 2>"$report"
-          status=$?
-          read -r real user system < "$report"
-          rm -f "$report"
-          awk -v name="$name" -v real="$real" -v cpu="$(awk -v u="$user" -v s="$system" 'BEGIN { print u + s }')" \
-            'BEGIN { printf "%s\t%.1f\t%.1f\n", name, real, cpu }' >> "$TEST_SECONDS"
-          exit $status
-          EOF
-          chmod +x "$timer"
+          # Each test's time, by the target runner a command configures
+          # (scripts/ci-time-test.sh): the path the build job built with.
+          timer="$GITHUB_WORKSPACE/scripts/ci-time-test.sh"
           host=$(rustc -vV | sed -n 's/^host: //p')
           command="${{ steps.tests.outputs.command }}"
           # A failing test still leaves a run to merge; the merge says it failed.
@@ -582,14 +568,24 @@ jobs:
       # 100% lines, branches and MC/DC by the affected tests. Every other line
       # is covered as it was on main, where every test runs and the whole is
       # held to 100%.
+      # Since the pull request's base, or for the merge queue's commit since
+      # main: the commits of pull requests queued before it are changes too.
       - name: Hold the changed lines to 100% coverage
         if: env.AFFECTED == 'true'
-        run: node scripts/ci-affected.mjs changed-gaps HEAD^1 "$RUNNER_TEMP/out"/lines-gaps.jsonl "$RUNNER_TEMP/out"/branches-gaps.jsonl "$RUNNER_TEMP/out"/mcdc-gaps.jsonl
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          base=HEAD^1
+          if [ -n "$MERGE_GROUP_BASE" ]; then
+            base="$MERGE_GROUP_BASE"
+            git fetch -q --depth=1 origin "$base"
+          fi
+          node scripts/ci-affected.mjs changed-gaps "$base" "$RUNNER_TEMP/out"/lines-gaps.jsonl "$RUNNER_TEMP/out"/branches-gaps.jsonl "$RUNNER_TEMP/out"/mcdc-gaps.jsonl
       # Each test's seconds and processor seconds in this full measurement,
       # a name in several slices summed: CI's plan hands them to every job
       # that deals tests by their time (.github/actions/affected).
       - name: Keep the test seconds
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         run: |
           mkdir -p "$RUNNER_TEMP/seconds"
           find "$RUNNER_TEMP/runs" -name test-seconds.tsv -exec cat {} + \
@@ -597,7 +593,7 @@ jobs:
             | LC_ALL=C sort > "$RUNNER_TEMP/seconds/test-seconds.tsv"
           wc -l "$RUNNER_TEMP/seconds/test-seconds.tsv"
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         with:
           name: test-seconds
           path: ${{ runner.temp }}/seconds/test-seconds.tsv
@@ -606,7 +602,7 @@ jobs:
       # reads: the runs (without
       # what only queries read) and the build that answers for them.
       - name: Keep the map
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         run: |
           map="$RUNNER_TEMP/map"
           mkdir -p "$map"
@@ -615,7 +611,7 @@ jobs:
           cp "$RUNNER_TEMP/out/merged-id" "$map/merged-id"
           du -sh "$map"/*
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group' && inputs.tests == '' && matrix.os == 'ubuntu-latest'
         with:
           name: affected-map
           path: ${{ runner.temp }}/map

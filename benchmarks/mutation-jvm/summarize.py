@@ -17,6 +17,7 @@ root = pathlib.Path(sys.argv[1])
 rows = collections.defaultdict(lambda: collections.Counter())
 times = collections.defaultdict(lambda: collections.Counter())
 categories = collections.defaultdict(collections.Counter)
+profiles = collections.defaultdict(collections.Counter)
 violations = []
 
 for path in root.rglob("*.json"):
@@ -31,6 +32,7 @@ for path in root.rglob("*.json"):
         times[project][data["scenario"]] += data["ms"]
     elif name == "supercov.json":
         times[project]["measure"] += data["measureMs"]
+        profiles[project]["plain ms"] += data.get("plainMs", 0)
         times[project]["strong"] += data["strongMs"]
     elif name == "supercov-pit.json":
         if "pit" not in data:
@@ -53,6 +55,19 @@ for path in root.rglob("*.json"):
         summary = data.get("summary", {})
         for key in ("killed", "timeout", "survived", "noCoverage", "error", "ran"):
             rows[project]["strong " + key] += summary.get(key, 0) or 0
+        # Where the strong pass's time went: each JVM's summary and the
+        # builds the engine started.
+        for record in data.get("passes", []):
+            if record.get("driver") == "jvm":
+                for key, value in record.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        profiles[project]["jvm " + key] += value
+                profiles[project]["jvm count"] += 1
+            elif record.get("driver") == "jvm-builds":
+                for build in record.get("builds", []):
+                    kind = "retry" if build.get("retry") else "first"
+                    profiles[project]["builds " + kind] += 1
+                    profiles[project]["builds " + kind + " ms"] += build.get("ms", 0)
 
 columns = ["pit", "supercov", "matched", "agree", "violations", "only PIT", "only Supercov",
            "not compared", "strong ran", "strong killed", "strong survived", "strong timeout",
@@ -64,6 +79,9 @@ for project in sorted(set(rows) | set(times)):
     t = times[project]
     print(f"| {project} | " + " | ".join(str(row[c]) for c in columns)
           + f" | {t['pit'] / 1000:.0f} | {t['pit-matrix'] / 1000:.0f} | {t['measure'] / 1000:.0f} | {t['strong'] / 1000:.0f} |")
+print()
+for project, profile in sorted(profiles.items()):
+    print("PROFILE", project, dict(profile))
 print()
 for project, counts in sorted(categories.items()):
     print(project, dict(counts))

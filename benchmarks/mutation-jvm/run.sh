@@ -255,6 +255,15 @@ case "$scenario" in
     ;;
   supercov)
     command="$(tests_command)"
+    # PLAIN=1: the suite once without Supercov first, for what measuring
+    # adds (a build's first run also fills its caches, as PIT's does).
+    plain_ms=0
+    if [ "${PLAIN:-}" = 1 ]; then
+      plain_started="$(now)"
+      # shellcheck disable=SC2086
+      $command > "$results/plain.log" 2>&1 || true
+      plain_ms="$(elapsed "$plain_started" "$(now)")"
+    fi
     started="$(now)"
     # shellcheck disable=SC2086
     # Measured with the mutants listed and their values recorded, as
@@ -282,7 +291,7 @@ case "$scenario" in
       "$supercov" runs latest mutants pit "$pit_report" --json "${file_options[@]}" > "$results/supercov-pit.json" || true
       "$supercov" runs latest mutants pit "$pit_report" "${file_options[@]}" > "$results/supercov-pit.txt" || true
     fi
-    echo "{\"project\":\"$project\",\"scenario\":\"supercov\",\"measureMs\":$(elapsed "$started" "$measured"),\"strongMs\":$(elapsed "$measured" "$ended"),\"threads\":$threads}" > "$results/supercov.json"
+    echo "{\"project\":\"$project\",\"scenario\":\"supercov\",\"plainMs\":$plain_ms,\"measureMs\":$(elapsed "$started" "$measured"),\"strongMs\":$(elapsed "$measured" "$ended"),\"threads\":$threads}" > "$results/supercov.json"
     ;;
   handcheck)
     # A disagreement checked by hand: the mutant applied to the source
