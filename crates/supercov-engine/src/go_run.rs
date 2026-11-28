@@ -835,11 +835,8 @@ pub fn run_direct_go(
         evidence_path.replace(Some(evidence_directory.clone()));
         // What an earlier run of this copy left is not this run's: a package
         // that writes nothing now must not be read as having written that.
-        match fs::remove_dir_all(&evidence_directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", evidence_directory.display())),
-        }
+        crate::lifecycle::remove_scratch_tree_deferred(&root, &evidence_directory)
+            .map_err(|error| error.to_string())?;
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
         // Decided before instrumenting, because whether a parallel test can be
         // announced depends on whether anything will be running beside it.
@@ -1163,9 +1160,11 @@ pub fn run_direct_go(
         if !measured.get() {
             return error;
         }
-        let Some(evidence) = evidence_path.borrow().clone() else {
-            return error;
-        };
+        // Measured, so the copy, and where its packages wrote, is known.
+        let evidence = evidence_path
+            .borrow()
+            .clone()
+            .expect("the evidence directory is known once the tests ran");
         note_kept_evidence(&root, &evidence, &request.run_id, error)
     });
     if result.is_err() {
