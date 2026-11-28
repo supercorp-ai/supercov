@@ -278,6 +278,11 @@ public final class SupercovStrongPass {
       // one waits: theirs is the JIT the pass sets (see startMinions).
       if (minions.isEmpty()) {
         new SupercovStrongPass(executor, module()).run();
+      } else if (!waitFor(minions)) {
+        // None of its JVMs could start (a JVM that refuses an option the
+        // pass gives it): this one runs the pass as it would alone.
+        System.err.println("supercov: the strong pass's own JVMs did not start; it runs here");
+        new SupercovStrongPass(executor, module()).run();
       }
     } catch (Throwable error) {
       System.err.println("supercov: the strong pass stopped: " + error);
@@ -298,14 +303,17 @@ public final class SupercovStrongPass {
     }
   }
 
-  private static void waitFor(List<Process> minions) {
+  /** Waits for the JVMs: whether any of them ended as a pass's JVM does (exit 0). */
+  private static boolean waitFor(List<Process> minions) {
+    boolean any = false;
     for (Process minion : minions) {
       try {
-        minion.waitFor();
+        any |= minion.waitFor() == 0;
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
     }
+    return any;
   }
 
   /** How many rounds of fresh JVMs a pass starts itself, at most. */
