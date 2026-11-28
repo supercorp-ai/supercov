@@ -2081,14 +2081,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let builds = root.join("builds");
-        // A `go` that says what it is, and builds by writing its `-o` file.
+        // A `go` that says what it is, and builds by writing the file after
+        // its `-o`, wherever that is among the flags.
         let go = |name: &str, answer: &str| {
             let path = root.join(name);
             std::fs::write(
                 &path,
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = env ]; then printf '{answer}'; exit 0; fi\n\
-                     echo built >> '{}'\n: > \"$5\"\n",
+                     echo built >> '{}'\n\
+                     while [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n\
+                     : > \"$out\"\n",
                     builds.display()
                 ),
             )
