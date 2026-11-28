@@ -5695,14 +5695,14 @@ fn main() {
             .iter()
             .filter(|decision| decision.kind == "match-guard")
             .map(|decision| (decision.source.as_str(), declined.contains(&decision.id)))
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             guards,
-            [
+            BTreeSet::from([
                 ("let Some(y) = x.checked_sub(1)", true),
                 ("ready && let Some(y) = x.checked_add(1) && y > 2", true),
                 ("x > 3 || ready", false),
-            ]
+            ])
         );
         for decision in &manifest.decisions {
             let outcome = format!("{}:outcome", decision.id);
