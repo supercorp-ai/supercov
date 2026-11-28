@@ -13,7 +13,7 @@ counts and verdicts can be compared with that tool's:
 | Language | Mutants of | Support |
 | --- | --- | --- |
 | JavaScript, TypeScript | StrykerJS 10.1.1 | Full, under nine runners |
-| Python | mutmut 3.8.1 | Preview |
+| Python | mutmut 3.8.1 | Full, under pytest and `python -m unittest`, on Linux and macOS |
 | Rust | cargo-mutants 27.1.0 | Full, under `cargo test` (libtest and doctests) and cargo-nextest |
 | Java, Kotlin | PIT 1.17.1, its default mutators | Full, under JUnit 5, JUnit 4, Kotest, Spock and TestNG, with Maven, Gradle and Ant |
 | Go | Gremlins 0.6.0, every mutator | Preview |
@@ -561,7 +561,7 @@ no mutants shows none of this.
 | Language | Strong pass runs under |
 | --- | --- |
 | JavaScript, TypeScript | Vitest, Vitest Browser Mode, Playwright, Jest, `node:test`, Mocha, AVA, node-tap, `bun:test` |
-| Python (preview) | pytest, `python -m unittest` |
+| Python | pytest, `python -m unittest` |
 | Rust | `cargo test` (libtest and doctests), cargo-nextest; wasm in Node, under WASI and in Chrome |
 | Java, Kotlin | JUnit 5, JUnit 4 (through Vintage and under Ant's `<junit>`), Kotest, Spock, TestNG; Maven, Gradle, Ant |
 | Go (preview) | `go test` |
@@ -650,7 +650,7 @@ no mutants shows none of this.
   mutants are not planned. A function body StrykerJS empties where no switch
   can be placed is `error`.
 
-### Python (preview)
+### Python
 
 The tests are collected once; each mutant then runs in a fork of that
 process, its function switched to mutmut's copy, against its candidate tests
@@ -658,7 +658,27 @@ in collection order. A mutant whose code ran while the test modules loaded (a
 decorator applied at import) runs in a fresh interpreter with the mutant on
 from its start. `SUPERCOV_STRONG_WORKERS` sets how many forks run at once.
 
-Limits: Windows, since the pass forks. A suite that runs unittest through its
+- **Time limits**: a mutant's tests get three times their baseline and
+  10 s. Tests past their limit beside other forks run again alone, after a
+  run of them without the mutant sets the limit, so a busier machine makes
+  no timeout; a loop the mutant makes endless is a `timeout` at once, past
+  its hit limit.
+- **Stopping**: `--budget` and a signal stop the pass at once, its forks
+  with it, and nothing a stop cut short is judged.
+- **Skipped tests** (`pytest.mark.skip`, `skipif`, `unittest.skip`) are
+  recorded `skipped`, never as tests that did not pass; they still run in
+  the pass, as mutmut runs them, since a mutant can turn a skip into a
+  failure.
+- **Merged runs**: parts that differ only in the tests they select
+  (`pytest tests/a`, `pytest tests/b`; `python -m unittest tests.test_a`,
+  `tests.test_b`) run under one command selecting them all, and
+  pytest-split's `--splits` and `--group` are dropped.
+- **Environments**: CPython 3.9 to 3.14, started as `python -m pytest`, the
+  environment's `pytest` script, `uv run` or `poetry run`, from a virtual
+  environment uv or pip made.
+
+Limits: Windows, since the pass forks: there the mutants are listed and the
+weak report reads them, and each is counted not run. A suite that runs unittest through its
 own script (`TextTestRunner().run`) rather than `unittest.main` has its
 mutants recorded `error`. mutmut's `do_not_mutate_patterns` and
 `mutate_only_covered_lines` are not read.
@@ -832,7 +852,7 @@ kill by a test that fails run alone and passes in the whole suite. Where
 StrykerJS has no runner of its own (`node:test`, AVA, Bun) it runs the whole
 command per mutant, and Supercov is 2.5 to 3.5 times faster.
 
-### Python (preview), against mutmut 3.8.1
+### Python, against mutmut 3.8.1
 
 Against mutmut's full kill matrix (every test against every mutant), 5,438
 mutants, on 16-CPU Linux machines (AWS c8a and m8a.4xlarge), 2026-11-22:
@@ -840,6 +860,29 @@ every mutant the matrix detects,
 Supercov detects. The five Supercov detects alone each fail the suite as
 written when applied by hand: mutmut does not switch on a mutant in a module
 run with `-m`, or in a decorator applied as the test modules load.
+
+markupsafe 3.0.3 (a C extension beside the pure Python code, every test run
+against both) and semver 3.0.4 (heavily parametrized tests and doctests),
+1,101 mutants, against the same matrix on 4-CPU GitHub-hosted Linux runners,
+2026-11-27 and 2026-11-28: every mutant the matrix detects, Supercov detects,
+with no `error`. The four Supercov detects alone end the test process as it
+runs: in markupsafe's module `__getattr__`, and in semver's `deprecated`
+decorator, applied as the modules load.
+
+The same two projects under other interpreters and launchers, each pass's
+verdicts against those under CPython 3.12 and `python -m pytest`:
+
+| Pass | markupsafe (336) | semver (765) |
+| --- | ---: | ---: |
+| CPython 3.10 | 335 same | 765 same |
+| CPython 3.13 | 336 same | 765 same |
+| pip's `pytest` script | 336 same | 765 same |
+| `uv run` | 336 same | 765 same |
+| `poetry run` | 336 same | 765 same |
+| with the value probes | 336 same | 765 same |
+
+The one difference is a mutant that passes `None` to `str.splitlines`:
+3.10's test fails with it, 3.12's passes.
 
 Wall time with mutmut at one child per CPU and Supercov's forks one per CPU,
 each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
@@ -851,6 +894,9 @@ each tool on a machine of its own, 4-CPU Linux machines (AWS m8a.xlarge),
 | cachetools 8.0.2 | 1,660 | 44.8 s | 1.6 + 43.6 s |
 | parse 1.22.4 | 1,306 | 56.5 s | 1.4 + 12.6 s |
 | humanize 4.17.0 | 1,348 | 152.3 s | 4.6 + 19.8 s |
+
+On the GitHub-hosted runners above: markupsafe, mutmut 7.8 s, Supercov
+0.8 + 1.4 s; semver, mutmut 23.6 s, Supercov 2.0 + 10.3 s.
 
 ### Rust, against cargo-mutants 27.1.0
 

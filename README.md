@@ -174,9 +174,9 @@ compared with that tool's on public projects: StrykerJS for JavaScript and
 TypeScript, under Vitest, Playwright, Jest, `node:test`, Mocha, AVA,
 node-tap, `bun:test` and Vitest Browser Mode; cargo-mutants for Rust, under
 `cargo test` and cargo-nextest; PIT for Java and Kotlin, under JUnit 5,
-JUnit 4, Kotest, Spock and TestNG with Maven, Gradle and Ant; and in
-preview, mutmut for Python, Gremlins
-for Go and mutant for Ruby. The run already knows which tests reach
+JUnit 4, Kotest, Spock and TestNG with Maven, Gradle and Ant; mutmut for
+Python, under pytest and `python -m unittest`; and in preview, Gremlins for
+Go and mutant for Ruby. The run already knows which tests reach
 each mutant and which never change its value, so a mutant no test reaches or
 infects is decided without running anything, and the rest run only against
 the tests that can kill them. A plain run costs nothing more. See
@@ -338,7 +338,7 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | cargo-mutants' mutants |
 | rustdoc doctests | Exact per doctest | cargo-mutants' mutants |
 | cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-mutants' mutants |
-| pytest and `python -m unittest` | Exact test and setup/call/teardown phase identity | Preview: mutmut's mutants |
+| pytest and `python -m unittest` | Exact test and setup/call/teardown phase identity | mutmut's mutants |
 | `go test` | Exact per test | Preview: Gremlins' mutants |
 | JUnit 5, JUnit 4, Kotest, Spock and TestNG | Exact per test | PIT's mutants |
 | RSpec | Exact example and before/example/after phase identity | Preview: mutant's mutants |

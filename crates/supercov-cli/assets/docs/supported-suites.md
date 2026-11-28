@@ -21,7 +21,7 @@ npx supercov -- mvn test
 | JavaScript | Available | `npx supercov -- npm test` | StrykerJS 10.1.1's mutants |
 | TypeScript | Available | `npx supercov -- npm test` | StrykerJS 10.1.1's mutants |
 | Rust | Available | `npx supercov -- cargo test` | cargo-mutants 27.1.0's mutants |
-| Python | Available | `npx supercov -- pytest` | Preview: mutmut 3.8.1's mutants |
+| Python | Available | `npx supercov -- pytest` | mutmut 3.8.1's mutants (Linux and macOS) |
 | Ruby | Available | `npx supercov -- rspec` | Preview: mutant 0.17.1's mutants |
 | Go | Available | `npx supercov -- go test ./...` | Preview: Gremlins 0.6.0's mutants |
 | Java | Available | `npx supercov -- mvn test` | PIT 1.17.1's mutants |
@@ -37,9 +37,10 @@ The npm-distributed CLI requires Node.js 22 or newer for every language.
 `npx supercov mutants -- <test command>` lists the mutants the language's
 established tool would make of every source the run measured, says from the
 run which ones no test reaches or infects, and runs the rest against the tests
-that reach them. JavaScript, TypeScript, Rust, Java and Kotlin are fully
-supported; Python, Go and Ruby are in preview, each validated against its
-tool on public projects. The Mutation testing column of
+that reach them. JavaScript, TypeScript, Rust, Java, Kotlin and Python are
+fully supported (Python's strong pass on Linux and macOS); Go and Ruby are
+in preview, each validated against its tool on public projects. The
+Mutation testing column of
 each runner table below says whether that runner's tests run against mutants.
 A runner without a strong driver still gets the mutants list and the weak
 report, from its coverage; its mutants are `error` in a strong pass, counted
@@ -459,10 +460,10 @@ npx supercov -- wasm-pack test --headless --chrome
 
 | Runner | Attribution | Current requirement | Mutation testing |
 | --- | --- | --- | --- |
-| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.9 or newer; run with `npx supercov -- pytest` or `python -m pytest` | Preview, on Linux and macOS |
-| pytest-xdist | Exact per worker | Workers inherit the run through the environment | Preview: the pass turns xdist off and forks its own workers |
+| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.9 or newer; run with `npx supercov -- pytest` or `python -m pytest` | Yes, on Linux and macOS |
+| pytest-xdist | Exact per worker | Workers inherit the run through the environment | Yes: the pass turns xdist off and forks its own workers |
 | pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | | Preview, not verified |
-| `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test | Preview, on Linux and macOS; not a suite that runs unittest through its own script |
+| `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test | Yes, on Linux and macOS; not a suite that runs unittest through its own script |
 
 Your project runs in place with its own interpreter and virtual environment.
 Supercov adds its runner hooks through the process environment and places a

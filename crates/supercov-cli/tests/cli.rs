@@ -29488,7 +29488,7 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let overview = project.supercov(&["--help"]).succeeds();
     assert!(
         overview.contains(
-            "Test the tests with mutants (JavaScript, TypeScript, Rust, Java, Kotlin; Python, Go and Ruby in preview)"
+            "Test the tests with mutants (JavaScript, TypeScript, Rust, Java, Kotlin, Python; Go and Ruby in preview)"
         ),
         "{overview}"
     );

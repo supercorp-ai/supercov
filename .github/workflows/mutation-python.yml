@@ -1,9 +1,10 @@
 name: Python mutation
 
-# Supercov's Python mutants measured against mutmut 3.8.1 on four public
+# Supercov's Python mutants measured against mutmut 3.8.1 on six public
 # projects (benchmarks/mutation-python/README.md): each tool's verdicts and
 # time on the same runners, mutmut's full kill matrix as the ground truth,
-# and the cost of a measured run and of its value probes.
+# the cost of a measured run and of its value probes, and the same passes
+# under other interpreters and launchers, which must agree with 3.12's.
 
 on:
   push:
@@ -12,6 +13,11 @@ on:
       - .github/workflows/mutation-python.yml
       - benchmarks/mutation-python/**
   workflow_dispatch:
+    inputs:
+      projects:
+        description: "Space-separated projects to run (empty: all six)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -21,9 +27,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Each job's matrix, kept to the projects asked for.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      supercov: ${{ steps.plan.outputs.supercov }}
+      projects: ${{ steps.plan.outputs.projects }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      variants: ${{ steps.plan.outputs.variants }}
+    steps:
+      - id: plan
+        env:
+          PROJECTS: ${{ inputs.projects }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          everything = ["python-slugify", "cachetools", "parse", "humanize", "markupsafe", "semver"]
+          asked = os.environ.get("PROJECTS", "").split() or everything
+          projects = [project for project in everything if project in asked]
+          # mutmut's kill matrix in shards of under ten minutes each.
+          shards = {"python-slugify": 4, "cachetools": 8, "parse": 1, "humanize": 10, "markupsafe": 1, "semver": 4}
+          supercov = [{"project": p, "runner": "pytest", "values": v} for p in projects for v in ("", "values")]
+          if "cachetools" in projects:
+              supercov += [{"project": "cachetools", "runner": "unittest", "values": v} for v in ("", "values")]
+          matrix = [{"project": p, "shard": f"{k}/{shards[p]}"} for p in projects for k in range(1, shards[p] + 1)]
+          # Other interpreters and launchers, on a C extension and a suite of
+          # parametrized tests and doctests.
+          variants = [
+              {"project": p, "variant": name, "python": python, "installer": installer, "launcher": launcher}
+              for p in projects if p in ("markupsafe", "semver")
+              for name, python, installer, launcher in (
+                  ("py3.10", "3.10", "uv", ""),
+                  ("py3.13", "3.13", "uv", ""),
+                  ("pip-script", "3.12", "pip", "script"),
+                  ("uv-run", "3.12", "uv", "uv"),
+                  ("poetry-run", "3.12", "uv", "poetry"),
+              )
+          ]
+          for name, value in (("projects", projects), ("supercov", supercov), ("matrix", matrix), ("variants", variants or [{"project": "none"}])):
+              print(f"{name}={json.dumps({'include': value} if name != 'projects' else value)}")
+          PY
+
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # A branch's first release build has no cache of its own to start from.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -38,19 +87,13 @@ jobs:
           retention-days: 3
 
   supercov:
-    needs: build
+    needs: [plan, build]
     name: Supercov ${{ matrix.project }} ${{ matrix.runner }} ${{ matrix.values }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        project: [python-slugify, cachetools, parse, humanize]
-        runner: [pytest]
-        values: ["", values]
-        include:
-          - { project: cachetools, runner: unittest, values: "" }
-          - { project: cachetools, runner: unittest, values: values }
+      matrix: ${{ fromJSON(needs.plan.outputs.supercov) }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
@@ -68,14 +111,14 @@ jobs:
           path: out
 
   overhead:
-    needs: build
+    needs: [plan, build]
     name: Overhead ${{ matrix.project }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        project: [python-slugify, cachetools, parse, humanize]
+        project: ${{ fromJSON(needs.plan.outputs.projects) }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
@@ -94,13 +137,14 @@ jobs:
           path: out
 
   mutmut:
+    needs: plan
     name: mutmut ${{ matrix.project }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        project: [python-slugify, cachetools, parse, humanize]
+        project: ${{ fromJSON(needs.plan.outputs.projects) }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
@@ -113,36 +157,13 @@ jobs:
           path: out
 
   matrix:
+    needs: plan
     name: Kill matrix ${{ matrix.project }} ${{ matrix.shard }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { project: python-slugify, shard: 1/4 }
-          - { project: python-slugify, shard: 2/4 }
-          - { project: python-slugify, shard: 3/4 }
-          - { project: python-slugify, shard: 4/4 }
-          - { project: cachetools, shard: 1/8 }
-          - { project: cachetools, shard: 2/8 }
-          - { project: cachetools, shard: 3/8 }
-          - { project: cachetools, shard: 4/8 }
-          - { project: cachetools, shard: 5/8 }
-          - { project: cachetools, shard: 6/8 }
-          - { project: cachetools, shard: 7/8 }
-          - { project: cachetools, shard: 8/8 }
-          - { project: parse, shard: 1/1 }
-          - { project: humanize, shard: 1/10 }
-          - { project: humanize, shard: 2/10 }
-          - { project: humanize, shard: 3/10 }
-          - { project: humanize, shard: 4/10 }
-          - { project: humanize, shard: 5/10 }
-          - { project: humanize, shard: 6/10 }
-          - { project: humanize, shard: 7/10 }
-          - { project: humanize, shard: 8/10 }
-          - { project: humanize, shard: 9/10 }
-          - { project: humanize, shard: 10/10 }
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
@@ -159,8 +180,40 @@ jobs:
           name: matrix-${{ matrix.project }}-${{ strategy.job-index }}
           path: out
 
+  variants:
+    needs: [plan, build]
+    if: ${{ fromJSON(needs.plan.outputs.variants).include[0].project != 'none' }}
+    name: Supercov ${{ matrix.project }} ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.variants) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - if: matrix.launcher == 'poetry'
+        run: uv tool install -q "poetry==2.2.1"
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov
+          path: ${{ runner.temp }}/bin
+      - run: chmod +x "$RUNNER_TEMP/bin/supercov"
+      - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          INSTALLER: ${{ matrix.installer }}
+      - run: benchmarks/mutation-python/run-supercov.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" pytest "$RUNNER_TEMP/bin/supercov" out
+        env:
+          LAUNCHER: ${{ matrix.launcher }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: supercov-${{ matrix.project }}-pytest-${{ matrix.variant }}
+          path: out
+
   compare:
-    needs: [supercov, overhead, mutmut, matrix]
+    needs: [supercov, overhead, mutmut, matrix, variants]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
