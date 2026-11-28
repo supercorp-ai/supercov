@@ -32,9 +32,7 @@ jobs:
       matrix:
         include:
           - { variant: base, ref: ce132bc2 }
-          - { variant: mergeindex, ref: origin/perf/merge-publishes-index }
-          - { variant: shared, ref: origin/perf/index-shared-test-records }
-          - { variant: pages, ref: origin/perf/index-page-checks }
+          - { variant: timing, ref: origin/exp/post-test-timing-src }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -158,9 +156,10 @@ jobs:
           BENCH_MODE: measure
           BENCH_PROJECT: ${{ github.workspace }}/excalidraw-src
           BENCH_FIXTURES: ${{ github.workspace }}/fixtures.tar
-          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,mergeindex=${{ github.workspace }}/binaries/supercov-mergeindex/supercov,shared=${{ github.workspace }}/binaries/supercov-shared/supercov,pages=${{ github.workspace }}/binaries/supercov-pages/supercov
+          BENCH_BINARIES: base=${{ github.workspace }}/binaries/supercov-base/supercov,timing=${{ github.workspace }}/binaries/supercov-timing/supercov
           BENCH_OUTPUT: ${{ runner.temp }}/bench
-          BENCH_ROUNDS: 2
+          BENCH_ROUNDS: 1
+          SUPERCOV_POST_TIMING: 1
         run: node scripts/post-test-bench.mjs
       - if: always()
         uses: actions/upload-artifact@v4
