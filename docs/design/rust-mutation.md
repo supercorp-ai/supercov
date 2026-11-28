@@ -253,12 +253,15 @@ build does:
   `wasm32-unknown-unknown` from the same switched copy; a mutant that does
   not compile there leaves the switched build and is built on its own,
   where the test's real `wrangler dev` builds it, and fails, as it would;
-- the first test's `wrangler dev` runs the `[build] command` once for the
-  switched build (the others wait for it), and every `wrangler dev` then
-  gets a copy of its configuration with no `[build]`, whose entry first
-  loads a module that switches the test's mutant on in each wasm instance as
-  it is made (the runtime's `__supercov_strong_activate_*` exports, as the
-  Node hook does for wasm-pack), so a mutant costs no Worker build;
+- the pass then runs each Worker's `[build] command` once, in the switched
+  copy, with Cargo's output in the check's target, and marks it built for
+  that switched build. Every test's `wrangler dev` gets a copy of its
+  configuration with no `[build]`, whose entry first loads a module that
+  switches the test's mutant on in each wasm instance as it is made (the
+  runtime's `__supercov_strong_activate_*` exports, as the Node hook does
+  for wasm-pack), so a mutant costs no Worker build. A Worker that does not
+  build, or whose wasm fails to build through no mutant's fault, is served
+  as the tests' own `wrangler` builds it, with no mutant switched on;
 - after each call into the module, that module reads the runtime's
   `__supercov_strong_hits_*` export and, the first time the mutant ran,
   logs it; a poller on wrangler's inspector, which the stand-in starts
