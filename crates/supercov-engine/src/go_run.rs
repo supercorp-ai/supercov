@@ -1437,7 +1437,9 @@ mod tests {
         fresh_evidence_directory(&root, &directory).unwrap();
         assert!(directory.is_dir());
         assert!(!directory.join("old.bin").exists());
-        assert!(fresh_evidence_directory(&root, &root.join("elsewhere")).is_err());
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert!(fresh_evidence_directory(&root, &elsewhere).is_err());
         fs::remove_dir_all(&root).ok();
     }
 
