@@ -641,33 +641,8 @@ pub struct IndexedHitMetadata {
     pub parent_id: Option<String>,
     pub source: String,
     pub tests: Vec<String>,
-}
-
-/// A branch outcome some test reached (`reached_branch_outcomes`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReachedBranchOutcome {
-    pub id: String,
-    /// The branch it is an outcome of.
-    pub parent_id: Option<String>,
-    pub file: String,
-    pub line: usize,
-    pub alternative: Option<String>,
-}
-
-/// A decision and its conditions (`decision_conditions`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct DecisionConditions {
-    pub meta: crate::coverage_report::DecisionMeta,
-    pub conditions: Vec<DecisionCondition>,
-}
-
-/// One condition of a decision: which it is, its source, and whether its
-/// independent effect was shown.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionCondition {
-    pub index: usize,
-    pub source: String,
-    pub covered: bool,
+    /// How many tests reached it: `tests`' length where they are read.
+    pub reached_by: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3681,7 +3656,19 @@ impl<'a> CoverageIndex<'a> {
     #[track_caller]
     pub fn lines(&self, view: CoverageViewId) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         self.readable("lines")?;
-        self.lines_where(view, None)
+        self.lines_where(view, None, true)
+    }
+
+    /// `lines`, without the tests, phases and confidence of each (left
+    /// empty): what comparing two whole runs reads, without decoding which of
+    /// thousands of tests ran each line.
+    #[track_caller]
+    pub fn line_places(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        self.readable("line_places")?;
+        self.lines_where(view, None, false)
     }
 
     /// `lines`, of one file only: records of other files are skipped before anything in them is decoded.
@@ -3692,13 +3679,14 @@ impl<'a> CoverageIndex<'a> {
         file: &str,
     ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         self.readable("lines_in_file")?;
-        self.lines_where(view, Some(file))
+        self.lines_where(view, Some(file), true)
     }
 
     fn lines_where(
         &self,
         view: CoverageViewId,
         file: Option<&str>,
+        relations: bool,
     ) -> Result<Vec<IndexedLine>, CoverageIndexError> {
         let descriptor = self.section(SECTION_LINES);
         let mut lines = Vec::new();
@@ -3715,15 +3703,21 @@ impl<'a> CoverageIndex<'a> {
             if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
-            lines.push(IndexedLine {
+            let mut line = IndexedLine {
                 file: self.string(get_u32(record, 4))?,
                 line: get_usize(record, 8),
                 covered: bool_field(record[1])?,
                 measured: !bool_field(record[2])?,
-                tests: self.relation_strings(get_u64(record, 16), get_u64(record, 24))?,
-                phases: self.relation_strings(get_u64(record, 32), get_u64(record, 40))?,
-                confidence: self.confidence(get_u64(record, 48))?,
-            });
+                tests: Vec::new(),
+                phases: Vec::new(),
+                confidence: crate::coverage_report::CoverageConfidence::default(),
+            };
+            if relations {
+                line.tests = self.relation_strings(get_u64(record, 16), get_u64(record, 24))?;
+                line.phases = self.relation_strings(get_u64(record, 32), get_u64(record, 40))?;
+                line.confidence = self.confidence(get_u64(record, 48))?;
+            }
+            lines.push(line);
         }
         Ok(lines)
     }
@@ -3950,160 +3944,24 @@ impl<'a> CoverageIndex<'a> {
         Ok(details)
     }
 
-    /// The places of the lines a view covers, in `lines`' order, without
-    /// the tests, phases and confidence of each: what comparing two whole
-    /// runs reads, without decoding which of thousands of tests ran a line.
-    #[track_caller]
-    pub fn covered_line_places(
-        &self,
-        view: CoverageViewId,
-    ) -> Result<Vec<(String, usize)>, CoverageIndexError> {
-        self.readable("covered_line_places")?;
-        let descriptor = self.section(SECTION_LINES);
-        let mut places = Vec::new();
-        for index in 0..descriptor.count {
-            let record = self.index.record(SECTION_LINES, index)?;
-            if CoverageViewId::try_from(record[0])? != view {
-                continue;
-            }
-            if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
-                return Err(CoverageIndexError::InvalidRecord("line record"));
-            }
-            bool_field(record[2])?;
-            if bool_field(record[1])? {
-                places.push((self.string(get_u32(record, 4))?, get_usize(record, 8)));
-            }
-        }
-        Ok(places)
-    }
-
-    /// Each branch outcome of a view some test reached, in `hit_metadata`'s
-    /// order, as it gives them but without which tests reached it.
-    #[track_caller]
-    pub fn reached_branch_outcomes(
-        &self,
-        view: CoverageViewId,
-    ) -> Result<Vec<ReachedBranchOutcome>, CoverageIndexError> {
-        self.readable("reached_branch_outcomes")?;
-        let descriptor = self.section(SECTION_HIT_METADATA);
-        let relations = self.section(SECTION_STRING_RELATIONS).count;
-        let mut outcomes = Vec::new();
-        for index in 0..descriptor.count {
-            let record = self.index.record(SECTION_HIT_METADATA, index)?;
-            if CoverageViewId::try_from(record[0])? != view {
-                continue;
-            }
-            if record[2..4].iter().any(|byte| *byte != 0)
-                || record[12..16].iter().any(|byte| *byte != 0)
-            {
-                return Err(CoverageIndexError::InvalidRecord("hit metadata record"));
-            }
-            match record[1] {
-                0 | 1 => continue,
-                2 => {}
-                _ => return Err(CoverageIndexError::InvalidRecord("hit obligation")),
-            }
-            let tests = get_u64(record, 56);
-            let end = get_u64(record, 48)
-                .checked_add(tests)
-                .ok_or(CoverageIndexError::SizeOverflow)?;
-            if end > relations {
-                return Err(CoverageIndexError::InvalidRecord("string relation range"));
-            }
-            if tests == 0 {
-                continue;
-            }
-            outcomes.push(ReachedBranchOutcome {
-                id: self.string(get_u32(record, 4))?,
-                parent_id: self.optional_string(get_u32(record, 36))?,
-                file: self.string(get_u32(record, 8))?,
-                line: get_usize(record, 16),
-                alternative: self.optional_string(get_u32(record, 40))?,
-            });
-        }
-        Ok(outcomes)
-    }
-
-    /// Each decision of a view, in `decision_details`' order, with each of
-    /// its conditions -- its index, its source and whether it was shown --
-    /// as it gives them, without the vectors, tests and confidence.
-    #[track_caller]
-    pub fn decision_conditions(
-        &self,
-        view: CoverageViewId,
-    ) -> Result<Vec<DecisionConditions>, CoverageIndexError> {
-        self.readable("decision_conditions")?;
-        let metadata = self
-            .decision_metadata(view)?
-            .into_iter()
-            .map(|meta| (meta.id.clone(), meta))
-            .collect::<HashMap<_, _>>();
-        let descriptor = self.section(SECTION_DECISION_DETAILS);
-        let condition_count = self.section(SECTION_DECISION_CONDITIONS).count;
-        let mut decisions = Vec::new();
-        for index in 0..descriptor.count {
-            let record = self.index.record(SECTION_DECISION_DETAILS, index)?;
-            if CoverageViewId::try_from(record[0])? != view {
-                continue;
-            }
-            if record[1] & !3 != 0 || record[2..4].iter().any(|byte| *byte != 0) {
-                return Err(CoverageIndexError::InvalidRecord("decision detail record"));
-            }
-            if record[1] & 2 != 0 && record[1] & 1 == 0 {
-                return Err(CoverageIndexError::InvalidRecord(
-                    "covered unexecuted decision",
-                ));
-            }
-            let start = get_u64(record, 48);
-            let end =
-                start
-                    .checked_add(get_u64(record, 56))
-                    .ok_or(CoverageIndexError::InvalidRecord(
-                        "decision condition range",
-                    ))?;
-            if end > condition_count {
-                return Err(CoverageIndexError::InvalidRecord(
-                    "decision condition range",
-                ));
-            }
-            let conditions = (start..end)
-                .map(|index| {
-                    let record = self.index.record(SECTION_DECISION_CONDITIONS, index)?;
-                    Ok(DecisionCondition {
-                        index: get_usize(record, 8),
-                        source: self.string(get_u32(record, 4))?,
-                        covered: record[0] & 1 != 0,
-                    })
-                })
-                .collect::<Result<Vec<_>, CoverageIndexError>>()?;
-            let id = self.string(get_u32(record, 4))?;
-            let meta = metadata
-                .get(&id)
-                .cloned()
-                .ok_or(CoverageIndexError::InvalidRecord(
-                    "missing decision metadata",
-                ))?;
-            if conditions.len() != meta.conditions.len()
-                || conditions.iter().enumerate().any(|(index, condition)| {
-                    condition.index != index || condition.source != meta.conditions[index]
-                })
-            {
-                return Err(CoverageIndexError::InvalidRecord(
-                    "decision condition denominator",
-                ));
-            }
-            decisions.push(DecisionConditions { meta, conditions });
-        }
-        Ok(decisions)
-    }
-
     #[track_caller]
     pub fn hit_metadata(
         &self,
         view: CoverageViewId,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         self.readable("hit_metadata")?;
-        self.hit_metadata_where(view, None)
+        self.hit_metadata_where(view, None, true)
+    }
+
+    /// `hit_metadata`, without which tests reached each (left empty; how
+    /// many did is `reached_by`): what comparing two whole runs reads.
+    #[track_caller]
+    pub fn hit_places(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        self.readable("hit_places")?;
+        self.hit_metadata_where(view, None, false)
     }
 
     /// `hit_metadata`, of one file only: records of other files are skipped before anything in them is decoded.
@@ -4114,13 +3972,14 @@ impl<'a> CoverageIndex<'a> {
         file: &str,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         self.readable("hit_metadata_in_file")?;
-        self.hit_metadata_where(view, Some(file))
+        self.hit_metadata_where(view, Some(file), true)
     }
 
     fn hit_metadata_where(
         &self,
         view: CoverageViewId,
         file: Option<&str>,
+        relations: bool,
     ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
         let descriptor = self.section(SECTION_HIT_METADATA);
         let mut metadata = Vec::new();
@@ -4159,8 +4018,13 @@ impl<'a> CoverageIndex<'a> {
                 alternative: self.optional_string(get_u32(record, 40))?,
                 parent_id: (obligation == "branch").then_some(metadata_label).flatten(),
                 source: self.string(get_u32(record, 44))?,
-                tests: self.relation_strings(get_u64(record, 48), get_u64(record, 56))?,
+                tests: Vec::new(),
+                reached_by: get_u64(record, 56),
             });
+            if relations {
+                let tests = self.relation_strings(get_u64(record, 48), get_u64(record, 56))?;
+                metadata.last_mut().expect("pushed above").tests = tests;
+            }
         }
         Ok(metadata)
     }

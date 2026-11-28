@@ -458,13 +458,14 @@ impl QueryIndex {
         if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
             return Err(QueryIndexError::InvalidHeader("overlapping sections"));
         }
-        let mut positions = Vec::new();
+        let kinds = descriptors
+            .iter()
+            .map(|descriptor| descriptor.kind as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut positions = vec![None; kinds];
         for (position, descriptor) in descriptors.iter().enumerate() {
-            let kind = descriptor.kind as usize;
-            if positions.len() <= kind {
-                positions.resize(kind + 1, None);
-            }
-            positions[kind] = Some(position);
+            positions[descriptor.kind as usize] = Some(position);
         }
         let verified_pages = descriptors
             .iter()
