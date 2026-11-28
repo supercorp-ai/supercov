@@ -285,6 +285,11 @@ fn main() -> ExitCode {
                 supercov_engine::rust_worker::poll_wrangler(rest()).clamp(0, 255) as u8,
             );
         }
+        if command == supercov_engine::rust_worker::WRANGLER_REACH_COMMAND {
+            return ExitCode::from(
+                supercov_engine::rust_worker::poll_reach(rest()).clamp(0, 255) as u8,
+            );
+        }
     }
     // The parent-death watchdog inherits arbitrary wrapper environments. It
     // must dispatch before rustdoc wrapper detection and must never emit

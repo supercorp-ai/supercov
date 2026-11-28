@@ -424,7 +424,7 @@ const WORKFLOWS = {
       paths: ['crates/supercov-engine/vendor/tree-sitter-kotlin/**', 'crates/supercov-engine/src/kotlin_grammar.rs',
         'crates/supercov-engine/tests/kotlin_corpus.rs', 'scripts/kotlin-*'],
     },
-    'rust-worker': { gateLegs: ['rust_worker_playwright', 'rust_worker_cargo_test', 'rust_worker_durable_objects'] },
+    'rust-worker': { gateLegs: ['rust_worker_playwright', 'rust_worker_cargo_test', 'rust_worker_durable_objects', 'rust_worker_mutants'] },
     'rust-wasm-js': { gates: ['rust_wasm_js'] },
     'rust-wasm': { gates: ['rust_wasm_hosts'] },
   },

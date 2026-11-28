@@ -13625,6 +13625,19 @@ fn the_wrangler_shim_hands_over_or_says_why_it_cannot() {
     );
     assert_eq!(handed.code(), 3, "{}", handed.stderr());
     assert_eq!(handed.stdout(), "wrangler deploy --name it\n");
+    // In a strong pass's test, as asked where it is no local `wrangler dev`;
+    // and the reach poller wants its five arguments.
+    let strong = project.supercov_with(
+        &["__wrangler", "deploy", "--name", "it"],
+        &[
+            ("SUPERCOV_WRANGLER", real),
+            ("SUPERCOV_STRONG_WORKER", "b1"),
+            ("SUPERCOV_ACTIVE_MUTANT", "src/lib.rs#0"),
+        ],
+    );
+    assert_eq!(strong.code(), 3, "{}", strong.stderr());
+    assert_eq!(strong.stdout(), "wrangler deploy --name it\n");
+    assert_eq!(project.supercov(&["__wrangler-reach", "1"]).code(), 2);
     // The poller wants a process, a port and where to write; given a
     // process already gone, it ends.
     assert_eq!(project.supercov(&["__wrangler-poll"]).code(), 2);
