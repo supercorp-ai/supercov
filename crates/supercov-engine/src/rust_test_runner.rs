@@ -2392,7 +2392,10 @@ pub fn run_prepared_rust_tests(
         };
         let mut outcome = outcome;
         drop_settled_alternatives(
-            outcome.results.iter_mut().flat_map(|result| &mut result.runtime),
+            outcome
+                .results
+                .iter_mut()
+                .flat_map(|result| &mut result.runtime),
             measured,
             &project.manifest,
         );
