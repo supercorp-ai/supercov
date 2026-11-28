@@ -256,6 +256,37 @@ fn write(path: &Path, contents: &str) -> Result<(), String> {
 
 /// A file-system-safe name for a package's evidence, so two packages cannot
 /// collide on one path.
+/// Where a run's test packages write their evidence: beside the copy, and the
+/// same for every run of it. Each test package's harness names this path in
+/// its source, so a path of the run's own made every run's test files new
+/// bytes, and Go compiled every package with tests and linked every test
+/// binary again, where the same bytes are served from its build cache. Only
+/// the run holding the copy's lock writes here, and it empties it first.
+fn stable_evidence_directory(root: &Path, workspace: &Path) -> PathBuf {
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".{name}.go-evidence"))
+}
+
+/// `directory`, emptied: what an earlier run of this copy left is not this
+/// run's, and a package that writes nothing now must not be read as having
+/// written that.
+fn fresh_evidence_directory(root: &Path, directory: &Path) -> Result<(), String> {
+    crate::lifecycle::remove_scratch_tree_deferred(root, directory)
+        .map_err(said)
+        .and_then(|_| fs::create_dir_all(directory).map_err(said))
+}
+
+/// An error as its message.
+fn said(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
 fn evidence_name(directory: &str) -> String {
     let slug = directory
         .chars()
@@ -778,6 +809,8 @@ pub fn run_direct_go(
     // evidence worth keeping; one that failed after has evidence that cost the
     // suite its wall clock.
     let measured = std::cell::Cell::new(false);
+    // Where the test packages write their evidence, once the copy is known.
+    let evidence_path = std::cell::RefCell::new(None::<PathBuf>);
     let result = (|| {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
@@ -812,8 +845,9 @@ pub fn run_direct_go(
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
         let workspace =
             prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
-        let evidence_directory = work_directory.join("go/evidence");
-        fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
+        let evidence_directory = stable_evidence_directory(&root, &workspace);
+        evidence_path.replace(Some(evidence_directory.clone()));
+        fresh_evidence_directory(&root, &evidence_directory)?;
         // Decided before instrumenting, because whether a parallel test can be
         // announced depends on whether anything will be running beside it.
         let command = request.command.clone();
@@ -1136,12 +1170,12 @@ pub fn run_direct_go(
         if !measured.get() {
             return error;
         }
-        note_kept_evidence(
-            &root,
-            &work_directory.join("go/evidence"),
-            &request.run_id,
-            error,
-        )
+        // Measured, so the copy, and where its packages wrote, is known.
+        let evidence = evidence_path
+            .borrow()
+            .clone()
+            .expect("the evidence directory is known once the tests ran");
+        note_kept_evidence(&root, &evidence, &request.run_id, error)
     });
     if result.is_err() {
         let _ = remove_stored_tree_deferred(&root, &work_directory);
@@ -1384,6 +1418,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// The copy's evidence directory is emptied before a run: an earlier
+    /// run's file is gone. One outside the project's store is refused.
+    #[test]
+    fn the_evidence_directory_starts_each_run_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-go-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = root.join(".supercov/workspaces/workspace/.p.go-evidence");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("old.bin"), b"earlier").unwrap();
+        fresh_evidence_directory(&root, &directory).unwrap();
+        assert!(directory.is_dir());
+        assert!(!directory.join("old.bin").exists());
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert!(fresh_evidence_directory(&root, &elsewhere).is_err());
+        fs::remove_dir_all(&root).ok();
+    }
 
     /// A file that does not parse is named for the project as it stands.
     #[test]
@@ -1720,6 +1778,12 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Where the first copy's test packages write their evidence.
+    fn copy_evidence(root: &Path) -> PathBuf {
+        let workspace = crate::workspace::copy_path(root, 1).unwrap();
+        stable_evidence_directory(root, &workspace)
+    }
+
     /// Evidence of `probes` probes, the first reached, and no test.
     #[cfg(unix)]
     fn evidence_reaching_the_first_of(probes: usize) -> Vec<u8> {
@@ -1752,10 +1816,7 @@ mod tests {
         let prepared = root.with_extension("bin");
         fs::write(&prepared, evidence_reaching_the_first_of(probes)).unwrap();
         let request = go_request(&root, &["cp", "", ""]);
-        let evidence = root
-            .join(".supercov/work")
-            .join(&request.run_id)
-            .join("go/evidence/_.bin");
+        let evidence = copy_evidence(&root).join("_.bin");
         let command = [
             "cp".to_owned(),
             prepared.display().to_string(),
@@ -1772,10 +1833,7 @@ mod tests {
 
         // Measured and then not published: what was measured is kept.
         let run_id = "2026-01-03T00-00-00-000Z";
-        let evidence = root
-            .join(".supercov/work")
-            .join(run_id)
-            .join("go/evidence/_.bin");
+        let evidence = copy_evidence(&root).join("_.bin");
         let runs = root.join(".supercov/runs");
         let command = format!(
             "cp {} {} && rm -rf {runs} && touch {runs}",
