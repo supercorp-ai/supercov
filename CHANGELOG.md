@@ -41,6 +41,7 @@
 **Changed**
 
 - `supercov merge` decompresses each run's evidence once, on a core of its own. It read every run's archive one after another, then read each again to keep what the run answers with. On Excalidraw's Vitest suite split into 16 shards, the merge took 7.8 s; it now takes 5.2 s, about 0.3 GB more at its peak, the merged run byte for byte the same.
+- Reports and exports read the run's view kept beside it instead of analysing all of the run's evidence again. Every `supercov runs <id> report --format …` and `supercov report` built the run's view from its evidence: on Excalidraw's 1,700-test Vitest run, 11.5 s and 10 GB each. Publication now keeps the view (`run-view.json.gz`) from the analysis it already holds, and a run without one (a merged run, or one recorded before) keeps it the first time it is read. The same run's istanbul export now takes 0.48 s and its HTML report 0.33 s, about 0.2 GB each; every output is byte for byte as before. The view is read only for the evidence, analysis and run it was made from; whether the checkout still matches is worked out each time.
 
 ## 4.29.19
 
