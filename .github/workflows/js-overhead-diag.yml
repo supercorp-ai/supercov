@@ -45,7 +45,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: large, shard: 1/16, offset: 0, rounds: 1, diagnose: 0, plain: '0', variants: 'new' }
           - { app: excalidraw, suites: unit, node: 22, offset: 0, rounds: 1, diagnose: 0, plain: '0', variants: 'new' }
     steps:
       - uses: actions/checkout@v6
@@ -113,7 +112,7 @@ jobs:
           SPEED_RUN_TIMEOUT_MS: '480000'
           SUPERCOV_DIAG_TIMING_FILE: ${{ runner.temp }}/speed/logs/diag-timing.txt
           SPEED_PLAIN: ${{ matrix.plain || '1' }}
-          SUPERCOV_DIAG_INSPECT_FILE: ${{ runner.temp }}/speed/logs/inspect.jsonl
+          SUPERCOV_DIAG_INSPECT_FILE: ${{ runner.temp }}/speed/logs/inspect
           SPEED_PROFILE_VARIANTS: ${{ matrix.profile }}
         run: node scripts/speed-benchmark.mjs
       - if: always()

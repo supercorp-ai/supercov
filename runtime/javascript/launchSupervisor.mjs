@@ -1,6 +1,7 @@
 import childProcess from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { threadId } from "node:worker_threads";
 import Module, { syncBuiltinESMExports } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -620,14 +621,16 @@ function patchBuilder(builder) {
 }
 // DIAGNOSTIC ONLY (never merged): what export inspection does, per process.
 const diagInspect = process.env.SUPERCOV_DIAG_INSPECT_FILE ? { loads: 0, objects: 0, descriptors: 0, primitives: 0, ms: 0, byRequest: new Map() } : undefined;
-if (diagInspect)
-    process.once("exit", () => {
+const diagInspectWrite = () => {
         try {
             const top = [...diagInspect.byRequest].sort((a, b) => b[1][0] - a[1][0]).slice(0, 12).map(([request, [ms, objects, descriptors]]) => ({ request, ms: Math.round(ms * 10) / 10, objects, descriptors }));
-            appendFileSync(process.env.SUPERCOV_DIAG_INSPECT_FILE, JSON.stringify({ pid: process.pid, argv: process.argv.slice(1, 3).join(" ").slice(-80), loads: diagInspect.loads, keysListed: diagInspect.keysListed, kinds: diagInspect.kinds, objects: diagInspect.objects, descriptors: diagInspect.descriptors, primitives: diagInspect.primitives, ms: Math.round(diagInspect.ms), top }) + "\n");
+            mkdirSync(process.env.SUPERCOV_DIAG_INSPECT_FILE, { recursive: true });
+            writeFileSync(`${process.env.SUPERCOV_DIAG_INSPECT_FILE}/${process.pid}-${threadId}.json`, JSON.stringify({ pid: process.pid, argv: process.argv.slice(1, 3).join(" ").slice(-80), loads: diagInspect.loads, keysListed: diagInspect.keysListed, kinds: diagInspect.kinds, objects: diagInspect.objects, descriptors: diagInspect.descriptors, primitives: diagInspect.primitives, ms: Math.round(diagInspect.ms), top }) + "\n");
         }
         catch { }
-    });
+    };
+if (diagInspect)
+    process.once("exit", diagInspectWrite);
 function inspectExports(value, depth = 0) {
     if (((!value || typeof value !== "object") && typeof value !== "function") ||
         depth > 2) {
@@ -850,6 +853,8 @@ export function installLaunchSupervisor() {
             inspectExports(exports);
             const ms = performance.now() - started;
             diagInspect.ms += ms;
+            if (diagInspect.loads % 200 === 0)
+                diagInspectWrite();
             if (diagInspect.objects !== before[0]) {
                 const entry = diagInspect.byRequest.get(request) ?? [0, 0, 0];
                 entry[0] += ms;
