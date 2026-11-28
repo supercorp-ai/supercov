@@ -465,8 +465,8 @@ fn restore_source_times(
     for (source, digest) in &carried.digests {
         let path = workspace.join(source);
         // fault-site: jvm-run.restore-source-times.read
-        let unchanged = fs::read(&path)
-            .is_ok_and(|bytes| <[u8; 32]>::from(Sha256::digest(&bytes)) == *digest);
+        let unchanged =
+            fs::read(&path).is_ok_and(|bytes| <[u8; 32]>::from(Sha256::digest(&bytes)) == *digest);
         if unchanged {
             // fault-site: jvm-run.restore-source-times.open
             let _ = fs::open_with(std::fs::OpenOptions::new().write(true), &path)
