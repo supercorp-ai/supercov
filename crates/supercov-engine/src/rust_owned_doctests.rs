@@ -635,7 +635,9 @@ fn file_batches(
 ) -> (Vec<(String, Vec<String>)>, Vec<String>) {
     let mut by_file = BTreeMap::<&str, Vec<String>>::new();
     for name in selected {
-        let file = name.split_once(" - ").map_or(name.as_str(), |(file, _)| file);
+        let file = name
+            .split_once(" - ")
+            .map_or(name.as_str(), |(file, _)| file);
         by_file.entry(file).or_default().push(name.clone());
     }
     let mut batches = Vec::new();
@@ -700,8 +702,8 @@ fn run_batched(command: &mut Command, batch: &Path) -> Result<Output, RustTestRu
             }
         });
         while !reading.is_finished() {
-            let text = String::from_utf8_lossy(&printed.lock().expect("doctest output lock"))
-                .into_owned();
+            let text =
+                String::from_utf8_lossy(&printed.lock().expect("doctest output lock")).into_owned();
             answer_runtools(batch, &text);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -731,7 +733,10 @@ fn answer_runtools(batch: &Path, text: &str) {
     // fault-site: rust-owned-doctests.answer-runtools.read-dir
     for entry in fs::read_dir(batch).into_iter().flatten().flatten() {
         let asked = entry.path();
-        if asked.extension().is_some_and(|extension| extension == "want") {
+        if asked
+            .extension()
+            .is_some_and(|extension| extension == "want")
+        {
             let answer = asked.with_extension("name");
             let pending = asked.with_extension("answer");
             // Whole or not at all: written beside, then renamed.
@@ -746,7 +751,9 @@ fn answer_runtools(batch: &Path, text: &str) {
 /// Which doctest the wrapper says this runtool was handed: asked in the
 /// batch's directory, under this process's id, and waited for.
 fn asked_name() -> Result<String, RustTestRunnerError> {
-    let batch = std::env::var_os(BATCH_DIR_ENV).map(PathBuf::from).unwrap_or_default();
+    let batch = std::env::var_os(BATCH_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_default();
     let stem = batch.join(std::process::id().to_string());
     // fault-site: rust-owned-doctests.asked-name.write
     fs::write(stem.with_extension("want"), b"").map_err(io_error)?;
@@ -1692,11 +1699,16 @@ mod tests {
     fn the_started_doctest_is_the_last_line_with_no_result() {
         let done = "running 2 tests\ntest src/lib.rs - a (line 1) ... ok\n";
         assert_eq!(
-            started_doctest(&format!("{done}test src/lib.rs - b (line 5) - should panic ... ")),
+            started_doctest(&format!(
+                "{done}test src/lib.rs - b (line 5) - should panic ... "
+            )),
             Some("src/lib.rs - b (line 5)".to_owned())
         );
         assert_eq!(started_doctest(done), None);
-        assert_eq!(started_doctest("running 2 tests\ntest src/lib.rs - a"), None);
+        assert_eq!(
+            started_doctest("running 2 tests\ntest src/lib.rs - a"),
+            None
+        );
         assert_eq!(started_doctest(""), None);
     }
 
